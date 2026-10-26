@@ -89,6 +89,9 @@ class Settings(BaseSettings):
         default=200, validation_alias=AliasChoices("AI_SNIPPET_MAX_CHARS")
     )
     cors_origins: str = Field(default="*", validation_alias=AliasChoices("CORS_ORIGINS"))
+    # Absolute origin advertised in /opensearch.xml; empty means "derive from the
+    # incoming request", which is right behind Render's proxy.
+    public_base_url: str = Field(default="", validation_alias=AliasChoices("PUBLIC_BASE_URL"))
 
     @field_validator("log_level")
     @classmethod

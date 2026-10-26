@@ -22,7 +22,7 @@ from app import database
 from app.config import Settings, get_settings
 from app.errors import AppError, DatabaseError, error_envelope
 from app.indexer import scheduler as revalidate_scheduler
-from app.routes import health, retrieve, search
+from app.routes import health, opensearch, retrieve, search
 from app.services import live_retrieval, search_service
 
 logger = logging.getLogger(__name__)
@@ -87,12 +87,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     search_service.configure(http_client, settings)
 
-    # Stale-while-revalidate runs off the request path, one pass at a time.
+    # Both workers run off the request path, one pass at a time:
+    #   - revalidation keeps indexed pages fresh
+    #   - the backlog worker turns missed queries into indexed documents
     revalidate_scheduler.start()
+    revalidate_scheduler.start_backlog_worker()
 
     try:
         yield
     finally:
+        await revalidate_scheduler.stop_backlog_worker()
         await revalidate_scheduler.stop()
         await search_service.drain_background_writes()
         await http_client.aclose()
@@ -124,6 +128,7 @@ def create_app() -> FastAPI:
     )
 
     application.include_router(health.router)
+    application.include_router(opensearch.router)
     application.include_router(search.router)
     application.include_router(retrieve.router)
 
