@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.crawler.crawler import RobotsCache, fetch_page
+from app.crawler.crawler import RobotsCache, fetch_page, fetch_page_status
 from app.indexer.discovery import discover_domains, is_indian_authoritative
 from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
@@ -139,19 +139,32 @@ async def crawl_seed(
             report.skip(url, "robots_disallowed")
             continue
 
-        fetched = await fetch_page(client, url, settings)
+        html, status = await fetch_page_status(client, url, settings)
         report.fetched += 1
-        if fetched is None:
-            logger.info("SEED FETCHED: domain %s returned no response", urlparse(url).netloc or url)
-            report.skip(url, "fetch_failed")
-            continue
-        logger.info(
-            "SEED FETCHED: domain %s returned status %s", urlparse(url).netloc or url, fetched[1]
-        )
+        host = urlparse(url).netloc or url
+        logger.info("SEED FETCHED: domain %s returned status %s", host, status or "no response")
 
-        html, status = fetched
+        if html is None:
+            # A refused or unreachable domain still exists. Persist its root
+            # rather than discarding the seed — only invalid syntax is skipped.
+            reason = f"status_{status}" if status else "network_error"
+            report.skip(url, reason)
+            if url == normalise_url(seed.url):
+                document = fallback_document(
+                    url,
+                    label=seed.label,
+                    category=seed.category,
+                    http_status=status or 0,
+                    use_hostname=True,
+                )
+                if document is not None:
+                    logger.info(
+                        "persisting hostname root for %s (reason: %s)", _seed_domain(seed), reason
+                    )
+                    documents.append(document)
+            continue
         document, reason = extract_document_with_reason(
-            url, html, http_status=status, category=seed.category
+            url, html, http_status=status or 200, category=seed.category
         )
         if document is None:
             report.skip(url, reason or "not_extracted")

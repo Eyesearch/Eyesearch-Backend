@@ -429,6 +429,7 @@ def fallback_document(
     label: str | None = None,
     category: str | None = None,
     http_status: int = 200,
+    use_hostname: bool = False,
 ) -> ExtractedDocument | None:
     """A root record built from the hostname when a page yields no extract.
 
@@ -445,7 +446,11 @@ def fallback_document(
     domain_label = host.removeprefix("www.")
     words = [part for part in domain_label.split(".") if part]
     guess = " ".join(part.capitalize() for part in words[:-1]) or domain_label
-    title = truncate(strip_artefacts(label or guess) or domain_label, settings.title_max_chars)
+    if use_hostname:
+        # A domain that refused us still exists: the hostname is the honest title.
+        title = truncate(domain_label, settings.title_max_chars)
+    else:
+        title = truncate(strip_artefacts(label or guess) or domain_label, settings.title_max_chars)
 
     document = ExtractedDocument(
         url=normalised,
