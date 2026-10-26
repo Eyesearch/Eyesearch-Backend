@@ -262,6 +262,14 @@ whole row fits. A real page comes out around 0.3–1 KB.
   cart/checkout paths, pagination (`/page/2`, `?page=3`), long dynamic query
   chains, repository `owner/repo` loops, and non-document extensions.
 
+**Result cache keying** — `search_records` is keyed by
+`UNIQUE (query_key, url)` where `query_key = sha256(" ".join(q.split()).lower())[:40]`.
+Two queries can cache the same URL without one taking it from the other, and a
+query can only ever read rows written for itself — the lookup is
+`WHERE query_key = ?`, never a shared or partial key. A pre-existing table with
+the old `url UNIQUE` constraint is dropped and recreated on startup (it is a
+cache, and dropping it also clears rows poisoned by the old matching bug).
+
 **Schema** (applied at startup with the rest of the DDL):
 
 ```sql
