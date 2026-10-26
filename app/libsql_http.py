@@ -187,6 +187,7 @@ class TursoHTTPClient:
         self._timeout = timeout
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        self.last_errors: list[str] = []
 
     @property
     def endpoint(self) -> str:
@@ -202,6 +203,8 @@ class TursoHTTPClient:
     # from the log instead of by inference.
     _COUNTS: dict[str, int] = {}
     _TOTAL = 0
+    _strict: bool = True
+    last_errors: list[str]
 
     @classmethod
     def _record(cls, requests: list[dict[str, Any]]) -> None:
@@ -236,6 +239,7 @@ class TursoHTTPClient:
         except Exception as exc:
             raise DatabaseError(f"libsql http returned non-JSON: {response.text[:200]}") from exc
 
+        self.last_errors = []
         steps = payload.get("results") if isinstance(payload, dict) else None
         # Turso answers 200 OK even when a statement inside the batch failed, so
         # every step has to be inspected. This is the difference between "the
@@ -247,10 +251,14 @@ class TursoHTTPClient:
                     sql = ""
                     if index < len(requests):
                         sql = str(requests[index].get("stmt", {}).get("sql", "")).strip().splitlines()[0][:120]
-                    raise DatabaseError(
+                    message = (
                         f"libsql step {index} failed: {error.get('message') or error} "
                         f"(statement: {sql})"
                     )
+                    self.last_errors.append(message)
+                    if getattr(self, "_strict", True):
+                        raise DatabaseError(message)
+                    logger.error("%s", message)
         return parse_pipeline_response(payload)
 
     async def execute(self, sql: str, params: Sequence[Any] | None = None) -> ResultSet:
@@ -266,8 +274,20 @@ class TursoHTTPClient:
         results = await self._post(requests)
         return results[0] if results else ResultSet()
 
-    async def batch(self, statements: Iterable[Any]) -> list[ResultSet]:
-        """Run `[(sql, params), ...]` in one pipeline round trip."""
+    async def batch(
+        self,
+        statements: Iterable[Any],
+        *,
+        strict: bool = True,
+    ) -> list[ResultSet]:
+        """Run `[(sql, params), ...]` in one pipeline round trip.
+
+        With `strict=False` a failing step does not discard the whole response:
+        the successful steps are still returned and the caller decides what to do
+        with the errors (see `last_errors`). Each `execute` step is its own
+        implicit transaction, so a later failure cannot undo an earlier commit —
+        but a caller that throws the response away would never know that.
+        """
         requests: list[dict[str, Any]] = []
         for statement in statements:
             if isinstance(statement, (list, tuple)) and len(statement) == 2:
@@ -285,7 +305,11 @@ class TursoHTTPClient:
             )
         if not requests:
             return []
-        return await self._post(requests)
+        self._strict = strict
+        try:
+            return await self._post(requests)
+        finally:
+            self._strict = True
 
     async def close(self) -> None:
         if self._client is not None:
