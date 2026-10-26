@@ -69,18 +69,38 @@ async def fetch_page(
     client: httpx.AsyncClient,
     url: str,
     settings: EngineSettings,
+    *,
+    etag: str | None = None,
+    last_modified: str | None = None,
 ) -> tuple[str, int] | None:
-    """Fetch one page, capped by bytes and content type. None means skip."""
+    """Fetch one page, capped by bytes and content type. None means skip.
+
+    Pass `etag` / `last_modified` to make the request conditional; a 304 comes
+    back as `None` here, which the revalidation worker treats as "unchanged" and
+    answers with zero database writes.
+    """
     if _is_blocked(url):
         return None
+
+    headers = {
+        "User-Agent": settings.crawl_user_agent,
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
     try:
         async with client.stream(
             "GET",
             url,
-            headers={"User-Agent": settings.crawl_user_agent, "Accept": "text/html,application/xhtml+xml"},
+            headers=headers,
             timeout=settings.crawl_timeout_seconds,
             follow_redirects=True,
         ) as response:
+            if response.status_code == 304:
+                return None
             content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
             if response.status_code >= 400:
                 return None
