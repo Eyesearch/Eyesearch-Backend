@@ -133,6 +133,7 @@ async def crawl_seed(
         if url in seen or not is_indexable(url):
             continue
         seen.add(url)
+        logger.info("SEED START: processing domain %s", urlparse(url).netloc or url)
 
         if settings.respect_robots and not await robots.allowed(url):
             report.skip(url, "robots_disallowed")
@@ -141,8 +142,12 @@ async def crawl_seed(
         fetched = await fetch_page(client, url, settings)
         report.fetched += 1
         if fetched is None:
+            logger.info("SEED FETCHED: domain %s returned no response", urlparse(url).netloc or url)
             report.skip(url, "fetch_failed")
             continue
+        logger.info(
+            "SEED FETCHED: domain %s returned status %s", urlparse(url).netloc or url, fetched[1]
+        )
 
         html, status = fetched
         document, reason = extract_document_with_reason(
@@ -153,7 +158,7 @@ async def crawl_seed(
             logger.info("skipped: %s (%s)", reason or "not_extracted", url)
             # The seed's own entry page must persist even when extraction fails:
             # a root record from the hostname beats losing the domain entirely.
-            if url == normalise_url(seed.url) and status < 400:
+            if url == normalise_url(seed.url) and html.strip():
                 document = fallback_document(
                     url, label=seed.label, category=seed.category, http_status=status
                 )
@@ -232,6 +237,10 @@ async def run_seed_pass(
         for finished in asyncio.as_completed(tasks):
             seed, seed_report, documents = await finished
             if documents:
+                logger.info(
+                    "PREPARING DB WRITE: domain %s with %d pages",
+                    _seed_domain(seed), len(documents),
+                )
                 try:
                     written = await index.replace_documents(
                         [document.as_row() for document in documents]

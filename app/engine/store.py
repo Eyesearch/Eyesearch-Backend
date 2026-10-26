@@ -393,6 +393,10 @@ class IndexStore:
                 outcome["sitelinks"] += 1
 
         if statements:
+            logger.info(
+                "PREPARING DB WRITE: %d pages for %d sites (%d sitelinks)",
+                outcome["pages"], len(site_ids), outcome["sitelinks"],
+            )
             try:
                 await client.batch(statements)
             except Exception as exc:
