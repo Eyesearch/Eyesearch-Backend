@@ -11,6 +11,8 @@ import logging
 
 import pytest
 
+import libsql_client
+
 from app import database
 from app.config import Settings
 from app.engine.autoingest import auto_ingest
@@ -38,13 +40,53 @@ def test_describe_target_distinguishes_remote_from_local() -> None:
     assert local["url"] == "file:./local.db"
 
 
+def test_libsql_and_ws_schemes_are_rewritten_to_https() -> None:
+    """Turso's cloud speaks Hrana over HTTPS; libsql:// and wss:// mean WebSocket."""
+    assert database.normalise_url_scheme("libsql://db.turso.io") == "https://db.turso.io"
+    assert database.normalise_url_scheme("wss://db.turso.io") == "https://db.turso.io"
+    assert database.normalise_url_scheme("ws://db.turso.io") == "http://db.turso.io"
+    assert database.normalise_url_scheme("https://db.turso.io") == "https://db.turso.io"
+    assert database.normalise_url_scheme("file:./local.db") == "file:./local.db"
+    assert database.normalise_url_scheme("  libsql://x.turso.io  ") == "https://x.turso.io"
+
+
+async def test_connect_selects_the_http_backend_for_a_libsql_url() -> None:
+    """The bug this guards: libsql:// picks the WebSocket client, which Turso 400s."""
+    raw = libsql_client.create_client(url="libsql://db.turso.io", auth_token="token")
+    assert type(raw).__name__ == "HranaClient"  # the WebSocket backend
+    await raw.close()
+
+    settings = Settings(
+        turso_db_url="libsql://eyesearch-db-eyesearch.aws-ap-south-1.turso.io",
+        turso_auth_token="token",
+    )
+    client = await database.connect(settings)
+    assert type(client).__name__ == "HttpClient", type(client).__name__
+    assert isinstance(client, libsql_client.http.HttpClient)
+
+    # The transport itself: HTTPS URL, and the token as a standard Bearer header.
+    # These are private attributes, deliberately inspected: they are the thing
+    # that was wrong (a WebSocket URL Turso answered with HTTP 400).
+    assert client._url.startswith("https://")
+    assert client._session.headers["authorization"] == "Bearer token"
+
+
+def test_describe_target_reports_the_effective_scheme() -> None:
+    target = database.describe_target(
+        Settings(turso_db_url="libsql://db.turso.io", turso_auth_token="token")
+    )
+    assert target["url"].startswith("https://"), target["url"]
+    assert target["scheme"] == "https"
+    assert target["kind"] == "remote"
+
+
 def test_safe_url_strips_credentials_and_tokens() -> None:
     assert database.safe_url("libsql://user:pass@db.turso.io") == "libsql://db.turso.io"
 
     # Assembled at runtime: a literal credential-shaped URL in a source file gets
     # redacted by tooling, and a redacted test is worse than no test.
     param = "auth" + "Token"
-    url = f"https://db.turso.io/x?{param}=abc&other=1"
+    url = f"https://db.turso.io/x"
     redacted = database.safe_url(url)
     assert redacted.endswith(f"{param}=***&other=1"), redacted
     assert "abc" not in redacted
