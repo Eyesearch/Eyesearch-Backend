@@ -40,7 +40,7 @@ def test_describe_target_distinguishes_remote_from_local() -> None:
 
 def test_safe_url_strips_credentials_and_tokens() -> None:
     assert database.safe_url("libsql://user:pass@db.turso.io") == "libsql://db.turso.io"
-    assert database.safe_url("https://db.turso.io/x").endswith("authToken=***&other=1")
+    assert database.safe_url("https://db.turso.io/x?authToken=abc&other=1").endswith("authToken=***&other=1")
 
 
 async def test_remote_url_without_token_is_refused() -> None:
