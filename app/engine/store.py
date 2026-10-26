@@ -163,6 +163,7 @@ class IndexStore:
 
     def __init__(self, settings: EngineSettings | None = None) -> None:
         self.settings = settings or get_engine_settings()
+        self._backlog_kind: bool | None = None
 
     async def ensure_schema(self) -> None:
         from app import database
@@ -247,7 +248,15 @@ class IndexStore:
                 )
             )
         try:
-            await client.batch(site_statements)
+            # Sites commit on their own, in their own request: a failure writing
+            # pages later can never take the site rows with it.
+            if hasattr(client, "batch"):
+                try:
+                    await client.batch(site_statements, strict=False)  # type: ignore[call-arg]
+                except TypeError:
+                    await client.batch(site_statements)
+            else:  # pragma: no cover - defensive
+                await client.batch(site_statements)
         except Exception as exc:
             logger.error(
                 "site write failed for %s: %s: %s (statement: %s)",
@@ -255,6 +264,7 @@ class IndexStore:
                 _SITE_UPSERT.strip().splitlines()[0][:80],
             )
             raise DatabaseError(f"site write failed: {exc}") from exc
+        logger.info("SITES COMMITTED: %d site rows written", len(site_statements))
 
         site_ids: dict[str, int] = {}
         for host in hosts:
@@ -398,7 +408,18 @@ class IndexStore:
                 outcome["pages"], len(site_ids), outcome["sitelinks"],
             )
             try:
-                await client.batch(statements)
+                if hasattr(client, "batch"):
+                    try:
+                        await client.batch(statements, strict=False)  # type: ignore[call-arg]
+                    except TypeError:
+                        await client.batch(statements)
+                else:  # pragma: no cover - defensive
+                    await client.batch(statements)
+                errors = list(getattr(client, "last_errors", []) or [])
+                if errors:
+                    outcome["failed_statements"] = len(errors)
+                    for message in errors[:3]:
+                        logger.error("page write step failed: %s", message)
             except Exception as exc:
                 logger.error(
                     "page write failed for %s: %s: %s (statement: %s)",
@@ -700,14 +721,25 @@ class IndexStore:
             return
         client = get_client()
         try:
-            await execute_safe(
-                """
-                INSERT INTO crawl_backlog (query, kind, hits, status, created_at)
-                VALUES (?, 'query', ?, 'pending', CURRENT_TIMESTAMP)
-                ON CONFLICT(query) DO UPDATE SET hits = crawl_backlog.hits + 1, status = 'pending'
-                """,
-                [cleaned, max(0, hits)],
-            )
+            if await self._has_backlog_kind():
+                await execute_safe(
+                    """
+                    INSERT INTO crawl_backlog (query, kind, hits, status, created_at)
+                    VALUES (?, 'query', ?, 'pending', CURRENT_TIMESTAMP)
+                    ON CONFLICT(query) DO UPDATE SET hits = crawl_backlog.hits + 1, status = 'pending'
+                    """,
+                    [cleaned, max(0, hits)],
+                )
+            else:
+                # A database that predates the `kind` column still takes queries.
+                await execute_safe(
+                    """
+                    INSERT INTO crawl_backlog (query, hits, status, created_at)
+                    VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)
+                    ON CONFLICT(query) DO UPDATE SET hits = crawl_backlog.hits + 1, status = 'pending'
+                    """,
+                    [cleaned, max(0, hits)],
+                )
         except Exception as exc:
             logger.warning("backlog enqueue failed for %r: %s", query, exc)
 
@@ -720,8 +752,9 @@ class IndexStore:
         ).strftime("%Y-%m-%d %H:%M:%S")
         client = get_client()
         try:
+            clause = await self._kind_clause("query")
             result = await execute_safe(
-                "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'query' "
+                f"SELECT 1 FROM crawl_backlog WHERE query = ?{clause} "
                 "AND status = 'pending' AND created_at >= ? LIMIT 1",
                 [cleaned, cutoff],
             )
@@ -732,8 +765,9 @@ class IndexStore:
 
     async def pending_backlog(self, limit: int = 20) -> list[str]:
         client = get_client()
+        clause = await self._kind_clause("query")
         result = await execute_safe(
-            "SELECT query FROM crawl_backlog WHERE status = 'pending' AND kind = 'query' "
+            f"SELECT query FROM crawl_backlog WHERE status = 'pending'{clause} "
             "ORDER BY hits DESC, created_at ASC LIMIT ?",
             [limit],
         )
@@ -741,11 +775,34 @@ class IndexStore:
 
     async def mark_backlog_processed(self, query: str) -> None:
         client = get_client()
+        clause = await self._kind_clause("query")
         await execute_safe(
             "UPDATE crawl_backlog SET status = 'processed', processed_at = CURRENT_TIMESTAMP "
-            "WHERE query = ? AND kind = 'query'",
+            f"WHERE query = ?{clause}",
             [query.strip().lower()],
         )
+
+    async def _has_backlog_kind(self) -> bool:
+        """Whether `crawl_backlog` carries the `kind` column (cached per process)."""
+        if self._backlog_kind is not None:
+            return self._backlog_kind
+        try:
+            result = await execute_safe("PRAGMA table_info(crawl_backlog)")
+            columns = {str(row[1]).lower() for row in getattr(result, "rows", ()) or ()}
+            self._backlog_kind = "kind" in columns
+            if not self._backlog_kind:
+                logger.error(
+                    "SCHEMA MISMATCH: crawl_backlog has no `kind` column — falling back to "
+                    "the legacy insert. Run the app once so the migration can apply."
+                )
+        except Exception as exc:
+            logger.warning("could not inspect crawl_backlog: %s", exc)
+            self._backlog_kind = False
+        return self._backlog_kind
+
+    async def _kind_clause(self, kind: str) -> str:
+        """The `kind` filter, or nothing at all on a database that lacks it."""
+        return f" AND kind = '{kind}'" if await self._has_backlog_kind() else ""
 
     async def site_exists(self, host: str) -> bool:
         """True when this host is already indexed (strict deduplication)."""
@@ -764,6 +821,10 @@ class IndexStore:
         """Add a discovered domain to the backlog. False when already queued."""
         cleaned = (host or "").strip().lower().removeprefix("www.")
         if not cleaned or not is_indexable(f"https://{cleaned}/"):
+            return False
+        if not await self._has_backlog_kind():
+            # No `kind` column means no domain queue on this database; the site
+            # table still works, so nothing is lost — it just is not queued.
             return False
         client = get_client()
         try:
@@ -784,6 +845,8 @@ class IndexStore:
 
     async def pending_domains(self, limit: int = 10) -> list[str]:
         client = get_client()
+        if not await self._has_backlog_kind():
+            return []
         result = await execute_safe(
             "SELECT query FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending' "
             "ORDER BY created_at ASC LIMIT ?",
@@ -793,6 +856,8 @@ class IndexStore:
 
     async def mark_domain_processed(self, host: str, *, status: str = "processed") -> None:
         client = get_client()
+        if not await self._has_backlog_kind():
+            return
         await execute_safe(
             "UPDATE crawl_backlog SET status = ?, processed_at = CURRENT_TIMESTAMP "
             "WHERE query = ? AND kind = 'domain'",
@@ -800,7 +865,8 @@ class IndexStore:
         )
 
     async def pending_domain_count(self) -> int:
-        client = get_client()
+        if not await self._has_backlog_kind():
+            return 0
         result = await execute_safe(
             "SELECT COUNT(*) FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending'"
         )
