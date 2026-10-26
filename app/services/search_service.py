@@ -17,6 +17,7 @@ import httpx
 
 from app import database
 from app.config import Settings, get_settings
+from app.engine.autoingest import auto_ingest
 from app.engine.config import get_engine_settings
 from app.engine.store import get_store
 from app.errors import DatabaseError
@@ -33,6 +34,9 @@ from app.services import formatter, live_retrieval
 from app.services.live_retrieval import RawResult, RetrievalOutcome
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on the inline index write that follows a first-time live fetch.
+AUTO_INGEST_TIMEOUT_S = 2.0
 
 # Strong references so fire-and-forget cache writes are not garbage collected
 # mid-flight; the done-callback releases each one.
@@ -73,6 +77,7 @@ class Acquisition:
     # "live" = external providers.
     source: str = "live"
     index_hits: int = 0
+    auto_ingested: int = 0
 
     @property
     def degraded(self) -> bool:
@@ -138,13 +143,14 @@ class SearchService:
 
     # -- acquisition -----------------------------------------------------
     async def acquire(self, query: str, limit: int) -> Acquisition:
-        """Index first, then the Turso cache, then the live chain.
+        """Live-fetch-once, cache-forever.
 
-        Our own index is the preferred source: if it returns at least
-        `INDEX_THRESHOLD` documents the query is answered entirely from it. A
-        sparse miss falls through to the cache and the external providers, and
-        the unanswered query is queued for the crawler so the next identical
-        query can be served locally.
+        1. Query `documents_fts`. Any hit is served locally — no outbound call.
+        2. Only on zero local hits does the request touch the providers, and the
+           results are served immediately (source `live`).
+        3. The same results are then ingested into `documents_fts` (2 KB budget,
+           dedupe and domain caps unchanged), so the next identical query is a
+           step-1 hit.
         """
         normalized = " ".join(query.split())
         acquisition = Acquisition(query=normalized)
@@ -200,16 +206,25 @@ class SearchService:
             acquisition.source = "cache"
             return acquisition
 
-        # 2. The request path never calls an external provider. A local miss is
-        # queued for the crawler and answered immediately, which is what keeps
-        # the fast path at single-digit milliseconds.
+        # 2. Nothing local: a strictly-local deployment stops here and queues the
+        # query for the crawler instead of calling out.
         if not engine.live_search_enabled:
             _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
             acquisition.source = "queued"
             acquisition.total_estimate = 0
             return acquisition
 
-        # 2b. Emergency escape hatch only (LIVE_SEARCH_ENABLED=true).
+        # 3. Guard: if we already tried live for this query recently and queued
+        #    it, do not hammer the providers again — the crawler owns it now.
+        try:
+            if await get_store().recently_queued(normalized):
+                acquisition.source = "queued"
+                acquisition.total_estimate = 0
+                return acquisition
+        except Exception as exc:
+            logger.debug("backlog guard skipped for %r: %s", normalized, exc)
+
+        # 4. First time this topic has been searched: live fetch, serve at once.
         outcome: RetrievalOutcome = await live_retrieval.retrieve(
             normalized,
             limit,
@@ -221,13 +236,26 @@ class SearchService:
         acquisition.failed.extend(outcome.failed)
         acquisition.total_estimate = len(outcome.results)
 
-        # 3. persist without blocking the response
+        # 5. Keep the result cache warm as before.
         if outcome.results:
             _schedule_write(_persist(normalized, _raw_to_records(outcome.results, self._settings)))
 
-        # 4. the index could not answer this query, so queue it for the crawler —
-        # whether or not the external providers happened to return anything.
-        if local_hits < engine.index_threshold:
+        # 6. Write the live results into the index so the next query is local.
+        #    Bounded so a slow write can never hold the response hostage; the
+        #    write itself is one batched statement, so this is normally ~ms.
+        if outcome.results and engine.auto_ingest_enabled:
+            try:
+                async with asyncio.timeout(AUTO_INGEST_TIMEOUT_S):
+                    ingest = await auto_ingest(outcome.results)
+                acquisition.auto_ingested = int(ingest.get("inserted", 0))
+            except (TimeoutError, asyncio.TimeoutError):
+                logger.warning("auto-ingest timed out for %r", normalized)
+            except Exception as exc:  # ingestion must never fail the request
+                logger.warning("auto-ingest failed for %r: %s", normalized, exc)
+
+        # 7. If nothing could be indexed (all results filtered by the crawl
+        #    rules), leave the query for the crawler to resolve properly.
+        if acquisition.auto_ingested == 0:
             _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
 
         acquisition.source = "live"
@@ -270,6 +298,7 @@ class SearchService:
             cache_hit=acquisition.cache_hit,
             source=acquisition.source,
             index_hits=acquisition.index_hits,
+            auto_ingested=acquisition.auto_ingested,
             providers=acquisition.providers,
             results=cards,
         )
@@ -296,6 +325,7 @@ class SearchService:
             total_hits=max(acquisition.index_hits, len(results), acquisition.total_estimate),
             took_ms=int((time.perf_counter() - started) * 1000),
             source=source,
+            auto_ingested=acquisition.auto_ingested,
             results=results,
         )
 

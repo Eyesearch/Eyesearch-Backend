@@ -422,6 +422,27 @@ class IndexStore:
         )
         return [str(row[0]) for row in getattr(result, "rows", ()) or ()]
 
+    async def recently_queued(self, query: str, within_minutes: int = 10) -> bool:
+        """True when we already tried live for this query and queued it recently.
+
+        Stops a hopeless query from hammering the providers on every retry; the
+        crawler owns it from here.
+        """
+        cleaned = (query or "").strip().lower()
+        if not cleaned:
+            return False
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max(1, within_minutes))).strftime("%Y-%m-%d %H:%M:%S")
+        client = get_client()
+        try:
+            result = await client.execute(
+                "SELECT 1 FROM crawl_backlog WHERE query = ? AND status = 'pending' AND created_at >= ? LIMIT 1",
+                [cleaned, cutoff],
+            )
+            return bool(getattr(result, "rows", ()))
+        except Exception as exc:
+            logger.debug("backlog probe failed for %r: %s", query, exc)
+            return False
+
     async def mark_backlog_processed(self, query: str) -> None:
         client = get_client()
         await client.execute(
