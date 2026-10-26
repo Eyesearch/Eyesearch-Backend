@@ -423,6 +423,51 @@ def extract_document_with_reason(
     return document, ""
 
 
+def fallback_document(
+    url: str,
+    *,
+    label: str | None = None,
+    category: str | None = None,
+    http_status: int = 200,
+) -> ExtractedDocument | None:
+    """A root record built from the hostname when a page yields no extract.
+
+    A seed domain that answered 200 must still be indexed: the root record is the
+    thing the site card is built from, and sitelinks are optional. The title comes
+    from the seed's label when we have one, else the hostname.
+    """
+    normalised = normalise_url(url)
+    host = urlparse(normalised).netloc
+    if not host or not is_indexable(normalised):
+        return None
+
+    settings = get_engine_settings()
+    domain_label = host.removeprefix("www.")
+    words = [part for part in domain_label.split(".") if part]
+    guess = " ".join(part.capitalize() for part in words[:-1]) or domain_label
+    title = truncate(strip_artefacts(label or guess) or domain_label, settings.title_max_chars)
+
+    document = ExtractedDocument(
+        url=normalised,
+        canonical_url=normalised,
+        domain=host,
+        root_domain=root_domain(normalised),
+        domain_class=domain_class(normalised),
+        title=title,
+        snippet=f"{title} — official website",
+        content=f"{title} — official website at {domain_label}.",
+        language="en",
+        favicon_url=f"https://{host}/favicon.ico",
+        category=category or infer_category(normalised),
+        headings=title,
+        nav_terms="",
+        site_terms=truncate(f"{root_domain(normalised).replace('.', ' ')} {title}", 120),
+        category_terms=category or infer_category(normalised),
+        url_terms=url_terms(normalised),
+    )
+    return document.fit_to_budget(settings.max_payload_bytes)
+
+
 def extract_document(
     url: str,
     html: str,
@@ -458,6 +503,7 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 
 __all__ = [
+    "fallback_document",
     "extract_document_with_reason",
     "SKIP_TOO_SHORT",
     "SKIP_NOT_INDEXABLE",

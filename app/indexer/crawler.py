@@ -29,7 +29,12 @@ from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
 from app.database import execute_safe, get_client
 from app.engine.store import get_store
-from app.engine.text import ExtractedDocument, extract_document_with_reason, extract_links
+from app.engine.text import (
+    ExtractedDocument,
+    extract_document_with_reason,
+    extract_links,
+    fallback_document,
+)
 from app.engine.urls import infer_category, is_indexable, normalise_url
 
 logger = logging.getLogger(__name__)
@@ -146,7 +151,18 @@ async def crawl_seed(
         if document is None:
             report.skip(url, reason or "not_extracted")
             logger.info("skipped: %s (%s)", reason or "not_extracted", url)
-            continue
+            # The seed's own entry page must persist even when extraction fails:
+            # a root record from the hostname beats losing the domain entirely.
+            if url == normalise_url(seed.url) and status < 400:
+                document = fallback_document(
+                    url, label=seed.label, category=seed.category, http_status=status
+                )
+                if document is not None:
+                    logger.info(
+                        "using fallback metadata for %s (reason: %s)", _seed_domain(seed), reason
+                    )
+            if document is None:
+                continue
 
         documents.append(document)
         report.extracted += 1
@@ -435,6 +451,7 @@ async def _main() -> None:
     parser.add_argument("--category", action="append", choices=list(CATEGORIES))
     parser.add_argument("--list", action="store_true", help="print the seed list and exit")
     parser.add_argument("--verify", action="store_true", help="print index and search verification")
+    parser.add_argument("--probe", action="store_true", help="check the database is reachable and writable")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
@@ -457,7 +474,12 @@ async def _main() -> None:
     await database.connect(settings)
     try:
         await database.initialize_schema()
-        if args.verify:
+        if args.probe:
+            report = await database.verify_database()
+            print(report)
+            if not report.get("writable"):
+                raise SystemExit(1)
+        elif args.verify:
             await verify_index()
         else:
             print(await run_seed_pass(args.category, settings=engine_settings))
