@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from app.engine.config import get_engine_settings
-from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
+from app.engine.urls import domain_class, infer_category, is_indexable, normalise_url, root_domain
 
 _WS = re.compile(r"\s+")
 _KANNADA = re.compile(r"[\u0C80-\u0CFF]")
@@ -49,12 +49,13 @@ class ExtractedDocument:
     content: str
     language: str
     favicon_url: str | None
+    category: str = "web"
 
     def payload_bytes(self) -> int:
         """UTF-8 size of what will actually be stored for this page."""
         fields = (
             self.url, self.canonical_url, self.domain, self.root_domain,
-            self.domain_class, self.title, self.snippet, self.content,
+            self.domain_class, self.category, self.title, self.snippet, self.content,
             self.language, self.favicon_url or "",
         )
         return sum(len(field.encode("utf-8")) for field in fields)
@@ -88,6 +89,7 @@ class ExtractedDocument:
             "content": self.content,
             "language": self.language,
             "favicon_url": self.favicon_url,
+            "category": self.category,
             "payload_bytes": self.payload_bytes(),
         }
 
@@ -113,6 +115,38 @@ def detect_language(text: str) -> str:
     if devanagari > 20:
         return "hi"
     return "en"
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
+
+
+def summarise(text: str, *, max_sentences: int = 4, max_chars: int = 1500) -> str:
+    """The 3–4 sentence factual summary we store instead of the page body.
+
+    Sentences are taken in order until the sentence budget or the character cap
+    is reached, so the summary always ends on a sentence boundary rather than
+    mid-clause. A page with no punctuation still yields a bounded string.
+    """
+    cleaned = strip_artefacts(text)
+    if not cleaned:
+        return ""
+
+    sentences = [part.strip() for part in _SENTENCE_END.split(cleaned) if part.strip()]
+    if not sentences:
+        return truncate(cleaned, max_chars)
+
+    kept: list[str] = []
+    total = 0
+    for sentence in sentences[: max(1, max_sentences)]:
+        if total + len(sentence) + 1 > max_chars and kept:
+            break
+        kept.append(sentence)
+        total += len(sentence) + 1
+
+    summary = " ".join(kept)
+    if len(summary) > max_chars:
+        summary = truncate(summary, max_chars)
+    return summary
 
 
 def truncate(text: str, limit: int) -> str:
@@ -150,7 +184,13 @@ def _body_text(soup: BeautifulSoup) -> str:
     return best
 
 
-def extract_document(url: str, html: str, *, http_status: int = 200) -> ExtractedDocument | None:
+def extract_document(
+    url: str,
+    html: str,
+    *,
+    http_status: int = 200,
+    category: str | None = None,
+) -> ExtractedDocument | None:
     """Extract one bounded document, or None when the page should not be indexed."""
     if not html or len(html.strip()) < 80:
         return None
@@ -197,6 +237,7 @@ def extract_document(url: str, html: str, *, http_status: int = 200) -> Extracte
     snippet = truncate(snippet, settings.snippet_max_chars)
 
     document = ExtractedDocument(
+        category=category or infer_category(url),
         url=normalise_url(url),
         canonical_url=canonical_url,
         domain=urlparse(canonical_url).netloc,
@@ -204,7 +245,11 @@ def extract_document(url: str, html: str, *, http_status: int = 200) -> Extracte
         domain_class=domain_class(canonical_url),
         title=title,
         snippet=snippet,
-        content=truncate(body, settings.content_max_chars),
+        content=summarise(
+            body,
+            max_sentences=settings.summary_max_sentences,
+            max_chars=settings.content_max_chars,
+        ),
         language=detect_language(f"{title} {body}"),
         favicon_url=favicon,
     )
@@ -232,6 +277,7 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 
 __all__ = [
+    "summarise",
     "ExtractedDocument",
     "extract_document",
     "extract_links",

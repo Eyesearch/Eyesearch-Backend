@@ -27,10 +27,38 @@ _SAFE_TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F\u0C80-\u0CFF]+")
 
 _INSERT_DOCUMENT = """
 INSERT INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, title, snippet, content,
-    language, favicon_url, payload_bytes, content_hash, etag, last_modified,
-    last_checked_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
+    content, language, favicon_url, payload_bytes, content_hash,
+    last_checked_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_UPSERT_DOCUMENT = """
+INSERT INTO documents (
+    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
+    content, language, favicon_url, payload_bytes, content_hash, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(url) DO UPDATE SET
+    canonical_url = excluded.canonical_url,
+    domain = excluded.domain,
+    root_domain = excluded.root_domain,
+    domain_class = excluded.domain_class,
+    category = excluded.category,
+    title = excluded.title,
+    snippet = excluded.snippet,
+    content = excluded.content,
+    language = excluded.language,
+    favicon_url = excluded.favicon_url,
+    payload_bytes = excluded.payload_bytes,
+    content_hash = excluded.content_hash,
+    updated_at = excluded.updated_at
+"""
+
+_REPLACE_DOCUMENT = """
+INSERT OR REPLACE INTO documents (
+    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
+    content, language, favicon_url, payload_bytes, content_hash, updated_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPDATE_DOCUMENT = """
@@ -41,35 +69,29 @@ UPDATE documents SET
 WHERE url = ?
 """
 
-_DELETE_FTS = "DELETE FROM documents_fts WHERE url = ?"
-_INSERT_FTS = """
-INSERT INTO documents_fts (url, title, snippet, content, language, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
-"""
+# bm25 weights, in documents_fts column order: title, snippet, content, url.
+# A title hit is worth ten times a body hit, so a footer mention can never
+# outrank a page that is actually about the term.
+_BM25_WEIGHTS = "10.0, 1.5, 0.5, 8.0"
 
-# Column weights for bm25, in the order the columns are declared in
-# documents_fts: url, title, snippet, content, language. A hit in the title is
-# worth ten times a hit in the body, so a footer mention can never outrank a
-# page that is actually about the term.
-_BM25_WEIGHTS = "8.0, 10.0, 1.5, 0.5, 0.0"
-
+# The FTS table is external-content, so row data comes from `documents` via rowid.
 _SEARCH_FTS = f"""
-SELECT f.url, f.title, f.snippet, f.language, f.updated_at,
-       bm25(documents_fts, {_BM25_WEIGHTS}) AS rank,
-       d.favicon_url AS favicon
-FROM documents_fts f
-LEFT JOIN documents d ON d.url = f.url
+SELECT d.url, d.title, d.snippet, d.language, d.updated_at, d.favicon_url AS favicon,
+       d.category, bm25(documents_fts, {_BM25_WEIGHTS}) AS rank
+FROM documents_fts
+JOIN documents d ON d.rowid = documents_fts.rowid
 WHERE documents_fts MATCH ?
 ORDER BY rank
 LIMIT ?
 """
 
 # Autocomplete: the document titles that match, most relevant first.
-_SUGGEST_FTS = """
-SELECT f.title
-FROM documents_fts f
+_SUGGEST_FTS = f"""
+SELECT d.title
+FROM documents_fts
+JOIN documents d ON d.rowid = documents_fts.rowid
 WHERE documents_fts MATCH ?
-ORDER BY bm25(documents_fts)
+ORDER BY bm25(documents_fts, {_BM25_WEIGHTS})
 LIMIT ?
 """
 
@@ -125,12 +147,13 @@ class IndexStore:
         self.settings = settings or get_engine_settings()
 
     async def ensure_schema(self) -> None:
-        client = get_client()
-        try:
-            await client.batch(list(ENGINE_SCHEMA))
-        except Exception as exc:
-            raise DatabaseError(f"index schema initialisation failed: {exc}") from exc
-        await self._apply_migrations()
+        """Create or migrate every index table. Delegates to the gateway schema.
+
+        One place owns DDL so a cold start and a migration cannot disagree.
+        """
+        from app import database
+
+        await database.initialize_schema()
 
     async def _apply_migrations(self) -> None:
         """Add columns introduced after the first release (idempotent)."""
@@ -174,12 +197,16 @@ class IndexStore:
             logger.warning("domain counts unavailable: %s", exc)
 
         statements: list[tuple[str, list[Any]]] = []
+        seen_urls: set[str] = set()
+
         for doc in documents:
             url = normalise_url(str(doc.get("url") or ""))
             title = str(doc.get("title") or "").strip()
             if not url or not title:
                 outcome["not_indexable"] += 1
                 continue
+            if url in seen_urls:
+                continue  # the same URL twice in one batch: last write wins below
             if not is_indexable(url):
                 outcome["not_indexable"] += 1
                 continue
@@ -194,73 +221,46 @@ class IndexStore:
                 outcome["domain_cap"] += 1
                 continue
 
+            already_present = False
             try:
                 probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [url])
                 already_present = bool(getattr(probe, "rows", ()))
             except Exception as exc:
                 logger.warning("duplicate probe failed for %s: %s", url, exc)
-                already_present = False
 
             if already_present and not upsert:
                 # The crawler's rule: a URL is indexed once, then revalidated.
                 outcome["duplicate"] += 1
                 continue
 
+            seen_urls.add(url)
             content = str(doc.get("content") or "")
-            if already_present:
-                statements.append(
-                    (
-                        _UPDATE_DOCUMENT,
-                        [
-                            doc.get("canonical_url") or url,
-                            doc.get("domain") or "",
-                            domain,
-                            doc.get("domain_class") or domain_class(url),
-                            title,
-                            doc.get("snippet") or "",
-                            content,
-                            doc.get("language") or "en",
-                            doc.get("favicon_url"),
-                            payload,
-                            _content_hash(title, str(doc.get("snippet") or "")),
-                            None,
-                            None,
-                            stamp,
-                            stamp,
-                            url,
-                        ],
-                    )
-                )
-                outcome["replaced"] += 1
+            common = [
+                url,
+                doc.get("canonical_url") or url,
+                doc.get("domain") or "",
+                domain,
+                doc.get("domain_class") or domain_class(url),
+                doc.get("category") or "web",
+                title,
+                doc.get("snippet") or "",
+                content,
+                doc.get("language") or "en",
+                doc.get("favicon_url"),
+                payload,
+                _content_hash(title, str(doc.get("snippet") or "")),
+                stamp,
+            ]
+
+            if upsert:
+                statements.append((_UPSERT_DOCUMENT, common))
+                outcome["replaced" if already_present else "inserted"] += 1
             else:
-                statements.append(
-                    (
-                        _INSERT_DOCUMENT,
-                        [
-                            url,
-                            doc.get("canonical_url") or url,
-                            doc.get("domain") or "",
-                            domain,
-                            doc.get("domain_class") or domain_class(url),
-                            title,
-                            doc.get("snippet") or "",
-                            content,
-                            doc.get("language") or "en",
-                            doc.get("favicon_url"),
-                            payload,
-                            _content_hash(title, str(doc.get("snippet") or "")),
-                            None,
-                            None,
-                            None,   # last_checked_at: a crawl is not a revalidation
-                            stamp,
-                        ],
-                    )
-                )
+                # `common` ends with updated_at (an upsert column); a plain insert
+                # carries last_checked_at and created_at instead.
+                statements.append((_INSERT_DOCUMENT, common[:-1] + [None, stamp]))
                 outcome["inserted"] += 1
-            statements.append((_DELETE_FTS, [url]))
-            statements.append(
-                (_INSERT_FTS, [url, title, doc.get("snippet") or "", content, doc.get("language") or "en", stamp])
-            )
+
             if not already_present:
                 counts[domain] = counts.get(domain, 0) + 1
 
@@ -315,13 +315,63 @@ class IndexStore:
                             key,
                         ],
                     ),
-                    (_DELETE_FTS, [key]),
-                    (_INSERT_FTS, [key, title, snippet, content, document.get("language") or "en", stamp]),
                 ]
             )
         except Exception as exc:
             raise DatabaseError(f"index update failed: {exc}") from exc
         return True
+
+    async def replace_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
+        """`INSERT OR REPLACE` into `documents`; the triggers keep FTS in sync."""
+        outcome = {"stored": 0, "not_indexable": 0, "over_budget": 0}
+        if not documents:
+            return outcome
+
+        client = get_client()
+        stamp = _now()
+        statements: list[tuple[str, list[Any]]] = []
+
+        for doc in documents:
+            url = normalise_url(str(doc.get("url") or ""))
+            title = str(doc.get("title") or "").strip()
+            if not url or not title or not is_indexable(url):
+                outcome["not_indexable"] += 1
+                continue
+            payload = int(doc.get("payload_bytes") or 0)
+            if payload > self.settings.max_payload_bytes:
+                outcome["over_budget"] += 1
+                continue
+
+            statements.append(
+                (
+                    _REPLACE_DOCUMENT,
+                    [
+                        url,
+                        doc.get("canonical_url") or url,
+                        doc.get("domain") or "",
+                        root_domain(url),
+                        doc.get("domain_class") or domain_class(url),
+                        doc.get("category") or "web",
+                        title,
+                        doc.get("snippet") or "",
+                        doc.get("content") or "",
+                        doc.get("language") or "en",
+                        doc.get("favicon_url"),
+                        payload,
+                        _content_hash(title, str(doc.get("snippet") or "")),
+                        stamp,
+                        stamp,
+                    ],
+                )
+            )
+            outcome["stored"] += 1
+
+        if statements:
+            try:
+                await client.batch(statements)
+            except Exception as exc:
+                raise DatabaseError(f"index replace failed: {exc}") from exc
+        return outcome
 
     async def get_document(self, url: str) -> dict[str, Any] | None:
         client = get_client()
@@ -582,4 +632,10 @@ def get_store(settings: EngineSettings | None = None) -> IndexStore:
     return _store
 
 
-__all__ = ["IndexStore", "get_store", "build_match_query", "passes_relevance", "query_tokens"]
+__all__ = [
+    "IndexStore",
+    "get_store",
+    "build_match_query",
+    "passes_relevance",
+    "query_tokens",
+]

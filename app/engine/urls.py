@@ -23,10 +23,19 @@ TRACKING_PARAMS = {
 # Path fragments that mean "application", not "document".
 BLOCKED_PATH_PATTERNS = (
     "/commit/", "/commits", "/pulls", "/pull/", "/issues", "/issue/", "/blob/",
-    "/tree/", "/releases", "/tags", "/branches", "/compare", "/wiki/", "/actions",
+    "/tree/", "/releases", "/tags", "/branches", "/compare", "/actions",
     "/login", "/signin", "/signup", "/register", "/cart", "/checkout", "/account",
     "/search", "/print/", "/amp", "/feed", "/rss", "/wp-admin", "/wp-json",
 )
+
+# Wikipedia namespaces that are not articles.
+WIKI_NON_ARTICLE_PREFIXES = (
+    "talk:", "special:", "user:", "user_talk:", "help:", "file:", "category:",
+    "portal:", "wikipedia:", "template:", "draft:", "module:", "mediawiki:",
+)
+
+# Hosts whose /wiki/<Article> paths are canonical entry points.
+WIKI_HOSTS = ("wikipedia.org",)
 
 # Pagination and dynamic-chain markers.
 BLOCKED_QUERY_KEYS = {"page", "p", "paged", "offset", "start", "limit", "sort", "order", "filter", "q", "s"}
@@ -100,6 +109,34 @@ def domain_class(url: str) -> str:
     return "static"
 
 
+def is_wiki_article(url: str) -> bool:
+    """True for a main-namespace Wikipedia article (`/wiki/<Article>`)."""
+    parsed = urlparse(normalise_url(url))
+    host = parsed.netloc
+    if not any(host == wiki or host.endswith(f".{wiki}") for wiki in WIKI_HOSTS):
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 2 or parts[0] != "wiki":
+        return False
+    article = parts[1].lower()
+    if not article or ":" in article:
+        return False
+    return not article.startswith(WIKI_NON_ARTICLE_PREFIXES)
+
+
+def infer_category(url: str) -> str:
+    """Best-effort category for a page that did not come from a category seed."""
+    host = urlparse(normalise_url(url)).netloc
+    if host.endswith((".gov.in", ".nic.in", ".gov", ".mil", ".ac.in")) or "ksrtc" in host:
+        return "government"
+    if host.endswith(".wikipedia.org") or host.endswith(".org.in") and "wiki" in host:
+        return "knowledge"
+    news_markers = ("news", "thehindu", "deccanherald", "prajavani", "timesofindia", "ndtv")
+    if any(marker in host for marker in news_markers):
+        return "news"
+    return "web"
+
+
 def is_indexable(url: str) -> bool:
     """Crawl/ingest gate: entry portals only, no app paths, no pagination chains."""
     settings = get_engine_settings()
@@ -121,7 +158,9 @@ def is_indexable(url: str) -> bool:
     if parsed.netloc.endswith("github.com") and path_depth(normalised) > 1:
         return False
 
-    if path_depth(normalised) > settings.max_path_depth:
+    # Root and level-1 pages only — with Wikipedia articles as the documented
+    # exception, since /wiki/<Article> *is* their entry-point shape.
+    if path_depth(normalised) > settings.max_path_depth and not is_wiki_article(normalised):
         return False
 
     query_keys = {key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
@@ -136,6 +175,8 @@ def is_indexable(url: str) -> bool:
 
 __all__ = [
     "normalise_url",
+    "is_wiki_article",
+    "infer_category",
     "root_domain",
     "path_depth",
     "domain_class",

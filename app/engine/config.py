@@ -53,7 +53,14 @@ class EngineSettings:
     title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))
     snippet_max_chars: int = field(default_factory=lambda: _int("INDEX_SNIPPET_MAX_CHARS", 200))
     # The FTS5 `content` column only needs enough text to match on.
-    content_max_chars: int = field(default_factory=lambda: _int("INDEX_CONTENT_MAX_CHARS", 1200))
+    # 3–4 sentences of dense summary, hard-capped at 1.5 KB.
+    content_max_chars: int = field(default_factory=lambda: _int("INDEX_CONTENT_MAX_CHARS", 1500))
+    summary_max_sentences: int = field(default_factory=lambda: _int("INDEX_SUMMARY_SENTENCES", 4))
+
+    # --- category seed crawler -------------------------------------------
+    seed_crawl_enabled: bool = field(default_factory=lambda: _bool("SEED_CRAWL_ENABLED", True))
+    seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 21600))
+    seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
 
     # --- relevance -------------------------------------------------------
     # A single-word query must appear in the title, URL or snippet — never only
@@ -74,7 +81,8 @@ class EngineSettings:
 
     # --- dedupe and domain policy ----------------------------------------
     max_urls_per_domain: int = field(default_factory=lambda: _int("INDEX_MAX_URLS_PER_DOMAIN", 12))
-    max_path_depth: int = field(default_factory=lambda: _int("INDEX_MAX_PATH_DEPTH", 2))
+    # Root and level-1 pages only (Wikipedia articles are the documented exception).
+    max_path_depth: int = field(default_factory=lambda: _int("INDEX_MAX_PATH_DEPTH", 1))
 
     # --- crawling --------------------------------------------------------
     crawl_enabled: bool = field(default_factory=lambda: _bool("CRAWL_ENABLED", True))
