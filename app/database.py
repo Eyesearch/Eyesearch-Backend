@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 import libsql_client
 
 from app.config import Settings, get_settings
-from app.engine.schema import ENGINE_SCHEMA
+from app.engine.schema import ENGINE_MIGRATIONS, ENGINE_SCHEMA, FTS_TABLE, FTS_TRIGGERS
 from app.errors import DatabaseError
 
 # What a database URL should look like once we are done with it: no token, no
@@ -311,6 +311,63 @@ async def _migrate_cache_table() -> None:
         raise DatabaseError(f"cache table migration failed: {exc}") from exc
 
 
+async def _migrate_index_tables() -> None:
+    """Add missing columns and rebuild the FTS index if its shape changed.
+
+    The FTS table is derived data: if it predates the external-content form (or
+    the triggers that keep it in sync), it is dropped and rebuilt from
+    `documents`. That is safe on an empty database and self-healing on an old one.
+    """
+    client = get_client()
+
+    for table, column_ddl in ENGINE_MIGRATIONS:
+        try:
+            await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_ddl}")
+            logger.info("index migration applied: %s.%s", table, column_ddl.split()[0])
+        except Exception:
+            continue  # already present
+
+    try:
+        info = await client.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='documents_fts'"
+        )
+        rows = getattr(info, "rows", ()) or ()
+        existing_sql = str(rows[0][0]) if rows else ""
+    except Exception as exc:
+        logger.debug("FTS schema probe skipped: %s", exc)
+        existing_sql = ""
+
+    needs_rebuild = (
+        not existing_sql
+        or "content='documents'" not in existing_sql
+        or "unicode61" not in existing_sql
+    )
+
+    if needs_rebuild:
+        logger.info("rebuilding documents_fts as external-content FTS5 (unicode61)")
+        try:
+            await client.batch(
+                [
+                    "DROP TRIGGER IF EXISTS documents_ai",
+                    "DROP TRIGGER IF EXISTS documents_ad",
+                    "DROP TRIGGER IF EXISTS documents_au",
+                    "DROP TABLE IF EXISTS documents_fts",
+                    FTS_TABLE,
+                    *FTS_TRIGGERS,
+                ]
+            )
+            await client.execute("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')")
+        except Exception as exc:
+            raise DatabaseError(f"FTS rebuild failed: {exc}") from exc
+        return
+
+    # Shape is current; make sure the sync triggers exist.
+    try:
+        await client.batch(list(FTS_TRIGGERS))
+    except Exception as exc:
+        logger.warning("could not ensure FTS triggers: %s", exc)
+
+
 async def initialize_schema() -> None:
     """Apply the schema. Idempotent, so it is safe on every cold start."""
     client = get_client()
@@ -323,8 +380,23 @@ async def initialize_schema() -> None:
         raise DatabaseError("schema initialisation timed out") from exc
     except Exception as exc:
         raise DatabaseError(f"schema initialisation failed: {exc}") from exc
+    # Runs after the base tables exist: the FTS rebuild reads `documents`.
+    await _migrate_index_tables()
     await purge_unverified_cache()
-    logger.info("schema ready on %s", describe_target()["kind"])
+    try:
+        counts = await get_client().execute(
+            "SELECT (SELECT COUNT(*) FROM documents), (SELECT COUNT(*) FROM documents_fts)"
+        )
+        rows = getattr(counts, "rows", ()) or ()
+        documents, indexed = (int(rows[0][0]), int(rows[0][1])) if rows else (0, 0)
+        logger.info(
+            "schema ready on %s: %d documents, %d indexed",
+            describe_target()["kind"],
+            documents,
+            indexed,
+        )
+    except Exception as exc:  # pragma: no cover - observability only
+        logger.info("schema ready on %s (%s)", describe_target()["kind"], exc)
 
 
 async def purge_unverified_cache() -> int:
