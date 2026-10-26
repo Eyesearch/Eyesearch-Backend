@@ -13,6 +13,8 @@ import pytest
 
 import libsql_client
 
+from app.libsql_http import TursoHTTPClient
+
 from app import database
 from app.config import Settings
 from app.engine.autoingest import auto_ingest
@@ -61,14 +63,15 @@ async def test_connect_selects_the_http_backend_for_a_libsql_url() -> None:
         turso_auth_token="token",
     )
     client = await database.connect(settings)
-    assert type(client).__name__ == "HttpClient", type(client).__name__
-    assert isinstance(client, libsql_client.http.HttpClient)
 
-    # The transport itself: HTTPS URL, and the token as a standard Bearer header.
-    # These are private attributes, deliberately inspected: they are the thing
-    # that was wrong (a WebSocket URL Turso answered with HTTP 400).
-    assert client._url.startswith("https://")
-    assert client._session.headers["authorization"] == "Bearer token"
+    # A remote target uses our own pipeline client: the library's backend indexed
+    # response["result"] while Turso answers {"results": [...]}.
+    assert isinstance(client, TursoHTTPClient)
+    assert client.endpoint.startswith("https://")
+    assert client.endpoint.endswith("/v2/pipeline")
+    assert client._headers()["Authorization"] == "Bearer token"
+
+    await database.close()
 
 
 def test_describe_target_reports_the_effective_scheme() -> None:
