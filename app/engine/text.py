@@ -305,18 +305,36 @@ def _body_text(soup: BeautifulSoup) -> str:
     return best
 
 
-def extract_document(
+# Why a page was not indexed. Logged verbatim so a silent skip is impossible.
+SKIP_TOO_SHORT = "too_short_html"
+SKIP_NOT_INDEXABLE = "not_indexable"
+SKIP_NO_TITLE = "no_title"
+SKIP_LOW_TEXT = "low_text_density"
+SKIP_BLOCKED_STATUS = "blocked_status"
+SKIP_EMPTY = "empty_after_clean"
+
+
+def extract_document_with_reason(
     url: str,
     html: str,
     *,
     http_status: int = 200,
     category: str | None = None,
-) -> ExtractedDocument | None:
-    """Extract one bounded document, or None when the page should not be indexed."""
-    if not html or len(html.strip()) < 80:
-        return None
+) -> tuple[ExtractedDocument | None, str]:
+    """Extract a page, and say exactly why when it is rejected.
+
+    The two-tier schema stores no page body — only the title, headings,
+    description, nav vocabulary and URL terms. So a JavaScript-heavy government
+    homepage with a real title and meta description is perfectly indexable even
+    when almost no text is server-rendered; the old body-length gate threw those
+    away.
+    """
+    if http_status >= 400:
+        return None, SKIP_BLOCKED_STATUS
+    if not html or len(html.strip()) < 40:
+        return None, SKIP_TOO_SHORT
     if not is_indexable(url):
-        return None
+        return None, SKIP_NOT_INDEXABLE
 
     settings = get_engine_settings()
     soup = BeautifulSoup(html, "html.parser")
@@ -327,8 +345,6 @@ def extract_document(
         if h1 is not None:
             title = normalise_whitespace(h1.get_text(" ", strip=True))
     title = truncate(strip_artefacts(title), settings.title_max_chars)
-    if not title:
-        return None
 
     description = ""
     meta = soup.find("meta", attrs={"name": re.compile("^description$", re.I)})
@@ -336,6 +352,21 @@ def extract_document(
         meta = soup.find("meta", attrs={"property": re.compile("^og:description$", re.I)})
     if meta is not None:
         description = strip_artefacts(meta.get("content") or "")
+
+    body = _body_text(soup)
+    headings = headings_of(soup)
+    sections = extract_sections(html, url, limit=settings.sections_max)
+    nav_terms = nav_terms_of(soup, sections)
+
+    # A page is worth indexing when it has an identity and something to match on.
+    if not title:
+        if not description:
+            return None, SKIP_NO_TITLE
+        title = truncate(description, settings.title_max_chars)
+    if not any((body, description, headings, nav_terms)) or (
+        len(body) < 40 and not (description or headings or nav_terms)
+    ):
+        return None, SKIP_LOW_TEXT
 
     icon = ""
     icon_link = soup.find("link", attrs={"rel": re.compile("icon", re.I)})
@@ -347,30 +378,25 @@ def extract_document(
     if canonical_link is not None:
         canonical = normalise_whitespace(canonical_link.get("href") or "")
 
-    body = _body_text(soup)
-    if len(body) < 80 and not description:
-        return None
-
     canonical_url = canonicalise(canonical, url) if canonical else normalise_url(url)
     favicon = urljoin(url, icon) if icon else f"https://{urlparse(canonical_url).netloc}/favicon.ico"
 
-    snippet = description or truncate(body, settings.snippet_max_chars)
+    snippet = description or truncate(body or headings or nav_terms, settings.snippet_max_chars)
     snippet = truncate(snippet, settings.snippet_max_chars)
 
-    sections = extract_sections(html, url, limit=settings.sections_max)
     # The section names are part of what the page offers, so they belong in the
     # searchable text too — otherwise "ztube pricing" could never match the root.
     section_names = ", ".join(section["title"] for section in sections)
     document = ExtractedDocument(
         category=category or infer_category(url),
         sections=sections,
-        headings=headings_of(soup),
-        nav_terms=nav_terms_of(soup, sections),
+        headings=headings,
+        nav_terms=nav_terms,
         url=normalise_url(url),
         canonical_url=canonical_url,
-        domain=urlparse(canonical_url).netloc,
-        root_domain=root_domain(canonical_url),
-        domain_class=domain_class(canonical_url),
+        domain=urlparse(normalise_url(url)).netloc,
+        root_domain=root_domain(url),
+        domain_class=domain_class(url),
         title=title,
         snippet=snippet,
         content=truncate(
@@ -390,7 +416,25 @@ def extract_document(
     )
     document.category_terms = document.category
     document.url_terms = url_terms(canonical_url)
-    return document.fit_to_budget(settings.max_payload_bytes)
+
+    document = document.fit_to_budget(settings.max_payload_bytes)
+    if document is None or not (document.title or document.description):
+        return None, SKIP_EMPTY
+    return document, ""
+
+
+def extract_document(
+    url: str,
+    html: str,
+    *,
+    http_status: int = 200,
+    category: str | None = None,
+) -> ExtractedDocument | None:
+    """Extract one bounded document, or None when the page should not be indexed."""
+    document, _reason = extract_document_with_reason(
+        url, html, http_status=http_status, category=category
+    )
+    return document
 
 
 def extract_links(html: str, base_url: str) -> Iterable[str]:
@@ -414,6 +458,13 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 
 __all__ = [
+    "extract_document_with_reason",
+    "SKIP_TOO_SHORT",
+    "SKIP_NOT_INDEXABLE",
+    "SKIP_NO_TITLE",
+    "SKIP_LOW_TEXT",
+    "SKIP_BLOCKED_STATUS",
+    "SKIP_EMPTY",
     "summarise",
     "url_terms",
     "headings_of",
