@@ -23,13 +23,23 @@ from dataclasses import dataclass, field
 import httpx
 
 from app.crawler.crawler import RobotsCache, fetch_page
+from app.indexer.discovery import discover_domains, is_indian_authoritative
+from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
 from app.database import get_client
 from app.engine.store import get_store
 from app.engine.text import ExtractedDocument, extract_document, extract_links
-from app.engine.urls import is_indexable, normalise_url
+from app.engine.urls import infer_category, is_indexable, normalise_url
 
 logger = logging.getLogger(__name__)
+
+# Wikipedia entry points for the knowledge category.
+WIKI_ARTICLES: tuple[tuple[str, str], ...] = (
+    ("India", "Wikipedia — India"),
+    ("Karnataka", "Wikipedia — Karnataka"),
+    ("Bengaluru", "Wikipedia — Bengaluru"),
+    ("Indian_Space_Research_Organisation", "Wikipedia — ISRO"),
+)
 
 
 @dataclass(frozen=True)
@@ -41,55 +51,30 @@ class CategorySeed:
     paths: tuple[str, ...] = ()
 
 
-CATEGORY_SEEDS: tuple[CategorySeed, ...] = (
-    # --- government and public services ---------------------------------
-    CategorySeed("https://www.india.gov.in", "National Portal of India", "government"),
-    CategorySeed("https://www.karnataka.gov.in", "Government of Karnataka", "government"),
-    CategorySeed("https://www.bengaluruurban.nic.in", "Bengaluru Urban district", "government"),
-    CategorySeed("https://www.ksrtc.in", "KSRTC", "government"),
-    CategorySeed("https://english.bmrc.co.in", "Namma Metro (BMRC)", "government"),
-    # --- sports ----------------------------------------------------------
-    CategorySeed("https://www.iplt20.com", "Indian Premier League", "sports"),
-    CategorySeed("https://www.bcci.tv", "BCCI", "sports"),
-    CategorySeed("https://www.prokabaddi.com", "Pro Kabaddi League", "sports"),
-    CategorySeed("https://www.espncricinfo.com", "ESPNcricinfo", "sports"),
-    # --- banking and finance ---------------------------------------------
-    CategorySeed("https://www.rbi.org.in", "Reserve Bank of India", "banking"),
-    CategorySeed("https://www.sbi.co.in", "State Bank of India", "banking"),
-    CategorySeed("https://www.hdfcbank.com", "HDFC Bank", "banking"),
-    CategorySeed("https://www.icicibank.com", "ICICI Bank", "banking"),
-    CategorySeed("https://www.npci.org.in", "NPCI (UPI)", "banking"),
-    # --- e-commerce -------------------------------------------------------
-    CategorySeed("https://www.flipkart.com", "Flipkart", "ecommerce"),
-    CategorySeed("https://www.myntra.com", "Myntra", "ecommerce"),
-    CategorySeed("https://www.nykaa.com", "Nykaa", "ecommerce"),
-    CategorySeed("https://www.irctc.co.in", "IRCTC", "ecommerce"),
-    CategorySeed("https://www.amazon.in", "Amazon India", "ecommerce"),
-    # --- education --------------------------------------------------------
-    CategorySeed("https://www.ugc.gov.in", "UGC", "education"),
-    CategorySeed("https://www.iitb.ac.in", "IIT Bombay", "education"),
-    CategorySeed("https://www.iisc.ac.in", "IISc Bengaluru", "education"),
-    CategorySeed("https://www.nta.ac.in", "National Testing Agency", "education"),
-    CategorySeed("https://www.aicte-india.org", "AICTE", "education"),
-    # --- software and technology ----------------------------------------
-    CategorySeed("https://github.com", "GitHub", "software"),
-    CategorySeed("https://www.python.org", "Python", "software"),
-    CategorySeed("https://developer.mozilla.org", "MDN Web Docs", "software"),
-    CategorySeed("https://nodejs.org", "Node.js", "software"),
-    CategorySeed("https://kotlinlang.org", "Kotlin", "software"),
-    # --- knowledge --------------------------------------------------------
-    CategorySeed("https://en.wikipedia.org/wiki/India", "Wikipedia — India", "knowledge"),
-    CategorySeed("https://en.wikipedia.org/wiki/Karnataka", "Wikipedia — Karnataka", "knowledge"),
-    CategorySeed("https://en.wikipedia.org/wiki/Bengaluru", "Wikipedia — Bengaluru", "knowledge"),
-    CategorySeed("https://en.wikipedia.org/wiki/Indian_Space_Research_Organisation", "Wikipedia — ISRO", "knowledge"),
-)
+def _build_seeds() -> tuple[CategorySeed, ...]:
+    """The registry as seeds, with Wikipedia articles as their entry-point paths."""
+    seeds: list[CategorySeed] = []
+    for host, label, category in SEED_ROWS:
+        if category == "knowledge":
+            continue  # articles are added below, not the bare host
+        seeds.append(CategorySeed(f"https://www.{host}" if not host.startswith("www.") else f"https://{host}", label, category))
 
-CATEGORIES: tuple[str, ...] = (
-    "government", "banking", "sports", "ecommerce", "education", "software", "knowledge",
-)
+    for article, label in WIKI_ARTICLES:
+        seeds.append(
+            CategorySeed(f"https://en.wikipedia.org/wiki/{article}", label, "knowledge")
+        )
+    return tuple(seeds)
 
-# The default seed run: the five India-first categories from the brief.
-DEFAULT_CATEGORIES: tuple[str, ...] = ("government", "banking", "sports", "ecommerce", "education")
+
+CATEGORY_SEEDS: tuple[CategorySeed, ...] = _build_seeds()
+
+CATEGORIES: tuple[str, ...] = CATEGORY_ORDER
+
+# The default seed run: every India-first category in the registry.
+DEFAULT_CATEGORIES: tuple[str, ...] = (
+    "government", "utilities", "education", "regulators", "services",
+    "banking", "sports", "ecommerce",
+)
 
 
 @dataclass
@@ -155,6 +140,12 @@ async def crawl_seed(
 
         documents.append(document)
         report.extracted += 1
+
+        # Indian authoritative domains linked from this page join the backlog.
+        try:
+            await enqueue_discovered(html, url)
+        except Exception as exc:  # discovery must never break a crawl
+            logger.debug("discovery skipped for %s: %s", url, exc)
 
         # Level-1 only: follow links from the entry page, never from its children.
         if len(seen) == 1:
@@ -228,6 +219,89 @@ async def run_seed_pass(
     return report
 
 
+async def enqueue_discovered(html: str, base_url: str, store: object | None = None) -> int:
+    """Queue Indian authoritative domains linked from a crawled page."""
+    index = store or get_store()
+    hosts = discover_domains(html, base_url)
+    if not hosts:
+        return 0
+    added = 0
+    for host in hosts:
+        try:
+            if await index.site_exists(host):
+                continue
+            if await index.enqueue_domain(host, reason="discovered"):
+                added += 1
+        except Exception as exc:
+            logger.debug("could not queue %s: %s", host, exc)
+    if added:
+        logger.info("discovery: queued %d Indian domains from %s", added, base_url)
+    return added
+
+
+async def run_discovery_pass(
+    *,
+    batch_size: int | None = None,
+    store: object | None = None,
+    settings: EngineSettings | None = None,
+) -> dict[str, object]:
+    """Drain the discovered-domain backlog in bounded batches.
+
+    Ten domains at a time, a polite pause between batches, and a hard ceiling on
+    the number of indexed sites. Stops when the queue is empty.
+    """
+    cfg = settings or get_engine_settings()
+    index = store or get_store()
+    batch = max(1, batch_size or cfg.discovery_batch_size)
+    report: dict[str, object] = {"batches": 0, "attempted": 0, "stored": 0, "skipped": 0, "ceiling": False}
+
+    sites = await index.count_documents()
+    if sites >= cfg.max_indexed_sites:
+        logger.info("discovery pass idle: %d sites at the ceiling of %d", sites, cfg.max_indexed_sites)
+        report["ceiling"] = True
+        return report
+
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        robots = RobotsCache(client, cfg.crawl_user_agent)
+        while sites < cfg.max_indexed_sites:
+            hosts = await index.pending_domains(batch)
+            if not hosts:
+                break
+
+            report["batches"] = int(report["batches"]) + 1
+            for host in hosts:
+                report["attempted"] = int(report["attempted"]) + 1
+                seed = CategorySeed(f"https://{host}/", host, infer_category(f"https://{host}/"))
+                try:
+                    seed_report, documents = await crawl_seed(
+                        seed, client=client, settings=cfg, robots=robots, max_pages=cfg.seed_crawl_pages_per_domain
+                    )
+                except Exception as exc:
+                    logger.warning("discovered domain %s failed: %s", host, exc)
+                    await index.mark_domain_processed(host, status="failed")
+                    report["skipped"] = int(report["skipped"]) + 1
+                    continue
+
+                if documents:
+                    written = await index.replace_documents([doc.as_row() for doc in documents])
+                    report["stored"] = int(report["stored"]) + int(written.get("pages", 0))
+                    sites = await index.count_documents()
+                else:
+                    report["skipped"] = int(report["skipped"]) + 1
+                await index.mark_domain_processed(host, status="processed")
+
+            logger.info(
+                "discovery batch %s done: %s attempted, %s pages stored, %s sites",
+                report["batches"], report["attempted"], report["stored"], sites,
+            )
+            if sites >= cfg.max_indexed_sites:
+                report["ceiling"] = True
+                break
+            await asyncio.sleep(max(0.0, cfg.discovery_batch_pause_seconds))
+
+    return report
+
+
 async def coverage(store: object | None = None) -> dict[str, object]:
     """How much of the seed list the index already covers."""
     index = store or get_store()
@@ -282,6 +356,15 @@ async def run_autonomous_seed_crawl(store: object | None = None) -> dict[str, ob
     except Exception as exc:  # a background task must never take the app down
         logger.warning("autonomous crawl failed: %s", exc)
         return {"skipped": False, "error": str(exc), **state}
+
+    # Then drain whatever the crawl discovered: ten domains at a time, with a
+    # polite pause between batches, until the queue is empty or the ceiling hits.
+    try:
+        discovery = await run_discovery_pass(store=index)
+        report["discovery"] = discovery
+    except Exception as exc:
+        logger.warning("discovery pass failed: %s", exc)
+        report["discovery"] = {"error": str(exc)}
 
     try:
         after = await coverage(index)
@@ -376,6 +459,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "enqueue_discovered",
+    "run_discovery_pass",
     "coverage",
     "run_autonomous_seed_crawl",
     "DEFAULT_CATEGORIES",
