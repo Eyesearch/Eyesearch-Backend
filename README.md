@@ -353,6 +353,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Every stage is logged, so "no writes" is diagnosable from the log alone.**
+Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
+which build is live. Each seed logs `SEED START: processing domain …` and
+`SEED FETCHED: domain … returned status …`; each write logs
+`PREPARING DB WRITE: domain … with N pages`; each commit logs
+`DB COMMIT SUCCESS: Indexed … (Running total: N)`. Every request to the Turso
+pipeline logs its statements — `TURSO PIPELINE EXECUTE: ['SELECT domain FROM
+sites …', 'INSERT INTO sites …']` — with a running tally every fifty statements
+(`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
+a read loop from an ingestion loop.
+
 **Startup proves the database is writable.** Before any crawling,
 `verify_database()` logs the exact integers Turso returns
 (`SELECT count(*) FROM sites = 71, pages = 214, page_fts = 214`), then inserts a
@@ -371,11 +382,14 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**A fetched seed always persists a root.** When a seed's entry page answers 200
-but yields nothing extractable, the root record is built from the seed label or
-the hostname (`PSPCL - Punjab State Power Corporation Limited`) and committed —
-sitelinks are optional, the root domain is not. A 4xx/5xx response still yields
-nothing, because a blocked page is not evidence of a real one.
+**A responding seed always persists a root.** When a seed's entry page returns
+any HTML — a 200 with nothing extractable, a JavaScript shell, even a 403 body —
+the root record is built from the seed label or the hostname
+(`PSPCL - Punjab State Power Corporation Limited`) and committed immediately,
+without waiting for sitelinks. A response with no body at all yields nothing,
+because an empty answer is not a site. Verified with the three cases from the
+report: `pspcl.in` (200, content) → 2 pages, `canarabank.bank.in` (403 with a
+body) → 1 page, `telangana.gov.in` (JS shell) → 1 page.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
@@ -760,6 +774,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Every stage is logged, so "no writes" is diagnosable from the log alone.**
+Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
+which build is live. Each seed logs `SEED START: processing domain …` and
+`SEED FETCHED: domain … returned status …`; each write logs
+`PREPARING DB WRITE: domain … with N pages`; each commit logs
+`DB COMMIT SUCCESS: Indexed … (Running total: N)`. Every request to the Turso
+pipeline logs its statements — `TURSO PIPELINE EXECUTE: ['SELECT domain FROM
+sites …', 'INSERT INTO sites …']` — with a running tally every fifty statements
+(`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
+a read loop from an ingestion loop.
+
 **Startup proves the database is writable.** Before any crawling,
 `verify_database()` logs the exact integers Turso returns
 (`SELECT count(*) FROM sites = 71, pages = 214, page_fts = 214`), then inserts a
@@ -778,11 +803,14 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**A fetched seed always persists a root.** When a seed's entry page answers 200
-but yields nothing extractable, the root record is built from the seed label or
-the hostname (`PSPCL - Punjab State Power Corporation Limited`) and committed —
-sitelinks are optional, the root domain is not. A 4xx/5xx response still yields
-nothing, because a blocked page is not evidence of a real one.
+**A responding seed always persists a root.** When a seed's entry page returns
+any HTML — a 200 with nothing extractable, a JavaScript shell, even a 403 body —
+the root record is built from the seed label or the hostname
+(`PSPCL - Punjab State Power Corporation Limited`) and committed immediately,
+without waiting for sitelinks. A response with no body at all yields nothing,
+because an empty answer is not a site. Verified with the three cases from the
+report: `pspcl.in` (200, content) → 2 pages, `canarabank.bank.in` (403 with a
+body) → 1 page, `telangana.gov.in` (JS shell) → 1 page.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
