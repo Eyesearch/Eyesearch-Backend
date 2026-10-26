@@ -29,7 +29,7 @@ from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
 from app.database import execute_safe, get_client
 from app.engine.store import get_store
-from app.engine.text import ExtractedDocument, extract_document, extract_links
+from app.engine.text import ExtractedDocument, extract_document_with_reason, extract_links
 from app.engine.urls import infer_category, is_indexable, normalise_url
 
 logger = logging.getLogger(__name__)
@@ -85,6 +85,11 @@ class SeedReport:
     extracted: int = 0
     stored: int = 0
     skipped: list[str] = field(default_factory=list)
+    reasons: dict[str, int] = field(default_factory=dict)
+
+    def skip(self, url: str, reason: str) -> None:
+        self.skipped.append(url)
+        self.reasons[reason] = self.reasons.get(reason, 0) + 1
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -93,6 +98,7 @@ class SeedReport:
             "extracted": self.extracted,
             "stored": self.stored,
             "skipped": len(self.skipped),
+            "reasons": dict(self.reasons),
         }
 
 
@@ -124,19 +130,22 @@ async def crawl_seed(
         seen.add(url)
 
         if settings.respect_robots and not await robots.allowed(url):
-            report.skipped.append(url)
+            report.skip(url, "robots_disallowed")
             continue
 
         fetched = await fetch_page(client, url, settings)
         report.fetched += 1
         if fetched is None:
-            report.skipped.append(url)
+            report.skip(url, "fetch_failed")
             continue
 
         html, status = fetched
-        document = extract_document(url, html, http_status=status, category=seed.category)
+        document, reason = extract_document_with_reason(
+            url, html, http_status=status, category=seed.category
+        )
         if document is None:
-            report.skipped.append(url)
+            report.skip(url, reason or "not_extracted")
+            logger.info("skipped: %s (%s)", reason or "not_extracted", url)
             continue
 
         documents.append(document)
@@ -218,7 +227,7 @@ async def run_seed_pass(
                     report["sites"] = int(report.get("sites", 0)) + int(written.get("sites", 0))
                     total = await index.count_documents()
                     logger.info(
-                        "Successfully indexed site: %s (pages: %d, total sites: %d)",
+                        "DB COMMIT SUCCESS: Indexed %s with %d pages (Running total: %d)",
                         _seed_domain(seed), seed_report.stored, total,
                     )
                 except Exception as exc:
@@ -228,8 +237,10 @@ async def run_seed_pass(
                     )
             else:
                 logger.info(
-                    "seed %s produced no indexable pages (fetched %d, skipped %d)",
+                    "seed %s produced no indexable pages (fetched %d, skipped %d%s)",
                     _seed_domain(seed), seed_report.fetched, len(seed_report.skipped),
+                    ": " + ", ".join(f"{k}={v}" for k, v in seed_report.reasons.items())
+                    if seed_report.reasons else "",
                 )
 
             report["fetched"] = int(report["fetched"]) + seed_report.fetched
