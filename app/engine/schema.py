@@ -112,7 +112,7 @@ CRAWL_TABLES: tuple[str, ...] = (
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_query ON crawl_backlog(query)",
-    "CREATE INDEX IF NOT EXISTS idx_backlog_kind ON crawl_backlog(kind, status)",
+
     """
     CREATE TABLE IF NOT EXISTS crawl_queue (
         url TEXT PRIMARY KEY,

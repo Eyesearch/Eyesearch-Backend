@@ -306,15 +306,69 @@ async def _drop_legacy_index() -> None:
         raise DatabaseError(f"legacy index cleanup failed: {exc}") from exc
 
 
-async def _apply_migrations() -> None:
-    """Add columns that arrived after the first release (safe to repeat)."""
+async def _column_exists(table: str, column: str) -> bool:
+    try:
+        result = await execute_safe(f"PRAGMA table_info({table})")
+        for row in getattr(result, "rows", ()) or ():
+            if str(row[1]).lower() == column.lower():
+                return True
+    except Exception as exc:
+        logger.warning("could not read the schema of %s: %s", table, exc)
+    return False
+
+
+async def _table_exists(table: str) -> bool:
+    try:
+        result = await execute_safe(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [table]
+        )
+        return bool(getattr(result, "rows", ()))
+    except Exception:
+        return False
+
+
+async def _apply_migrations(*, existing_only: bool = False) -> None:
+    """Add columns that arrived after the first release.
+
+    A silently swallowed ALTER is how production ended up with a `crawl_backlog`
+    table that had no `kind` column while the code wrote to it. Every failure is
+    logged, and the result is verified afterwards rather than assumed.
+    """
     client = get_client()
     for table, column_ddl in ENGINE_MIGRATIONS:
+        column = column_ddl.split()[0]
+        if existing_only and not await _table_exists(table):
+            continue
+        if await _column_exists(table, column):
+            continue
         try:
             await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_ddl}")
-            logger.info("migration applied: %s.%s", table, column_ddl.split()[0])
-        except Exception:
-            continue  # already present
+            logger.info("migration applied: %s.%s", table, column)
+        except Exception as exc:
+            logger.error(
+                "migration FAILED: ALTER TABLE %s ADD COLUMN %s — %s", table, column_ddl, exc
+            )
+
+    # The index over the new column can only be created once it exists; on a
+    # legacy database it must not be part of the base batch, or the batch aborts.
+    if await _table_exists("crawl_backlog") and await _column_exists("crawl_backlog", "kind"):
+        try:
+            await get_client().execute(
+                "CREATE INDEX IF NOT EXISTS idx_backlog_kind ON crawl_backlog(kind, status)"
+            )
+        except Exception as exc:
+            logger.warning("could not create idx_backlog_kind: %s", exc)
+
+    # Verify, and say so out loud either way.
+    for table, column_ddl in ENGINE_MIGRATIONS:
+        column = column_ddl.split()[0]
+        if not await _column_exists(table, column):
+            logger.error(
+                "SCHEMA MISMATCH: %s has no %s column; statements that use it will fail "
+                "until it exists",
+                table,
+                column,
+            )
 
 
 async def _ensure_page_fts() -> None:
@@ -365,6 +419,9 @@ async def initialize_schema() -> None:
     client = get_client()
     cfg = get_settings()
     await _drop_legacy_index()
+    # Migrate tables that already exist *before* the DDL batch: a legacy
+    # `crawl_backlog` without `kind` would otherwise abort the whole batch.
+    await _apply_migrations(existing_only=True)
     try:
         async with asyncio.timeout(cfg.db_timeout_s * 3):
             await client.batch(list(SCHEMA_STATEMENTS) + list(ENGINE_SCHEMA))
