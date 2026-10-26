@@ -33,3 +33,18 @@ async def client() -> AsyncIterator[httpx.AsyncClient]:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
             yield http
+
+
+@pytest.fixture()
+async def temp_db(tmp_path):
+    """A fresh database with the gateway and engine schema applied."""
+    from app import database
+    from app.config import Settings
+    from app.engine.store import get_store
+
+    settings = Settings(turso_db_url=f"file:{tmp_path}/engine.db")
+    await database.connect(settings)
+    await database.initialize_schema()
+    await get_store().ensure_schema()
+    yield
+    await database.close()
