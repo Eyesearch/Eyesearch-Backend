@@ -246,7 +246,7 @@ class SearchService:
         if outcome.results and engine.auto_ingest_enabled:
             try:
                 async with asyncio.timeout(AUTO_INGEST_TIMEOUT_S):
-                    ingest = await auto_ingest(outcome.results)
+                    ingest = await auto_ingest(outcome.results, query=normalized)
                 acquisition.auto_ingested = int(ingest.get("inserted", 0))
             except (TimeoutError, asyncio.TimeoutError):
                 logger.warning("auto-ingest timed out for %r", normalized)

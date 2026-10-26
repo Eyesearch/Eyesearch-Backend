@@ -17,6 +17,7 @@ import logging
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
+from app.config import get_settings
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.store import IndexStore, get_store
 from app.engine.text import ExtractedDocument, detect_language, strip_artefacts, truncate
@@ -70,6 +71,7 @@ def documents_from_results(
 async def auto_ingest(
     results: Iterable[Any],
     *,
+    query: str = "",
     store: IndexStore | None = None,
     settings: EngineSettings | None = None,
 ) -> dict[str, int]:
@@ -83,7 +85,14 @@ async def auto_ingest(
         return {"inserted": 0, "rejected": 1}
 
     outcome = await (store or get_store()).ingest_documents(rows)
-    logger.info("auto-ingest: %s", outcome)
+    target = "Turso" if get_settings().is_remote_db else "local SQLite"
+    logger.info(
+        "Auto-ingested %d documents for query: %s into %s (%s)",
+        int(outcome.get("inserted", 0)),
+        query,
+        target,
+        {key: value for key, value in outcome.items() if key != "inserted"},
+    )
     return outcome
 
 
