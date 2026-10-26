@@ -229,8 +229,8 @@ async def test_title_matches_outrank_snippet_matches(temp_db) -> None:
     assert hits[0].url == "https://a.example.in/metro", [hit.url for hit in hits]
 
 
-async def test_weak_index_hit_triggers_the_live_fallback(temp_db, monkeypatch) -> None:
-    """A rejected match is a miss: the first query falls back to live, then ingests."""
+async def test_weak_index_hit_triggers_the_on_demand_pipeline(temp_db, monkeypatch) -> None:
+    """A rejected match is a miss: discovery runs, and only verified pages are served."""
     store = get_store()
     await store.ingest_documents(
         [
@@ -259,11 +259,27 @@ async def test_weak_index_hit_triggers_the_live_fallback(temp_db, monkeypatch) -
             providers={"duckduckgo": 1},
         )
 
+    async def _extract(urls, *, client=None, settings=None, limit=None):
+        from app.engine.text import ExtractedDocument
+
+        return [
+            ExtractedDocument(
+                url=url, canonical_url=url, domain=url.split("/")[2],
+                root_domain=url.split("/")[2], domain_class="static",
+                title="Google", snippet="Search the world's information.",
+                content="Google. Search the world's information.",
+                language="en", favicon_url=None,
+            )
+            for url in urls
+            if "google.com" in url
+        ]
+
     monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    monkeypatch.setattr(search_service, "extract_candidates", _extract)
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("google", limit=5)
 
     assert calls["live"] == 1
-    assert response.source == "live"
-    assert response.results[0].url.startswith("https://www.google.com")
-    assert CRICKET_URL not in [result.url for result in response.results]
+    assert response.source == "index"
+    assert "google.com" in response.results[0].url
+    assert "iplt20.com" not in [result.url for result in response.results]

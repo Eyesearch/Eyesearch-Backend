@@ -48,3 +48,56 @@ async def temp_db(tmp_path):
     await get_store().ensure_schema()
     yield
     await database.close()
+
+
+# A small map of URL → what the real page says, so the offline extractor can
+# return realistic extracts without touching the network.
+PAGE_TITLES = {
+    "https://en.wikipedia.org/wiki/Espresso": (
+        "Espresso — Wikipedia",
+        "Espresso is a concentrated form of coffee brewed by forcing hot water.",
+    ),
+    "https://youtube.com/watch?v=dQw4w9WgXcQ": (
+        "Espresso video guide",
+        "A short walkthrough of home espresso machines.",
+    ),
+    "https://example.org/only": ("Only result", "The chain lost two providers."),
+    "https://example.org/espresso-partial": ("Espresso partial", "Espresso with one provider."),
+}
+
+
+@pytest.fixture
+def extract_stub(monkeypatch):
+    """Replace the network extractor with a deterministic offline one."""
+    from app.engine.text import ExtractedDocument
+    from app.engine.urls import normalise_url
+    from app.services import search_service
+
+    async def _extract(urls, *, client=None, settings=None, limit=None):
+        documents = []
+        for raw_url in urls:
+            # The real extractor normalises the URL before storing it; so does this.
+            url = normalise_url(raw_url)
+            title, snippet = PAGE_TITLES.get(
+                url,
+                (f"{url.rstrip('/').split('/')[-1] or url} — {url.split('/')[2]}", "Extracted page."),
+            )
+            host = url.split("/")[2].removeprefix("www.")
+            documents.append(
+                ExtractedDocument(
+                    url=url,
+                    canonical_url=url,
+                    domain=host,
+                    root_domain=host,
+                    domain_class="static",
+                    title=title[:100],
+                    snippet=snippet[:200],
+                    content=f"{title}. {snippet}"[:1200],
+                    language="en",
+                    favicon_url=None,
+                )
+            )
+        return documents[: (limit or len(documents))]
+
+    monkeypatch.setattr(search_service, "extract_candidates", _extract)
+    return _extract

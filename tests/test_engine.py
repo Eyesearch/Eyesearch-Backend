@@ -149,9 +149,11 @@ async def test_local_search_returns_ranked_hits(temp_db) -> None:
     from app.engine.store import get_store
 
     hits = await get_store().search_local("metro timings", limit=5)
-    assert len(hits) >= 2
+    # The universal gate keeps hits whose title/URL/snippet covers the query:
+    # the timings page does, the generic "metro information" page does not.
+    assert hits
     assert all(hit.score > 0 for hit in hits)
-    assert "metro" in hits[0].title.lower() or "metro" in hits[0].snippet.lower()
+    assert "timings" in hits[0].title.lower() or "timings" in hits[0].snippet.lower()
 
     kannada = await get_store().search_local("ಮೆಟ್ರೋ", limit=5)
     assert kannada and kannada[0].language == "kn"
@@ -165,7 +167,7 @@ async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
     monkeypatch.setattr(
         search_service,
         "get_engine_settings",
-        lambda: EngineSettings(index_threshold=2),
+        lambda: EngineSettings(index_threshold=1),
     )
 
     async def _no_live(*args, **kwargs):
@@ -177,7 +179,7 @@ async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
     response = await service.search("metro timings", limit=5)
 
     assert response.source == "index"
-    assert response.index_hits >= 2
+    assert response.index_hits >= 1
     assert response.results and response.results[0].source == "eyesearch_index"
     assert called["live"] == 0
 
@@ -204,8 +206,8 @@ async def test_local_only_mode_queues_instead_of_calling_providers(temp_db, monk
     assert "something we have never crawled" in await get_store().pending_backlog(10)
 
 
-async def test_live_results_with_nothing_indexable_are_queued(temp_db, monkeypatch) -> None:
-    """When every live result breaks the crawl rules, the query goes to the backlog."""
+async def test_unverifiable_candidates_are_never_served(temp_db, monkeypatch) -> None:
+    """Provider text is not served: candidates that fail the gate are dropped."""
 
     calls = {"live": 0}
 
@@ -224,9 +226,9 @@ async def test_live_results_with_nothing_indexable_are_queued(temp_db, monkeypat
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("unindexed niche topic", limit=5)
 
-    # The user still gets the live results, even though none could be indexed.
-    assert response.source == "live"
-    assert response.results
+    # Nothing verified means nothing served — the provider's raw text is not a result.
+    assert response.source == "queued"
+    assert response.results == []
     assert response.auto_ingested == 0
 
     await search_service.drain_background_writes()
@@ -265,13 +267,34 @@ async def test_live_fetch_once_then_served_from_index(temp_db, monkeypatch) -> N
             providers={"duckduckgo": 2},
         )
 
+    async def _extract(urls, *, client=None, settings=None, limit=None):
+        from app.engine.text import ExtractedDocument
+        from app.engine.urls import normalise_url
+
+        documents = []
+        for raw in urls:
+            url = normalise_url(raw)
+            title = "Github · GitHub" if "github.com" in url else "GitHub — Wikipedia"
+            documents.append(
+                ExtractedDocument(
+                    url=url, canonical_url=url, domain=url.split("/")[2],
+                    root_domain=url.split("/")[2], domain_class="static",
+                    title=title, snippet="GitHub is where people build software.",
+                    content=f"{title}. GitHub hosts repositories.",
+                    language="en", favicon_url=None,
+                )
+            )
+        return documents
+
     monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    monkeypatch.setattr(search_service, "extract_candidates", _extract)
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
 
     first = await service.search("github", limit=5)
-    assert first.source == "live"
-    assert first.results, "the first query must return the live results"
-    assert first.auto_ingested >= 1, "the live results must be written into the index"
+    assert first.source == "index", first.source
+    assert first.results, "the first query must return the verified extracts"
+    assert all(result.source == "eyesearch_index" for result in first.results)
+    assert first.auto_ingested >= 1, "the verified documents must be written into the index"
     assert calls["live"] == 1
 
     second = await service.search("github", limit=5)
