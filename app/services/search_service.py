@@ -15,11 +15,11 @@ from typing import Any, Sequence
 
 import httpx
 
-from app import database
 from app.config import Settings, get_settings
-from app.engine.autoingest import auto_ingest
 from app.engine.config import get_engine_settings
+from app.engine.relevance import filter_candidates, is_relevant
 from app.engine.store import get_store
+from app.indexer.extractor import extract_candidates
 from app.errors import DatabaseError
 from app.schemas import (
     AIContextResult,
@@ -49,20 +49,6 @@ def _schedule_write(coro: Any) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-async def _persist(query: str, records: Sequence[dict[str, Any]]) -> None:
-    try:
-        written = await database.upsert_records(query, records)
-        if written:
-            logger.debug("cached %d records for %r", written, query)
-    except DatabaseError as exc:
-        # A failed cache write must never reach the client.
-        logger.warning("cache write skipped for %r: %s", query, exc)
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # pragma: no cover - defensive
-        logger.exception("unexpected cache write error for %r", query)
-
-
 @dataclass(slots=True)
 class Acquisition:
     """Results plus provenance, shared by both endpoints."""
@@ -88,41 +74,6 @@ class Acquisition:
         return [item.get("provider", "unknown") for item in self.failed]
 
 
-def _cached_to_raw(rows: Sequence[dict[str, Any]]) -> list[RawResult]:
-    raws: list[RawResult] = []
-    for position, row in enumerate(rows):
-        url = str(row.get("url") or "").strip()
-        if not url:
-            continue
-        raws.append(
-            RawResult(
-                title=str(row.get("title") or url),
-                url=url,
-                snippet=str(row.get("snippet") or ""),
-                source=str(row.get("source") or "cache"),
-                position=position,
-                image_url=row.get("poster_url") or None,
-            )
-        )
-    return raws
-
-
-def _raw_to_records(raws: Sequence[RawResult], settings: Settings) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for raw in raws:
-        poster, thumbnail = formatter.derive_media(raw.url)
-        records.append(
-            {
-                "title": formatter.clean_snippet(raw.title, 200),
-                "url": raw.url,
-                "snippet": formatter.clean_snippet(raw.snippet, settings.snippet_max_chars),
-                "poster_url": raw.image_url or poster or thumbnail,
-                "source": raw.source,
-            }
-        )
-    return records
-
-
 class SearchService:
     """Single entry point used by every route."""
 
@@ -143,30 +94,34 @@ class SearchService:
 
     # -- acquisition -----------------------------------------------------
     async def acquire(self, query: str, limit: int) -> Acquisition:
-        """Live-fetch-once, cache-forever.
+        """Index first; on a miss, verify and extract on demand.
 
-        1. Query `documents_fts`. Any hit is served locally — no outbound call.
-        2. Only on zero local hits does the request touch the providers, and the
-           results are served immediately (source `live`).
-        3. The same results are then ingested into `documents_fts` (2 KB budget,
-           dedupe and domain caps unchanged), so the next identical query is a
-           step-1 hit.
+        1. `documents_fts` with BM25 ranking (title > URL > snippet) and the
+           universal relevance gate. Any hit is served from our own index.
+        2. On a miss, ask the providers only for *candidate URLs*. Candidates
+           are gated on their own title/URL/snippet, the survivors are fetched
+           and parsed by the native extractor, gated again on the extracted
+           document, and upserted into `documents`/`documents_fts`.
+        3. The response carries our extracts — never a provider's raw text — and
+           the next query for these words is a step-1 hit.
+
+        Nothing is written to `search_records`: that table held unverified
+        provider dumps and is no longer part of the serving path.
         """
         normalized = " ".join(query.split())
         acquisition = Acquisition(query=normalized)
         engine = get_engine_settings()
+        store = get_store()
 
-        # 0. proprietary index
-        local_hits = 0
+        # 1. our own index
         try:
-            local = await get_store().search_local(normalized, limit)
+            local = await store.search_local(normalized, limit)
         except Exception as exc:  # a broken index must never fail a request
             local = []
             logger.warning("index lookup failed for %r: %s", normalized, exc)
 
-        local_hits = len(local)
-        acquisition.index_hits = local_hits
-        if local_hits >= engine.index_threshold:
+        acquisition.index_hits = len(local)
+        if local:
             acquisition.results = [
                 RawResult(
                     title=doc.title,
@@ -178,88 +133,134 @@ class SearchService:
                 )
                 for index, doc in enumerate(local)
             ]
-            acquisition.providers = {"eyesearch_index": local_hits}
+            acquisition.providers = {"eyesearch_index": len(local)}
             acquisition.source = "index"
-            acquisition.total_estimate = local_hits
+            acquisition.total_estimate = len(local)
             return acquisition
 
-        # 1. cache
-        try:
-            cached = await database.fetch_cached(normalized, limit)
-        except DatabaseError as exc:
-            cached = []
-            acquisition.failed.append({"provider": "turso_cache", "error": type(exc).__name__})
-            logger.warning("cache read failed for %r: %s", normalized, exc)
-
-        if len(cached) >= self._settings.cache_min_results:
-            acquisition.results = _cached_to_raw(cached)
-            acquisition.cache_hit = True
-            acquisition.providers = {"turso_cache": len(acquisition.results)}
-            acquisition.total_estimate = len(acquisition.results)
-            try:
-                acquisition.total_estimate = max(
-                    acquisition.total_estimate,
-                    await database.count_cached(normalized),
-                )
-            except DatabaseError:
-                pass
-            acquisition.source = "cache"
-            return acquisition
-
-        # 2. Nothing local: a strictly-local deployment stops here and queues the
-        # query for the crawler instead of calling out.
+        # 2. miss: nothing outbound unless discovery is enabled at all
         if not engine.live_search_enabled:
-            _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
+            _schedule_write(store.enqueue_backlog(normalized, 0))
             acquisition.source = "queued"
-            acquisition.total_estimate = 0
             return acquisition
 
-        # 3. Guard: if we already tried live for this query recently and queued
-        #    it, do not hammer the providers again — the crawler owns it now.
+        # 2a. do not hammer the providers for a query we already gave up on
         try:
-            if await get_store().recently_queued(normalized):
+            if await store.recently_queued(normalized):
                 acquisition.source = "queued"
-                acquisition.total_estimate = 0
                 return acquisition
         except Exception as exc:
             logger.debug("backlog guard skipped for %r: %s", normalized, exc)
 
-        # 4. First time this topic has been searched: live fetch, serve at once.
-        outcome: RetrievalOutcome = await live_retrieval.retrieve(
-            normalized,
-            limit,
-            client=self._client,
-            settings=self._settings,
-        )
-        acquisition.results = outcome.results
-        acquisition.providers = dict(outcome.providers)
-        acquisition.failed.extend(outcome.failed)
-        acquisition.total_estimate = len(outcome.results)
+        verified = await self._extract_on_demand(normalized, engine)
+        acquisition.failed.extend(verified.get("failed", []))
+        acquisition.auto_ingested = verified["stored"]
+        acquisition.providers = {"eyesearch_index": verified["stored"]}
+        acquisition.index_hits = verified["stored"]
 
-        # 5. Keep the result cache warm as before.
-        if outcome.results:
-            _schedule_write(_persist(normalized, _raw_to_records(outcome.results, self._settings)))
+        if verified["documents"]:
+            acquisition.results = [
+                RawResult(
+                    title=document.title,
+                    url=document.url,
+                    snippet=document.snippet,
+                    source="eyesearch_index",
+                    position=index,
+                    image_url=document.favicon_url,
+                )
+                for index, document in enumerate(verified["documents"])
+            ]
+            acquisition.source = "index"
+            acquisition.total_estimate = len(acquisition.results)
+            return acquisition
 
-        # 6. Write the live results into the index so the next query is local.
-        #    Bounded so a slow write can never hold the response hostage; the
-        #    write itself is one batched statement, so this is normally ~ms.
-        if outcome.results and engine.auto_ingest_enabled:
-            try:
-                async with asyncio.timeout(AUTO_INGEST_TIMEOUT_S):
-                    ingest = await auto_ingest(outcome.results, query=normalized)
-                acquisition.auto_ingested = int(ingest.get("inserted", 0))
-            except (TimeoutError, asyncio.TimeoutError):
-                logger.warning("auto-ingest timed out for %r", normalized)
-            except Exception as exc:  # ingestion must never fail the request
-                logger.warning("auto-ingest failed for %r: %s", normalized, exc)
-
-        # 7. If nothing could be indexed (all results filtered by the crawl
-        #    rules), leave the query for the crawler to resolve properly.
-        if acquisition.auto_ingested == 0:
-            _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
-
-        acquisition.source = "live"
+        # 3. nothing verified: say so, and leave the query for the crawler
+        _schedule_write(store.enqueue_backlog(normalized, 0))
+        acquisition.source = "queued"
         return acquisition
+
+    async def _extract_on_demand(self, query: str, engine: Any) -> dict[str, Any]:
+        """Discover → gate → extract → gate → upsert. Returns what was verified."""
+        outcome: dict[str, Any] = {
+            "documents": [], "stored": 0, "candidates": 0, "dropped": 0, "failed": []
+        }
+
+        try:
+            async with asyncio.timeout(engine.on_demand_budget_seconds):
+                discovery = await live_retrieval.retrieve(
+                    query,
+                    engine.on_demand_max_candidates,
+                    client=self._client,
+                    settings=self._settings,
+                )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.warning("on-demand discovery timed out for %r", query)
+            return outcome
+        except Exception as exc:
+            logger.warning("on-demand discovery failed for %r: %s", query, exc)
+            return outcome
+
+        outcome["failed"] = list(getattr(discovery, "failed", []) or [])
+        candidates = [
+            {"title": result.title, "url": result.url, "snippet": result.snippet}
+            for result in discovery.results
+        ]
+        outcome["candidates"] = len(candidates)
+
+        # Gate before we spend a single fetch on a candidate.
+        gated = filter_candidates(
+            query, candidates, min_coverage=engine.relevance_min_token_coverage
+        )
+        outcome["dropped"] = len(candidates) - len(gated)
+        if not gated:
+            logger.info(
+                "on-demand: %d candidates for %r all failed the relevance gate",
+                len(candidates),
+                query,
+            )
+            return outcome
+
+        urls = [candidate["url"] for candidate in gated][: engine.on_demand_max_fetches]
+        try:
+            documents = await extract_candidates(
+                urls, client=self._client, settings=engine, limit=engine.on_demand_max_fetches
+            )
+        except Exception as exc:
+            logger.warning("on-demand extraction failed for %r: %s", query, exc)
+            return outcome
+
+        # Gate again, this time on our own extract rather than the provider's text.
+        verified = [
+            document
+            for document in documents
+            if is_relevant(
+                query,
+                title=document.title,
+                url=document.url,
+                snippet=document.snippet,
+                min_coverage=engine.relevance_min_token_coverage,
+            )
+        ]
+        outcome["dropped"] += len(documents) - len(verified)
+        if not verified:
+            return outcome
+
+        try:
+            written = await get_store().ingest_documents(
+                [document.as_row() for document in verified], mode="upsert"
+            )
+            outcome["stored"] = int(written.get("inserted", 0)) + int(written.get("replaced", 0))
+            logger.info(
+                "on-demand: verified %d documents for %r and stored them (%s)",
+                len(verified),
+                query,
+                written,
+            )
+        except Exception as exc:
+            logger.warning("on-demand ingest failed for %r: %s", query, exc)
+
+        outcome["documents"] = verified
+        return outcome
 
     async def suggest(self, query: str, limit: int | None = None) -> list[str]:
         """Autocomplete from the index. Never touches the network."""
