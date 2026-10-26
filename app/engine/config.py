@@ -49,7 +49,8 @@ class EngineSettings:
     auto_ingest_max_results: int = field(default_factory=lambda: _int("AUTO_INGEST_MAX_RESULTS", 5))
 
     # --- storage budget (1-2 KB per page) --------------------------------
-    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 2048))
+    # One document per domain root, sitelinks included: strictly under 1.5 KB.
+    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 1536))
     title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))
     snippet_max_chars: int = field(default_factory=lambda: _int("INDEX_SNIPPET_MAX_CHARS", 200))
     # The FTS5 `content` column only needs enough text to match on.
@@ -81,6 +82,8 @@ class EngineSettings:
 
     # --- dedupe and domain policy ----------------------------------------
     max_urls_per_domain: int = field(default_factory=lambda: _int("INDEX_MAX_URLS_PER_DOMAIN", 12))
+    # Sitelinks kept per domain root.
+    sections_max: int = field(default_factory=lambda: _int("INDEX_SECTIONS_MAX", 5))
     # Root and level-1 pages only (Wikipedia articles are the documented exception).
     max_path_depth: int = field(default_factory=lambda: _int("INDEX_MAX_PATH_DEPTH", 1))
 

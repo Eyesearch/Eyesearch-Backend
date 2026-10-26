@@ -17,11 +17,13 @@ tracking pixels and paragraph dumps — is stripped before it reaches storage.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
+
+import json
 
 from app.engine.config import get_engine_settings
 from app.engine.urls import domain_class, infer_category, is_indexable, normalise_url, root_domain
@@ -37,6 +39,61 @@ _BOILERPLATE_TAGS = ("script", "style", "noscript", "nav", "footer", "header", "
 _CONTENT_SELECTORS = ("article", "main", '[role="main"]', "#content", ".content", "#main", ".post")
 
 
+def extract_sections(
+    html: str,
+    base_url: str,
+    *,
+    limit: int = 5,
+) -> list[dict[str, str]]:
+    """Pull the high-value navigation targets out of a page.
+
+    Returns up to `limit` entries of `{title, url, snippet}` — the sections the
+    frontend renders as sitelinks under the root result. Matching is by anchor
+    text or href path against generic patterns (sign in, docs, pricing, …), so a
+    site's own wording is what decides.
+    """
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    host = urlparse(normalise_url(base_url)).netloc
+    found: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+
+    for anchor in soup.find_all("a", href=True):
+        text = normalise_whitespace(anchor.get_text(" ", strip=True)).lower()
+        href = str(anchor.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+
+        target = normalise_url(urljoin(base_url, href))
+        parsed = urlparse(target)
+        if parsed.netloc != host:
+            continue
+        depth = len([part for part in parsed.path.split("/") if part])
+        if depth > 2:
+            continue
+
+        haystack = f"{text} {parsed.path.lower()}"
+        if target in seen_urls:
+            continue
+        for label, hint, keywords in SECTION_PATTERNS:
+            if label in seen_titles:
+                continue
+            if not any(keyword in haystack for keyword in keywords):
+                continue
+            seen_urls.add(target)
+            seen_titles.add(label)
+            found.append({"title": label, "url": target, "snippet": hint})
+            break
+
+        if len(found) >= limit:
+            break
+
+    return found
+
+
 @dataclass(slots=True)
 class ExtractedDocument:
     url: str
@@ -50,6 +107,7 @@ class ExtractedDocument:
     language: str
     favicon_url: str | None
     category: str = "web"
+    sections: list[dict[str, str]] = field(default_factory=list)
 
     def payload_bytes(self) -> int:
         """UTF-8 size of what will actually be stored for this page."""
@@ -58,7 +116,12 @@ class ExtractedDocument:
             self.domain_class, self.category, self.title, self.snippet, self.content,
             self.language, self.favicon_url or "",
         )
+        fields = fields + (self.sections_json(),)
         return sum(len(field.encode("utf-8")) for field in fields)
+
+    def sections_json(self) -> str:
+        """The compact JSON array stored alongside the document."""
+        return json.dumps(self.sections, ensure_ascii=False, separators=(",", ":")) if self.sections else ""
 
     def fit_to_budget(self, max_bytes: int | None = None) -> "ExtractedDocument":
         """Trim content, then snippet, then title until the row fits the budget."""
@@ -90,6 +153,7 @@ class ExtractedDocument:
             "language": self.language,
             "favicon_url": self.favicon_url,
             "category": self.category,
+            "sections_json": self.sections_json(),
             "payload_bytes": self.payload_bytes(),
         }
 
@@ -118,6 +182,18 @@ def detect_language(text: str) -> str:
 
 
 _SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
+
+# High-value navigation targets worth keeping as sitelinks, matched by anchor
+# text or href path. Generic patterns only — nothing here is domain-specific.
+SECTION_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("Sign in", "Access your account", ("sign in", "signin", "log in", "login", "sign-in")),
+    ("Sign up", "Create an account", ("sign up", "signup", "register", "get started", "create account")),
+    ("Documentation", "Official developer guides", ("docs", "documentation", "developers", "api reference", "guides")),
+    ("Pricing", "Plans and pricing", ("pricing", "plans", "price")),
+    ("Dashboard", "Your workspace", ("dashboard", "console", "workspace", "my account")),
+    ("Download", "Download and install", ("download", "install")),
+    ("Support", "Help and contact", ("support", "help", "contact")),
+)
 
 
 def summarise(text: str, *, max_sentences: int = 4, max_chars: int = 1500) -> str:
@@ -236,8 +312,13 @@ def extract_document(
     snippet = description or truncate(body, settings.snippet_max_chars)
     snippet = truncate(snippet, settings.snippet_max_chars)
 
+    sections = extract_sections(html, url, limit=settings.sections_max)
+    # The section names are part of what the page offers, so they belong in the
+    # searchable text too — otherwise "ztube pricing" could never match the root.
+    section_names = ", ".join(section["title"] for section in sections)
     document = ExtractedDocument(
         category=category or infer_category(url),
+        sections=sections,
         url=normalise_url(url),
         canonical_url=canonical_url,
         domain=urlparse(canonical_url).netloc,
@@ -245,10 +326,14 @@ def extract_document(
         domain_class=domain_class(canonical_url),
         title=title,
         snippet=snippet,
-        content=summarise(
-            body,
-            max_sentences=settings.summary_max_sentences,
-            max_chars=settings.content_max_chars,
+        content=truncate(
+            summarise(
+                body,
+                max_sentences=settings.summary_max_sentences,
+                max_chars=settings.content_max_chars,
+            )
+            + (f" Sections: {section_names}." if section_names else ""),
+            settings.content_max_chars,
         ),
         language=detect_language(f"{title} {body}"),
         favicon_url=favicon,
@@ -278,6 +363,7 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 __all__ = [
     "summarise",
+    "extract_sections",
     "ExtractedDocument",
     "extract_document",
     "extract_links",

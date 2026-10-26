@@ -9,7 +9,7 @@ official and regional sources.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 TRUSTED_SUFFIXES = (".gov.in", ".nic.in", ".ac.in", ".edu.in", ".org.in")
@@ -25,6 +25,7 @@ class RankedDocument:
     updated_at: str | None
     bm25: float
     favicon_url: str | None = None
+    sections: list[dict[str, str]] = field(default_factory=list)
     score: float = 0.0
 
 

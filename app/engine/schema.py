@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS documents (
     content TEXT,
     domain TEXT,
     category TEXT,
+    sections_json TEXT,
     canonical_url TEXT,
     root_domain TEXT,
     domain_class TEXT DEFAULT 'static',
@@ -120,6 +121,7 @@ ENGINE_SCHEMA: tuple[str, ...] = (
 # Columns added after the first release; applied to existing databases.
 ENGINE_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("documents", "category TEXT"),
+    ("documents", "sections_json TEXT"),
     ("documents", "root_domain TEXT"),
     ("documents", "domain_class TEXT DEFAULT 'static'"),
     ("documents", "payload_bytes INTEGER DEFAULT 0"),
