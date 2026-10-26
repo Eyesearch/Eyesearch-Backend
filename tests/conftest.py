@@ -21,6 +21,8 @@ os.environ.setdefault("LIVE_SEARCH_ENABLED", "true")
 # Background workers and discovery stay off in tests: the suite calls the worker
 # functions directly, and a scheduled pass would reach the network.
 os.environ.setdefault("REVALIDATE_ENABLED", "false")
+# The autonomous seed crawler would reach the network from every test.
+os.environ.setdefault("SEED_CRAWL_ENABLED", "false")
 os.environ.setdefault("BACKLOG_WORKER_ENABLED", "false")
 os.environ.setdefault("BACKLOG_DISCOVERY_ENABLED", "false")
 

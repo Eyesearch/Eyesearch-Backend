@@ -215,6 +215,7 @@ async def test_seed_pass_stores_documents_with_their_category(temp_db, monkeypat
     monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
 
     settings = EngineSettings(
+        seed_crawl_enabled=True,
         respect_robots=False,
         crawl_delay_seconds=0.0,
         seed_crawl_pages_per_domain=1,
