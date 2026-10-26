@@ -605,3 +605,81 @@ async def test_the_tls_policy_can_forbid_the_fallback(monkeypatch) -> None:
     settings = EngineSettings(crawl_verify_tls="always")
 
     assert await fetch_mod.fetch_page(httpx.AsyncClient(), "https://strict.gov.in/", settings) is None
+
+
+# --- the production schema mismatch: crawl_backlog without `kind` ----------
+
+async def test_a_legacy_backlog_table_without_kind_still_accepts_queries(temp_db) -> None:
+    """The exact production error: no column named kind."""
+    store = get_store()
+    client = database.get_client()
+
+    # Reproduce the old schema.
+    await client.batch(
+        [
+            "DROP TABLE IF EXISTS crawl_backlog",
+            "CREATE TABLE crawl_backlog (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "query TEXT NOT NULL, hits INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_query ON crawl_backlog(query)",
+        ]
+    )
+    store._backlog_kind = None  # force a fresh probe
+
+    await store.enqueue_backlog("court", 1)
+
+    assert await store.pending_backlog(10) == ["court"]
+
+
+async def test_the_migration_adds_kind_and_is_verified(temp_db, caplog) -> None:
+    store = get_store()
+    client = database.get_client()
+    await client.batch(
+        [
+            "DROP TABLE IF EXISTS crawl_backlog",
+            "CREATE TABLE crawl_backlog (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "query TEXT NOT NULL, hits INTEGER DEFAULT 0, status TEXT DEFAULT 'pending', "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP)",
+        ]
+    )
+
+    with caplog.at_level("INFO"):
+        await database.initialize_schema()
+
+    result = await client.execute("PRAGMA table_info(crawl_backlog)")
+    columns = {str(row[1]).lower() for row in (getattr(result, "rows", ()) or ())}
+    assert "kind" in columns
+    assert any("migration applied: crawl_backlog.kind" in r.message for r in caplog.records)
+
+    store._backlog_kind = None
+    await store.enqueue_domain("maharashtra.gov.in")
+    assert await store.pending_domains(5) == ["maharashtra.gov.in"]
+
+
+async def test_a_failing_page_step_does_not_undo_the_site_commit(temp_db) -> None:
+    """Sites commit in their own request, so a page failure cannot roll them back."""
+    store = get_store()
+    client = database.get_client()
+
+    real_batch = client.batch
+    calls: list[int] = []
+
+    async def _batch(statements, **kwargs):
+        statements = list(statements)
+        calls.append(len(statements))
+        if len(calls) == 2:
+            # the page batch: pretend one step failed inside a 200 response
+            client.last_errors = ["libsql step 0 failed: SQLITE_CONSTRAINT (statement: INSERT INTO pages …)"]
+            return []
+        return await real_batch(statements)
+
+    client.batch = _batch  # type: ignore[method-assign]
+
+    outcome = await store.replace_documents(
+        [{"url": "https://committed.gov.in/", "canonical_url": "https://committed.gov.in/",
+          "title": "Committed portal", "description": "Snippet.", "payload_bytes": 100}]
+    )
+
+    assert len(calls) == 2                     # sites, then pages — separate requests
+    assert outcome["failed_statements"] == 1
+    assert await store.count_documents() == 1  # the site row survived
