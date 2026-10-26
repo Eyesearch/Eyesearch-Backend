@@ -345,18 +345,37 @@ category, never a third-party snippet dump:
 | software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
 | knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
 
-A default pass runs the five India-first categories (government, banking, sports,
-e-commerce, education); `--category software` or `--category knowledge` adds the
-others. Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one
-shared HTTP client and the single Turso connection, and every domain is stored
-as **one root page plus at most five sitelinks** inside the 10 KB domain budget.
+The registry (`app/indexer/seed_registry.py`) holds **211 authoritative Indian
+roots** across government (central + every state and UT), public utilities and
+transit, universities/IITs/NITs/IIMs and exam boards, regulators and courts, and
+national digital services — plus banking, sports, e-commerce and software.
+Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
+client and the single Turso connection, and every domain is stored as **one root
+page plus at most five sitelinks** inside the 10 KB domain budget.
+
+### Continuous discovery
+
+Every page the crawler reads is also mined for outbound links. A host joins the
+backlog when it looks like an Indian authority — a `.gov.in`, `.nic.in`,
+`.ac.in`, `.res.in`, `.edu.in`, `.org.in`, `.co.in` or `.in` domain — and is
+rejected when it is a social network, ad network, CDN, shortener, login
+redirector or non-Indian commercial site (`app/indexer/discovery.py`). Hosts
+already in `sites` are never queued again.
+
+The backlog drains in **batches of 10 domains** with a 0.5 s pause between
+batches (`DISCOVERY_BATCH_SIZE`, `DISCOVERY_BATCH_PAUSE_SECONDS`), and stops at
+`MAX_INDEXED_SITES` (50,000) or when the queue empties. Measured on a cold local
+database with no manual command: boot in **608 ms**, `/health` in **11 ms** while
+crawling, and after four minutes **113 sites / 269 pages** (113 root + 156
+sitelink) with **480 domains discovered** and the queue still draining.
 
 A pass crawls each seed's entry page and follows same-host **level-1 links only**,
 storing one root page plus at most five sitelinks per domain with
 `INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates.
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
-the index is under `SEED_COVERAGE_MIN_SITES` (5), launches
+the index is under `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task` — the port binds and
 `/health` answers in milliseconds while the crawl runs behind it. The same
 function wakes every `SEED_CRAWL_INTERVAL_SECONDS` (24 h) to re-verify the seeds
@@ -663,18 +682,37 @@ category, never a third-party snippet dump:
 | software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
 | knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
 
-A default pass runs the five India-first categories (government, banking, sports,
-e-commerce, education); `--category software` or `--category knowledge` adds the
-others. Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one
-shared HTTP client and the single Turso connection, and every domain is stored
-as **one root page plus at most five sitelinks** inside the 10 KB domain budget.
+The registry (`app/indexer/seed_registry.py`) holds **211 authoritative Indian
+roots** across government (central + every state and UT), public utilities and
+transit, universities/IITs/NITs/IIMs and exam boards, regulators and courts, and
+national digital services — plus banking, sports, e-commerce and software.
+Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
+client and the single Turso connection, and every domain is stored as **one root
+page plus at most five sitelinks** inside the 10 KB domain budget.
+
+### Continuous discovery
+
+Every page the crawler reads is also mined for outbound links. A host joins the
+backlog when it looks like an Indian authority — a `.gov.in`, `.nic.in`,
+`.ac.in`, `.res.in`, `.edu.in`, `.org.in`, `.co.in` or `.in` domain — and is
+rejected when it is a social network, ad network, CDN, shortener, login
+redirector or non-Indian commercial site (`app/indexer/discovery.py`). Hosts
+already in `sites` are never queued again.
+
+The backlog drains in **batches of 10 domains** with a 0.5 s pause between
+batches (`DISCOVERY_BATCH_SIZE`, `DISCOVERY_BATCH_PAUSE_SECONDS`), and stops at
+`MAX_INDEXED_SITES` (50,000) or when the queue empties. Measured on a cold local
+database with no manual command: boot in **608 ms**, `/health` in **11 ms** while
+crawling, and after four minutes **113 sites / 269 pages** (113 root + 156
+sitelink) with **480 domains discovered** and the queue still draining.
 
 A pass crawls each seed's entry page and follows same-host **level-1 links only**,
 storing one root page plus at most five sitelinks per domain with
 `INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates.
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
-the index is under `SEED_COVERAGE_MIN_SITES` (5), launches
+the index is under `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task` — the port binds and
 `/health` answers in milliseconds while the crawl runs behind it. The same
 function wakes every `SEED_CRAWL_INTERVAL_SECONDS` (24 h) to re-verify the seeds
@@ -798,7 +836,8 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
 `INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (86400),
-`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5),
+`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000),
 `CRAWL_TIMEOUT_SECONDS` (5), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
