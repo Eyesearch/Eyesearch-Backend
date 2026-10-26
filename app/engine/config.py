@@ -55,6 +55,17 @@ class EngineSettings:
     # The FTS5 `content` column only needs enough text to match on.
     content_max_chars: int = field(default_factory=lambda: _int("INDEX_CONTENT_MAX_CHARS", 1200))
 
+    # --- relevance -------------------------------------------------------
+    # A single-word query must appear in the title, URL or snippet — never only
+    # in the body — or the hit is rejected and the caller falls back.
+    relevance_require_strong_field: bool = field(
+        default_factory=lambda: _bool("RELEVANCE_REQUIRE_STRONG_FIELD", True)
+    )
+    # Multi-word queries: fraction of the words that must appear in those fields.
+    relevance_min_token_coverage: float = field(
+        default_factory=lambda: _float("RELEVANCE_MIN_TOKEN_COVERAGE", 0.5)
+    )
+
     # --- dedupe and domain policy ----------------------------------------
     max_urls_per_domain: int = field(default_factory=lambda: _int("INDEX_MAX_URLS_PER_DOMAIN", 12))
     max_path_depth: int = field(default_factory=lambda: _int("INDEX_MAX_PATH_DEPTH", 2))

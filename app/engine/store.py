@@ -46,8 +46,15 @@ INSERT INTO documents_fts (url, title, snippet, content, language, updated_at)
 VALUES (?, ?, ?, ?, ?, ?)
 """
 
-_SEARCH_FTS = """
-SELECT f.url, f.title, f.snippet, f.language, f.updated_at, bm25(documents_fts) AS rank,
+# Column weights for bm25, in the order the columns are declared in
+# documents_fts: url, title, snippet, content, language. A hit in the title is
+# worth ten times a hit in the body, so a footer mention can never outrank a
+# page that is actually about the term.
+_BM25_WEIGHTS = "8.0, 10.0, 1.5, 0.5, 0.0"
+
+_SEARCH_FTS = f"""
+SELECT f.url, f.title, f.snippet, f.language, f.updated_at,
+       bm25(documents_fts, {_BM25_WEIGHTS}) AS rank,
        d.favicon_url AS favicon
 FROM documents_fts f
 LEFT JOIN documents d ON d.url = f.url
@@ -73,6 +80,36 @@ def _now() -> str:
 def _content_hash(title: str, snippet: str) -> str:
     digest = hashlib.sha256(f"{title}\n{snippet}".encode("utf-8")).hexdigest()
     return digest[:32]
+
+
+def query_tokens(query: str) -> list[str]:
+    """The words a query is judged on — same tokenisation as the MATCH builder."""
+    return [token.lower() for token in _SAFE_TOKEN.findall(query or "") if len(token) >= 2]
+
+
+def passes_relevance(query: str, document: RankedDocument, settings: EngineSettings) -> bool:
+    """Reject a hit that only matched a passing mention.
+
+    A document is relevant when the query's words appear in a field that
+    describes the page — its title, its URL or its snippet — rather than only
+    somewhere in the body. That is what stops "google" matching a cricket page
+    because a footer once said "Google Play".
+    """
+    tokens = query_tokens(query)
+    if not tokens:
+        return False
+
+    described = " ".join(
+        (document.title or "", document.url or "", document.snippet or "")
+    ).lower()
+    matched = [token for token in tokens if token in described]
+
+    if len(tokens) == 1:
+        # A single word must appear in a descriptive field, not only in the body.
+        return bool(matched) if settings.relevance_require_strong_field else True
+
+    coverage = len(matched) / len(tokens)
+    return coverage >= settings.relevance_min_token_coverage
 
 
 def build_match_query(query: str) -> str:
@@ -341,7 +378,19 @@ class IndexStore:
                     favicon_url=str(record.get("favicon") or "") or None,
                 )
             )
-        return rank_documents(documents, freshness_weight=self.settings.freshness_weight)
+
+        # bm25 ranks; this filter decides whether the hit is about the query at
+        # all. A rejected hit is not an error — it means the index cannot answer
+        # and the caller falls back.
+        relevant = [doc for doc in documents if passes_relevance(query, doc, self.settings)]
+        if len(relevant) != len(documents):
+            logger.debug(
+                "index: %d of %d hits for %r rejected as weak matches",
+                len(documents) - len(relevant),
+                len(documents),
+                query,
+            )
+        return rank_documents(relevant, freshness_weight=self.settings.freshness_weight)
 
     async def suggest(self, query: str, limit: int = 8) -> list[str]:
         """OpenSearch autocomplete: matching document titles, deduplicated.
@@ -500,4 +549,4 @@ def get_store(settings: EngineSettings | None = None) -> IndexStore:
     return _store
 
 
-__all__ = ["IndexStore", "get_store", "build_match_query"]
+__all__ = ["IndexStore", "get_store", "build_match_query", "passes_relevance", "query_tokens"]
