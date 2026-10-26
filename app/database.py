@@ -323,7 +323,26 @@ async def initialize_schema() -> None:
         raise DatabaseError("schema initialisation timed out") from exc
     except Exception as exc:
         raise DatabaseError(f"schema initialisation failed: {exc}") from exc
+    await purge_unverified_cache()
     logger.info("schema ready on %s", describe_target()["kind"])
+
+
+async def purge_unverified_cache() -> int:
+    """Empty `search_records`, which held raw provider dumps.
+
+    Nothing writes to that table any more: verified pages live in `documents`
+    and `documents_fts`. The purge runs at startup and is a no-op once the table
+    is empty, so old unverified rows can never surface again.
+    """
+    try:
+        result = await _execute("DELETE FROM search_records")
+        removed = int(getattr(result, "rows_affected", 0) or 0)
+        if removed:
+            logger.warning("purged %d unverified cached rows from search_records", removed)
+        return removed
+    except Exception as exc:
+        logger.warning("cache purge skipped: %s", exc)
+        return 0
 
 
 async def ping() -> bool:
