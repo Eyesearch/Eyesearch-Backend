@@ -100,6 +100,68 @@ Codes: `bad_request` (400), `not_found` (404), `rate_limited` (429),
 `provider_unavailable` (503), `database_error` (503), `internal` (500).
 `retryable` is a real judgement — it is `false` for `bad_request`.
 
+## Own index: crawler + indexer
+
+The gateway is no longer only a proxy. `app/engine/`, `app/crawler/` and
+`app/indexer/` add a proprietary index that answers queries before any external
+provider is touched.
+
+**Schema** (applied at startup with the rest of the DDL):
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    url, title, snippet, content, language, updated_at UNINDEXED
+);
+```
+
+backed by `documents` (one row per URL: canonical URL, domain, title, snippet,
+clean body, language, favicon, timestamps), `crawl_backlog` (queries the index
+could not answer) and `crawl_queue` (URLs to fetch).
+
+**Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
+regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
+Kannada Wikipedia, Prajuna/Deccan Herald/The Hindu Karnataka), robots.txt
+honoured, one request at a time per host with a delay, a byte cap per page, a
+page budget per seed, same-host links only, and an SSRF guard that refuses
+link-local hosts. Every failure is skipped, never fatal.
+
+**Extractor** (`app/engine/text.py`) — title (falling back to `<h1>`), meta
+description, canonical URL, favicon, and a clean body with navigation, footers,
+scripts and forms stripped. It detects Kannada and Devanagari by script, and
+refuses pages with no title or almost no text.
+
+**Ranking** (`app/engine/ranking.py`) — SQLite's `bm25()` flipped to
+higher-is-better, normalised across the result set, then blended with an
+exponential freshness decay (30-day half-life) and a small host-trust term that
+favours official and regional domains.
+
+**Routing** (`app/services/search_service.py`) — index first:
+
+```
+documents_fts  →  (≥ INDEX_THRESHOLD hits)  →  serve as source: "index"
+              →  (sparse)  →  Turso cache  →  external providers  →  source: "live"
+                                        ↘  queue the query in crawl_backlog
+```
+
+Every response now carries `source` (`index` | `cache` | `live`) and
+`index_hits`, so a client can tell whether the answer came from our own index.
+`/health` reports `index: {documents, backlog}`.
+
+**Running the ingestion** (a scheduler can call the same functions):
+
+```bash
+python -m app.indexer.pipeline --stats                  # index health
+python -m app.indexer.pipeline --seeds                  # crawl + index the seed domains
+python -m app.indexer.pipeline --query "namma metro"    # crawl the seeds relevant to one query
+python -m app.indexer.pipeline --backlog                # crawl for the queries we could not answer
+```
+
+Engine knobs (all optional): `INDEX_THRESHOLD` (default 3),
+`INDEX_FRESHNESS_WEIGHT` (0.25), `CRAWL_ENABLED` (true),
+`CRAWL_MAX_PAGES_PER_SEED` (20), `CRAWL_MAX_DEPTH` (1), `CRAWL_CONCURRENCY` (3),
+`CRAWL_DELAY_SECONDS` (1.0), `CRAWL_MAX_BYTES` (512000),
+`CRAWL_RESPECT_ROBOTS` (true), `INDEX_MAX_CONTENT_CHARS` (20000).
+
 ## Retrieval fallback chain
 
 ```
@@ -213,6 +275,9 @@ app/
 ├── database.py             # LibSQL async client, schema, typed queries
 ├── errors.py               # AppError family + error envelope
 ├── schemas.py              # Pydantic v2 contract
+├── engine/                 # own index: text extraction, schema, ranking, store
+├── crawler/                # targeted crawler for Indian/regional domains
+├── indexer/                # ingestion pipeline + CLI
 ├── services/
 │   ├── live_retrieval.py   # fallback chain, per-hop timeouts, circuit breaker
 │   ├── search_service.py   # cache → live → async persist orchestration
