@@ -75,6 +75,12 @@ async def stats() -> dict[str, object]:
         pending_domains = await store.pending_domain_count()
     except Exception:
         pending_domains = 0
+    try:
+        from app.indexer.guard import storage_state
+
+        storage = await storage_state(store)
+    except Exception:
+        storage = {"paused": False}
     return {
         "writable": getattr(app.state, "db_writable", None) if (app := _app()) else None,
         "sites": live.get("sites", live.get("documents", 0)),
@@ -83,6 +89,13 @@ async def stats() -> dict[str, object]:
         "query_backlog": live.get("backlog", 0),
         "discovered_backlog": pending_domains,
         "max_payload_bytes": live.get("max_payload_bytes", 0),
+        "storage": {
+            "pages": storage.get("pages", 0),
+            "limit": storage.get("limit", 0),
+            "over_limit": storage.get("over_limit", False),
+            "quota_tripped": storage.get("quota_tripped", False),
+            "paused": storage.get("paused", False),
+        },
         "source": "database",
     }
 
