@@ -117,7 +117,7 @@ async def test_autonomous_crawl_populates_an_empty_index(temp_db, monkeypatch) -
     async def _fetch(client, url, settings, **kwargs):
         return _html("Seed page"), 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     monkeypatch.setattr(
         seed_crawler,
         "get_engine_settings",
@@ -155,7 +155,7 @@ async def test_autonomous_crawl_survives_a_failing_seed(temp_db, monkeypatch) ->
             raise httpx.ConnectTimeout("seed unreachable")
         return _html("Surviving seed"), 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _flaky)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _flaky)
     monkeypatch.setattr(
         seed_crawler,
         "get_engine_settings",

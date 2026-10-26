@@ -214,7 +214,7 @@ async def test_seed_pass_stores_documents_with_their_category(temp_db, monkeypat
     async def _fetch(client, url, settings, **kwargs):
         return html, 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     # Three seeds are enough to prove the pass; the registry has 200+.
     monkeypatch.setattr(
         seed_crawler, "seeds_for", lambda categories=None: seed_crawler.CATEGORY_SEEDS[:3]
