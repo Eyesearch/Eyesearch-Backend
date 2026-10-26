@@ -126,6 +126,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # covered, and runs in the background. Startup never waits for it, so the
     # port is bound and /health answers immediately.
     if app.state.db_ready:
+        # Prove the database is the right one and writable before anything crawls.
+        try:
+            probe = await database.verify_database()
+            app.state.db_writable = bool(probe.get("writable"))
+            app.state.db_counts = probe.get("counts", {})
+            if not app.state.db_writable:
+                logger.error(
+                    "database is NOT writable (%s) — the crawler will run but nothing will "
+                    "persist until TURSO_AUTH_TOKEN/TURSO_DB_URL are corrected",
+                    probe.get("error") or "unknown reason",
+                )
+        except Exception as exc:
+            app.state.db_writable = False
+            logger.error("startup write probe crashed: %s", exc)
         try:
             state = await seed_crawler.coverage()
             app.state.seed_coverage = state

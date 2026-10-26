@@ -393,6 +393,66 @@ async def initialize_schema() -> None:
         logger.info("schema ready on %s (%s)", describe_target()["kind"], exc)
 
 
+async def verify_database() -> dict[str, Any]:
+    """Prove the database is the right one and that we can write to it.
+
+    Logs the exact integers Turso returns, then writes, reads back and removes a
+    sentinel row. A read-only token, the wrong branch or a staging database all
+    fail here, loudly, at startup instead of silently during a crawl.
+    """
+    report: dict[str, Any] = {"counts": {}, "writable": False, "error": ""}
+    client = get_client()
+
+    try:
+        result = await execute_safe(
+            "SELECT (SELECT COUNT(*) FROM sites), (SELECT COUNT(*) FROM pages), "
+            "(SELECT COUNT(*) FROM page_fts)"
+        )
+        rows = getattr(result, "rows", ()) or ()
+        if rows:
+            sites, pages, indexed = (int(value) for value in rows[0])
+            report["counts"] = {"sites": sites, "pages": pages, "indexed": indexed}
+            logger.info(
+                "startup database check: SELECT count(*) FROM sites = %d, pages = %d, page_fts = %d",
+                sites, pages, indexed,
+            )
+    except Exception as exc:
+        report["error"] = str(exc)
+        logger.error("startup count check failed: %s", exc)
+
+    sentinel = "eyesearch-write-probe.invalid"
+    try:
+        await execute_safe("DELETE FROM pages WHERE url = ?", [f"https://{sentinel}/"])
+        await execute_safe(
+            "INSERT INTO sites (domain, canonical_url, name, category) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(domain) DO UPDATE SET name = excluded.name",
+            [sentinel, f"https://{sentinel}/", "write probe", "probe"],
+        )
+        check = await execute_safe("SELECT COUNT(*) FROM sites WHERE domain = ?", [sentinel])
+        rows = getattr(check, "rows", ()) or ()
+        present = int(rows[0][0]) if rows else 0
+        await execute_safe("DELETE FROM sites WHERE domain = ?", [sentinel])
+        report["writable"] = present == 1
+        if report["writable"]:
+            logger.info("startup write check: INSERT into sites verified (read back %d row)", present)
+        else:
+            report["error"] = "write probe row was not readable after insert"
+            logger.error(
+                "startup write check FAILED: inserted the probe row but read back %d — "
+                "the database is not accepting writes (read-only token, wrong branch or replica?)",
+                present,
+            )
+    except Exception as exc:
+        report["error"] = str(exc)
+        logger.error(
+            "startup write check FAILED: %s — the database rejected a write. Check "
+            "TURSO_AUTH_TOKEN permissions and that TURSO_DB_URL points at the writable "
+            "primary of the right branch.",
+            exc,
+        )
+    return report
+
+
 async def ping() -> bool:
     """Cheap liveness probe used by /health. Never raises."""
     try:
