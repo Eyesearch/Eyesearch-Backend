@@ -38,6 +38,10 @@ class SearchResponse(BaseModel):
     took_ms: int
     degraded: bool = Field(description="True when at least one provider failed.")
     cache_hit: bool = False
+    source: Literal["index", "cache", "live"] = Field(
+        default="live", description="Where these results came from."
+    )
+    index_hits: int = Field(default=0, description="Documents matched in the EyeSearch index.")
     providers: dict[str, int] = Field(default_factory=dict)
     results: list[SearchResult] = Field(default_factory=list)
 
@@ -72,6 +76,8 @@ class RetrieveResponse(BaseModel):
     query: str
     format: Literal["json", "markdown"] = "json"
     degraded: bool = False
+    source: Literal["index", "cache", "live"] = "live"
+    index_hits: int = 0
     providers: dict[str, int] = Field(default_factory=dict)
     failed_providers: list[str] = Field(default_factory=list)
     results: list[AIContextResult] = Field(default_factory=list)
@@ -86,6 +92,7 @@ class HealthResponse(BaseModel):
     environment: str
     uptime_s: int
     providers: dict[str, str] = Field(default_factory=dict)
+    index: dict[str, int] = Field(default_factory=dict, description="Own-index health.")
 
 
 class ErrorDetail(BaseModel):

@@ -19,6 +19,7 @@ from typing import Any, Iterable, Sequence
 import libsql_client
 
 from app.config import Settings, get_settings
+from app.engine.schema import ENGINE_SCHEMA
 from app.errors import DatabaseError
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_query_created ON search_records(query, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_created_at ON search_records(created_at)",
 )
+# ENGINE_SCHEMA (documents, documents_fts, crawl_backlog, crawl_queue) is applied
+# in the same batch, so a cold start always has a usable index.
 
 _UPSERT_SQL = """
 INSERT INTO search_records (query, title, url, snippet, poster_url, source, created_at)
@@ -157,8 +160,8 @@ async def initialize_schema() -> None:
     client = get_client()
     cfg = get_settings()
     try:
-        async with asyncio.timeout(cfg.db_timeout_s * 2):
-            await client.batch(list(SCHEMA_STATEMENTS))
+        async with asyncio.timeout(cfg.db_timeout_s * 3):
+            await client.batch(list(SCHEMA_STATEMENTS) + list(ENGINE_SCHEMA))
     except (TimeoutError, asyncio.TimeoutError) as exc:
         raise DatabaseError("schema initialisation timed out") from exc
     except Exception as exc:

@@ -17,6 +17,8 @@ import httpx
 
 from app import database
 from app.config import Settings, get_settings
+from app.engine.config import get_engine_settings
+from app.engine.store import get_store
 from app.errors import DatabaseError
 from app.schemas import AIContextResult, RetrieveResponse, SearchResponse, SearchResult
 from app.services import formatter, live_retrieval
@@ -59,6 +61,10 @@ class Acquisition:
     failed: list[dict[str, str]] = field(default_factory=list)
     cache_hit: bool = False
     total_estimate: int = 0
+    # "index" = answered by our own FTS5 index, "cache" = Turso result cache,
+    # "live" = external providers.
+    source: str = "live"
+    index_hits: int = 0
 
     @property
     def degraded(self) -> bool:
@@ -124,9 +130,43 @@ class SearchService:
 
     # -- acquisition -----------------------------------------------------
     async def acquire(self, query: str, limit: int) -> Acquisition:
-        """Cache first, then the live chain. Persists live results in the background."""
+        """Index first, then the Turso cache, then the live chain.
+
+        Our own index is the preferred source: if it returns at least
+        `INDEX_THRESHOLD` documents the query is answered entirely from it. A
+        sparse miss falls through to the cache and the external providers, and
+        the unanswered query is queued for the crawler so the next identical
+        query can be served locally.
+        """
         normalized = " ".join(query.split())
         acquisition = Acquisition(query=normalized)
+        engine = get_engine_settings()
+
+        # 0. proprietary index
+        local_hits = 0
+        try:
+            local = await get_store().search_local(normalized, limit)
+        except Exception as exc:  # a broken index must never fail a request
+            local = []
+            logger.warning("index lookup failed for %r: %s", normalized, exc)
+
+        local_hits = len(local)
+        acquisition.index_hits = local_hits
+        if local_hits >= engine.index_threshold:
+            acquisition.results = [
+                RawResult(
+                    title=doc.title,
+                    url=doc.url,
+                    snippet=doc.snippet,
+                    source="eyesearch_index",
+                    position=index,
+                )
+                for index, doc in enumerate(local)
+            ]
+            acquisition.providers = {"eyesearch_index": local_hits}
+            acquisition.source = "index"
+            acquisition.total_estimate = local_hits
+            return acquisition
 
         # 1. cache
         try:
@@ -148,6 +188,7 @@ class SearchService:
                 )
             except DatabaseError:
                 pass
+            acquisition.source = "cache"
             return acquisition
 
         # 2. live chain
@@ -166,6 +207,12 @@ class SearchService:
         if outcome.results:
             _schedule_write(_persist(normalized, _raw_to_records(outcome.results, self._settings)))
 
+        # 4. the index could not answer this query, so queue it for the crawler —
+        # whether or not the external providers happened to return anything.
+        if local_hits < engine.index_threshold:
+            _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
+
+        acquisition.source = "live"
         return acquisition
 
     # -- contracts -------------------------------------------------------
@@ -196,6 +243,8 @@ class SearchService:
             took_ms=int((time.perf_counter() - started) * 1000),
             degraded=acquisition.degraded,
             cache_hit=acquisition.cache_hit,
+            source=acquisition.source,
+            index_hits=acquisition.index_hits,
             providers=acquisition.providers,
             results=cards,
         )
@@ -222,6 +271,8 @@ class SearchService:
             query=acquisition.query,
             format="json",
             degraded=acquisition.degraded,
+            source=acquisition.source,
+            index_hits=acquisition.index_hits,
             providers=acquisition.providers,
             failed_providers=acquisition.failed_providers,
             results=results,

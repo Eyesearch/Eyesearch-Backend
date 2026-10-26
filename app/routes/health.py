@@ -10,6 +10,7 @@ from fastapi import APIRouter
 from app import database
 from app.config import get_settings
 from app.schemas import HealthResponse
+from app.engine.store import get_store
 from app.services.live_retrieval import provider_states
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,10 @@ async def _health() -> HealthResponse:
         providers = provider_states()
     except Exception:  # pragma: no cover - defensive
         providers = {}
+    try:
+        index_stats = await get_store().stats() if db_up else {"documents": 0, "backlog": 0}
+    except Exception:  # pragma: no cover - defensive
+        index_stats = {"documents": 0, "backlog": 0}
     return HealthResponse(
         ok=db_up,
         db="up" if db_up else "down",
@@ -36,6 +41,7 @@ async def _health() -> HealthResponse:
         environment=cfg.environment,
         uptime_s=int(time.monotonic() - _STARTED_AT),
         providers=providers,
+        index=index_stats,
     )
 
 
