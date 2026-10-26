@@ -19,6 +19,12 @@ router = APIRouter(tags=["health"])
 _STARTED_AT = time.monotonic()
 
 
+def _app():  # pragma: no cover - trivial accessor for request-time state
+    from app.main import app
+
+    return app
+
+
 async def _health() -> HealthResponse:
     cfg = get_settings()
     try:
@@ -70,6 +76,7 @@ async def stats() -> dict[str, object]:
     except Exception:
         pending_domains = 0
     return {
+        "writable": getattr(app.state, "db_writable", None) if (app := _app()) else None,
         "sites": live.get("sites", live.get("documents", 0)),
         "pages": live.get("pages", 0),
         "indexed": live.get("pages", 0),
