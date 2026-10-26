@@ -61,7 +61,10 @@ class EngineSettings:
 
     # --- category seed crawler -------------------------------------------
     seed_crawl_enabled: bool = field(default_factory=lambda: _bool("SEED_CRAWL_ENABLED", True))
-    seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 21600))
+    # The self-healing refresh: every 24 hours by default.
+    seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 86400))
+    # Below this many sites the index counts as uncovered and boot re-seeds it.
+    seed_coverage_min_sites: int = field(default_factory=lambda: _int("SEED_COVERAGE_MIN_SITES", 5))
     seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
     # Domains crawled at once: bounded so the target sites and the single Turso
     # connection both stay stable.
@@ -103,7 +106,7 @@ class EngineSettings:
             "EyeSearchBot/1.0 (+https://github.com/Eyesearch/Eyesearch-Backend; indexing Indian web)",
         )
     )
-    crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 8.0))
+    crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 5.0))
     crawl_max_bytes: int = field(default_factory=lambda: _int("CRAWL_MAX_BYTES", 512_000))
     respect_robots: bool = field(default_factory=lambda: _bool("CRAWL_RESPECT_ROBOTS", True))
 

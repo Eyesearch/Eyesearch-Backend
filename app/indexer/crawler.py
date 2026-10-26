@@ -228,6 +228,72 @@ async def run_seed_pass(
     return report
 
 
+async def coverage(store: object | None = None) -> dict[str, object]:
+    """How much of the seed list the index already covers."""
+    index = store or get_store()
+    settings = get_engine_settings()
+    sites = await index.count_documents()
+    seeds = seeds_for(None)
+    domains = {seed.url.split("/")[2].removeprefix("www.") for seed in seeds}
+    covered = 0
+    client = get_client()
+    for domain in domains:
+        try:
+            row = await client.execute("SELECT 1 FROM sites WHERE domain = ? LIMIT 1", [domain])
+            if getattr(row, "rows", ()):
+                covered += 1
+        except Exception as exc:
+            logger.debug("coverage probe failed for %s: %s", domain, exc)
+
+    return {
+        "sites": sites,
+        "seed_domains": len(domains),
+        "covered": covered,
+        "threshold": settings.seed_coverage_min_sites,
+        "sufficient": sites >= settings.seed_coverage_min_sites,
+    }
+
+
+async def run_autonomous_seed_crawl(store: object | None = None) -> dict[str, object]:
+    """The lifecycle's own crawl: never raises, always logs what it did.
+
+    Called from the FastAPI lifespan as a background task, so the server binds
+    its port and answers /health while this runs.
+    """
+    index = store or get_store()
+    try:
+        state = await coverage(index)
+    except Exception as exc:
+        logger.warning("coverage check failed, crawling anyway: %s", exc)
+        state = {"sufficient": False, "sites": 0, "covered": 0, "seed_domains": 0}
+
+    if state.get("sufficient"):
+        logger.info(
+            "autonomous crawl skipped: %s sites already cover the seeds", state.get("sites")
+        )
+        return {"skipped": True, **state}
+
+    logger.info(
+        "autonomous crawl starting: %s sites, %s/%s seed domains covered (threshold %s)",
+        state.get("sites"), state.get("covered"), state.get("seed_domains"), state.get("threshold"),
+    )
+    try:
+        report = await run_seed_pass()
+    except Exception as exc:  # a background task must never take the app down
+        logger.warning("autonomous crawl failed: %s", exc)
+        return {"skipped": False, "error": str(exc), **state}
+
+    try:
+        after = await coverage(index)
+    except Exception:
+        after = {}
+    logger.info(
+        "autonomous crawl done: %s documents, %s pages stored, now %s sites / %s seed domains covered",
+        report.get("documents"), report.get("stored"), after.get("sites"), after.get("covered"),
+    )
+    return {"skipped": False, **report, "coverage_after": after}
+
+
 async def _main() -> None:
     parser = argparse.ArgumentParser(description="EyeSearch category-seed crawler")
     parser.add_argument("--category", action="append", choices=list(CATEGORIES))
@@ -310,6 +376,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "coverage",
+    "run_autonomous_seed_crawl",
     "DEFAULT_CATEGORIES",
     "verify_index",
     "CATEGORY_SEEDS",
