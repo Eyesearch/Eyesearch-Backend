@@ -12,7 +12,6 @@ Local development works with no Turso account: ``TURSO_DB_URL`` defaults to
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
@@ -21,7 +20,7 @@ from urllib.parse import urlparse
 import libsql_client
 
 from app.config import Settings, get_settings
-from app.engine.schema import ENGINE_MIGRATIONS, ENGINE_SCHEMA, FTS_TABLE, FTS_TRIGGERS
+from app.engine.schema import ENGINE_SCHEMA, LEGACY_TABLES, LEGACY_TRIGGERS, PAGE_FTS, PAGE_TRIGGERS
 from app.errors import DatabaseError
 
 # What a database URL should look like once we are done with it: no token, no
@@ -59,90 +58,11 @@ logger = logging.getLogger(__name__)
 
 # The schema from the task brief, plus additive indexes. Applied idempotently at
 # startup so Render needs no separate migration step.
-SCHEMA_STATEMENTS: tuple[str, ...] = (
-    """
-    CREATE TABLE IF NOT EXISTS search_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query_key TEXT NOT NULL,
-        query TEXT NOT NULL,
-        title TEXT,
-        url TEXT NOT NULL,
-        snippet TEXT,
-        poster_url TEXT,
-        source TEXT DEFAULT 'live_crawl',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (query_key, url)
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_query_key_created ON search_records(query_key, created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_created_at ON search_records(created_at)",
-)
-# ENGINE_SCHEMA (documents, documents_fts, crawl_backlog, crawl_queue) is applied
-# in the same batch, so a cold start always has a usable index.
-
-_UPSERT_SQL = """
-INSERT INTO search_records (query_key, query, title, url, snippet, poster_url, source, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(query_key, url) DO UPDATE SET
-    title = excluded.title,
-    snippet = excluded.snippet,
-    poster_url = excluded.poster_url,
-    source = excluded.source,
-    created_at = excluded.created_at
-"""
-
-_SELECT_CACHED_SQL = """
-SELECT id, query_key, query, title, url, snippet, poster_url, source, created_at
-FROM search_records
-WHERE query_key = ? AND created_at >= ?
-ORDER BY id ASC
-LIMIT ?
-"""
-
-_COUNT_SQL = "SELECT COUNT(*) AS n FROM search_records WHERE query_key = ? AND created_at >= ?"
-_PURGE_SQL = "DELETE FROM search_records WHERE created_at < ?"
+# Base schema. The result cache and the flat `documents` model are gone: the
+# two-tier index in app/engine/schema.py is the only store now.
+SCHEMA_STATEMENTS: tuple[str, ...] = ()
 
 _client: libsql_client.Client | None = None
-
-
-def normalise_query(query: str) -> str:
-    """The one normal form used for cache keys: lower-cased, whitespace-collapsed."""
-    return " ".join((query or "").split()).lower()
-
-
-def query_cache_key(query: str) -> str:
-    """Stable cache key for a query: a hash of its normal form.
-
-    Hashing (rather than storing the raw string) means two queries can never be
-    confused by case, spacing or trailing punctuation, and the key is a fixed
-    width regardless of what the user typed.
-    """
-    digest = hashlib.sha256(normalise_query(query).encode("utf-8")).hexdigest()
-    return digest[:40]
-
-
-def _timestamp(value: datetime | None = None) -> str:
-    """Turso stores ``CURRENT_TIMESTAMP`` as ``YYYY-MM-DD HH:MM:SS`` in UTC."""
-    moment = value or datetime.now(timezone.utc)
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _cutoff(ttl_hours: int) -> str:
-    return _timestamp(datetime.now(timezone.utc) - timedelta(hours=max(0, ttl_hours)))
-
-
-def _rows_to_dicts(result: Any) -> list[dict[str, Any]]:
-    columns: Sequence[str] = tuple(getattr(result, "columns", ()) or ())
-    rows: Iterable[Any] = getattr(result, "rows", ()) or ()
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            out.append(dict(row))
-        elif columns:
-            out.append({name: row[idx] for idx, name in enumerate(columns)})
-        else:
-            out.append({})
-    return out
 
 
 def safe_url(url: str) -> str:
@@ -286,93 +206,69 @@ async def _execute(
         raise DatabaseError(f"database query failed: {exc}") from exc
 
 
-async def _migrate_cache_table() -> None:
-    """Rebuild ``search_records`` if it predates the per-query cache key.
+async def _drop_legacy_index() -> None:
+    """Remove the flat `documents` model and the legacy result cache.
 
-    The old table had ``url UNIQUE``, which let one query steal another query's
-    rows. It is a cache, so the rebuild drops the rows rather than migrating
-    them — which also clears any results poisoned by the old relevance bug.
+    Both were derived data from earlier releases; the two-tier `sites`/`pages`
+    schema replaces them, and the brief asks for a clean recreation.
     """
     client = get_client()
+    statements = [f"DROP TRIGGER IF EXISTS {name}" for name in LEGACY_TRIGGERS]
+    statements += [f"DROP TABLE IF EXISTS {name}" for name in LEGACY_TABLES]
     try:
-        info = await client.execute("PRAGMA table_info(search_records)")
-        columns = {str(row[1]) for row in (getattr(info, "rows", ()) or ())}
+        await client.batch(statements)
     except Exception as exc:
-        logger.debug("cache schema probe skipped: %s", exc)
-        return
-
-    if not columns or "query_key" in columns:
-        return
-
-    logger.warning("rebuilding search_records: the old schema had no per-query cache key")
-    try:
-        await client.execute("DROP TABLE IF EXISTS search_records")
-    except Exception as exc:
-        raise DatabaseError(f"cache table migration failed: {exc}") from exc
+        raise DatabaseError(f"legacy index cleanup failed: {exc}") from exc
 
 
-async def _migrate_index_tables() -> None:
-    """Add missing columns and rebuild the FTS index if its shape changed.
-
-    The FTS table is derived data: if it predates the external-content form (or
-    the triggers that keep it in sync), it is dropped and rebuilt from
-    `documents`. That is safe on an empty database and self-healing on an old one.
-    """
+async def _ensure_page_fts() -> None:
+    """Create or repair the external-content FTS index and its triggers."""
     client = get_client()
-
-    for table, column_ddl in ENGINE_MIGRATIONS:
-        try:
-            await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_ddl}")
-            logger.info("index migration applied: %s.%s", table, column_ddl.split()[0])
-        except Exception:
-            continue  # already present
-
     try:
         info = await client.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='documents_fts'"
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='page_fts'"
         )
         rows = getattr(info, "rows", ()) or ()
         existing_sql = str(rows[0][0]) if rows else ""
     except Exception as exc:
-        logger.debug("FTS schema probe skipped: %s", exc)
+        logger.debug("page_fts probe skipped: %s", exc)
         existing_sql = ""
 
     needs_rebuild = (
         not existing_sql
-        or "content='documents'" not in existing_sql
+        or "content='pages'" not in existing_sql
         or "unicode61" not in existing_sql
     )
 
     if needs_rebuild:
-        logger.info("rebuilding documents_fts as external-content FTS5 (unicode61)")
+        logger.info("building page_fts as external-content FTS5 (unicode61)")
         try:
             await client.batch(
                 [
-                    "DROP TRIGGER IF EXISTS documents_ai",
-                    "DROP TRIGGER IF EXISTS documents_ad",
-                    "DROP TRIGGER IF EXISTS documents_au",
-                    "DROP TABLE IF EXISTS documents_fts",
-                    FTS_TABLE,
-                    *FTS_TRIGGERS,
+                    "DROP TRIGGER IF EXISTS pages_ai",
+                    "DROP TRIGGER IF EXISTS pages_ad",
+                    "DROP TRIGGER IF EXISTS pages_au",
+                    "DROP TABLE IF EXISTS page_fts",
+                    PAGE_FTS,
+                    *PAGE_TRIGGERS,
                 ]
             )
-            await client.execute("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')")
+            await client.execute("INSERT INTO page_fts(page_fts) VALUES('rebuild')")
         except Exception as exc:
-            raise DatabaseError(f"FTS rebuild failed: {exc}") from exc
+            raise DatabaseError(f"page_fts rebuild failed: {exc}") from exc
         return
 
-    # Shape is current; make sure the sync triggers exist.
     try:
-        await client.batch(list(FTS_TRIGGERS))
+        await client.batch(list(PAGE_TRIGGERS))
     except Exception as exc:
-        logger.warning("could not ensure FTS triggers: %s", exc)
+        logger.warning("could not ensure page triggers: %s", exc)
 
 
 async def initialize_schema() -> None:
     """Apply the schema. Idempotent, so it is safe on every cold start."""
     client = get_client()
     cfg = get_settings()
-    await _migrate_cache_table()
+    await _drop_legacy_index()
     try:
         async with asyncio.timeout(cfg.db_timeout_s * 3):
             await client.batch(list(SCHEMA_STATEMENTS) + list(ENGINE_SCHEMA))
@@ -380,41 +276,24 @@ async def initialize_schema() -> None:
         raise DatabaseError("schema initialisation timed out") from exc
     except Exception as exc:
         raise DatabaseError(f"schema initialisation failed: {exc}") from exc
-    # Runs after the base tables exist: the FTS rebuild reads `documents`.
-    await _migrate_index_tables()
-    await purge_unverified_cache()
+    # Runs after the base tables exist: the FTS rebuild reads `pages`.
+    await _ensure_page_fts()
     try:
         counts = await get_client().execute(
-            "SELECT (SELECT COUNT(*) FROM documents), (SELECT COUNT(*) FROM documents_fts)"
+            "SELECT (SELECT COUNT(*) FROM sites), (SELECT COUNT(*) FROM pages), "
+            "(SELECT COUNT(*) FROM page_fts)"
         )
         rows = getattr(counts, "rows", ()) or ()
-        documents, indexed = (int(rows[0][0]), int(rows[0][1])) if rows else (0, 0)
+        sites, pages, indexed = (int(rows[0][0]), int(rows[0][1]), int(rows[0][2])) if rows else (0, 0, 0)
         logger.info(
-            "schema ready on %s: %d documents, %d indexed",
+            "schema ready on %s: %d sites, %d pages, %d indexed",
             describe_target()["kind"],
-            documents,
+            sites,
+            pages,
             indexed,
         )
     except Exception as exc:  # pragma: no cover - observability only
         logger.info("schema ready on %s (%s)", describe_target()["kind"], exc)
-
-
-async def purge_unverified_cache() -> int:
-    """Empty `search_records`, which held raw provider dumps.
-
-    Nothing writes to that table any more: verified pages live in `documents`
-    and `documents_fts`. The purge runs at startup and is a no-op once the table
-    is empty, so old unverified rows can never surface again.
-    """
-    try:
-        result = await _execute("DELETE FROM search_records")
-        removed = int(getattr(result, "rows_affected", 0) or 0)
-        if removed:
-            logger.warning("purged %d unverified cached rows from search_records", removed)
-        return removed
-    except Exception as exc:
-        logger.warning("cache purge skipped: %s", exc)
-        return 0
 
 
 async def ping() -> bool:
@@ -427,89 +306,3 @@ async def ping() -> bool:
         return False
 
 
-async def fetch_cached(
-    query: str,
-    limit: int,
-    *,
-    ttl_hours: int | None = None,
-) -> list[dict[str, Any]]:
-    """Return cached records for exactly this query, newer than the TTL.
-
-    The lookup is by ``query_cache_key(query)`` — never by a shared or partial
-    key — so a query can only ever see rows written for itself.
-    """
-    cfg = get_settings()
-    ttl = cfg.cache_ttl_hours if ttl_hours is None else ttl_hours
-    result = await _execute(_SELECT_CACHED_SQL, [query_cache_key(query), _cutoff(ttl), int(limit)])
-    return _rows_to_dicts(result)
-
-
-async def count_cached(query: str, *, ttl_hours: int | None = None) -> int:
-    cfg = get_settings()
-    ttl = cfg.cache_ttl_hours if ttl_hours is None else ttl_hours
-    result = await _execute(_COUNT_SQL, [query_cache_key(query), _cutoff(ttl)])
-    rows = _rows_to_dicts(result)
-    if not rows:
-        return 0
-    try:
-        return int(rows[0].get("n") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-async def upsert_records(query: str, records: Sequence[dict[str, Any]]) -> int:
-    """Persist retrieval results in a single batched round trip.
-
-    Rows are keyed by ``(query_cache_key(query), url)``: the same URL can be
-    cached under several queries without one query taking it away from another,
-    and a query can never be served rows that belong to a different one.
-    """
-    if not records:
-        return 0
-    key = query_cache_key(query)
-    now = _timestamp()
-    statements: list[tuple[str, list[Any]]] = []
-    for record in records:
-        url = (record.get("url") or "").strip()
-        if not url:
-            continue
-        statements.append(
-            (
-                _UPSERT_SQL,
-                [
-                    key,
-                    normalise_query(query)[:200],
-                    (record.get("title") or url)[:500],
-                    url[:2000],
-                    (record.get("snippet") or "")[:2000],
-                    record.get("poster_url"),
-                    (record.get("source") or "live_crawl")[:64],
-                    now,
-                ],
-            )
-        )
-    if not statements:
-        return 0
-    client = get_client()
-    cfg = get_settings()
-    try:
-        async with asyncio.timeout(cfg.db_timeout_s * 2):
-            await client.batch(statements)
-    except (TimeoutError, asyncio.TimeoutError) as exc:
-        raise DatabaseError("cache write timed out") from exc
-    except Exception as exc:
-        raise DatabaseError(f"cache write failed: {exc}") from exc
-    return len(statements)
-
-
-async def purge_expired(*, ttl_hours: int | None = None) -> int:
-    """Drop rows older than the TTL so the free-tier database stays small."""
-    cfg = get_settings()
-    ttl = cfg.cache_ttl_hours if ttl_hours is None else ttl_hours
-    # Keep a generous window: 7x TTL, so a popular query stays warm.
-    result = await _execute(_PURGE_SQL, [_cutoff(ttl * 7)])
-    rows = getattr(result, "rows", None)
-    try:
-        return int(getattr(result, "rows_affected", 0) or (len(rows) if rows else 0))
-    except (TypeError, ValueError):
-        return 0

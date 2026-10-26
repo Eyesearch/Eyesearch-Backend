@@ -1,81 +1,99 @@
-"""Schema for the proprietary index.
+"""Two-tier schema: canonical `sites`, bounded `pages`, external-content FTS5.
 
-`documents` is the single source of truth: one row per normalised URL, carrying
-the clean title, a 3–4 sentence summary, the canonical URL, the domain and the
-category the page was crawled under.
+One row in `sites` per domain; one row in `pages` per root or sitelink page,
+bounded to a handful per site. `page_fts` is FTS5 over `pages` with
+`content='pages'`, so the text is not stored twice, and three triggers keep the
+index in step with the table.
 
-`documents_fts` is an FTS5 table over `documents` (external content, so the text
-is not stored twice) with the unicode61 tokenizer. Three triggers keep the index
-in perfect sync with the table, which means application code never writes to the
-FTS table directly — no half-synced rows are possible.
-
-Everything is `CREATE ... IF NOT EXISTS`, so a cold start on an empty Turso
-database rebuilds the whole schema by itself.
+The previous flat `documents` model (and the legacy result cache) is dropped at
+startup: it was unstructured, it could hold dozens of rows for one domain, and
+this schema supersedes it.
 """
 
 from __future__ import annotations
 
-# Columns indexed by FTS5, in bm25 weight order: title, snippet, content, url.
-# The weights in app/engine/store.py follow this order exactly.
-FTS_COLUMNS: tuple[str, ...] = ("title", "snippet", "content", "url")
+# The seven indexed columns of page_fts, in bm25 weight order.
+FTS_COLUMNS: tuple[str, ...] = (
+    "title",
+    "headings",
+    "description",
+    "nav_terms",
+    "site_terms",
+    "category_terms",
+    "url_terms",
+)
 
-DOCUMENTS_TABLE = """
-CREATE TABLE IF NOT EXISTS documents (
-    url TEXT PRIMARY KEY,
-    title TEXT,
-    snippet TEXT,
-    content TEXT,
-    domain TEXT,
-    category TEXT,
-    sections_json TEXT,
+# bm25 weights, matching FTS_COLUMNS one-for-one.
+BM25_WEIGHTS: tuple[float, ...] = (10.0, 5.0, 2.5, 3.0, 4.0, 1.0, 2.0)
+
+SITES_TABLE = """
+CREATE TABLE IF NOT EXISTS sites (
+    site_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL UNIQUE,
+    canonical_url TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    authority_score REAL NOT NULL DEFAULT 1.0,
+    last_crawled_at INTEGER
+)
+"""
+
+PAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS pages (
+    page_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+    url TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('root', 'sitelink')),
+    title TEXT NOT NULL DEFAULT '',
+    headings TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    nav_terms TEXT NOT NULL DEFAULT '',
+    site_terms TEXT NOT NULL DEFAULT '',
+    category_terms TEXT NOT NULL DEFAULT '',
+    url_terms TEXT NOT NULL DEFAULT '',
+    http_status INTEGER NOT NULL DEFAULT 200,
+    noindex INTEGER NOT NULL DEFAULT 0,
     canonical_url TEXT,
-    root_domain TEXT,
-    domain_class TEXT DEFAULT 'static',
-    language TEXT DEFAULT 'en',
-    favicon_url TEXT,
-    payload_bytes INTEGER DEFAULT 0,
     content_hash TEXT,
-    etag TEXT,
-    last_modified TEXT,
-    last_checked_at TIMESTAMP,
-    http_status INTEGER,
-    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    quality REAL DEFAULT 0.5
+    last_crawled_at INTEGER
 )
 """
 
-# External-content FTS5: the text lives in `documents`, the index references it.
-FTS_TABLE = """
-CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    title, snippet, content, url,
-    content='documents',
-    content_rowid='rowid',
-    tokenize='unicode61 remove_diacritics 2'
+PAGE_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS page_fts USING fts5(
+    title,
+    headings,
+    description,
+    nav_terms,
+    site_terms,
+    category_terms,
+    url_terms,
+    content='pages',
+    content_rowid='page_id',
+    tokenize='unicode61 remove_diacritics 2',
+    detail=full
 )
 """
 
-# The three triggers from the FTS5 documentation, verbatim in shape.
-FTS_TRIGGERS: tuple[str, ...] = (
+PAGE_TRIGGERS: tuple[str, ...] = (
     """
-    CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN
-        INSERT INTO documents_fts(rowid, title, snippet, content, url)
-        VALUES (new.rowid, new.title, new.snippet, new.content, new.url);
+    CREATE TRIGGER IF NOT EXISTS pages_ai AFTER INSERT ON pages BEGIN
+        INSERT INTO page_fts(rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
+        VALUES (new.page_id, new.title, new.headings, new.description, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
     END
     """,
     """
-    CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN
-        INSERT INTO documents_fts(documents_fts, rowid, title, snippet, content, url)
-        VALUES ('delete', old.rowid, old.title, old.snippet, old.content, old.url);
+    CREATE TRIGGER IF NOT EXISTS pages_ad AFTER DELETE ON pages BEGIN
+        INSERT INTO page_fts(page_fts, rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
+        VALUES ('delete', old.page_id, old.title, old.headings, old.description, old.nav_terms, old.site_terms, old.category_terms, old.url_terms);
     END
     """,
     """
-    CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
-        INSERT INTO documents_fts(documents_fts, rowid, title, snippet, content, url)
-        VALUES ('delete', old.rowid, old.title, old.snippet, old.content, old.url);
-        INSERT INTO documents_fts(rowid, title, snippet, content, url)
-        VALUES (new.rowid, new.title, new.snippet, new.content, new.url);
+    CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
+        INSERT INTO page_fts(page_fts, rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
+        VALUES ('delete', old.page_id, old.title, old.headings, old.description, old.nav_terms, old.site_terms, old.category_terms, old.url_terms);
+        INSERT INTO page_fts(rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
+        VALUES (new.page_id, new.title, new.headings, new.description, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
     END
     """,
 )
@@ -109,35 +127,40 @@ CRAWL_TABLES: tuple[str, ...] = (
 )
 
 ENGINE_SCHEMA: tuple[str, ...] = (
-    DOCUMENTS_TABLE,
-    "CREATE INDEX IF NOT EXISTS idx_documents_domain ON documents(domain)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_category ON documents(category)",
-    "CREATE INDEX IF NOT EXISTS idx_documents_updated ON documents(updated_at)",
-    FTS_TABLE,
-    *FTS_TRIGGERS,
+    SITES_TABLE,
+    PAGES_TABLE,
+    "CREATE INDEX IF NOT EXISTS idx_pages_site ON pages(site_id, kind)",
+    "CREATE INDEX IF NOT EXISTS idx_pages_url ON pages(url)",
+    "CREATE INDEX IF NOT EXISTS idx_sites_domain ON sites(domain)",
+    "CREATE INDEX IF NOT EXISTS idx_sites_category ON sites(category)",
+    PAGE_FTS,
+    *PAGE_TRIGGERS,
     *CRAWL_TABLES,
 )
 
-# Columns added after the first release; applied to existing databases.
-ENGINE_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("documents", "category TEXT"),
-    ("documents", "sections_json TEXT"),
-    ("documents", "root_domain TEXT"),
-    ("documents", "domain_class TEXT DEFAULT 'static'"),
-    ("documents", "payload_bytes INTEGER DEFAULT 0"),
-    ("documents", "content_hash TEXT"),
-    ("documents", "etag TEXT"),
-    ("documents", "last_modified TEXT"),
-    ("documents", "last_checked_at TIMESTAMP"),
-    ("crawl_queue", "category TEXT"),
+# Tables from earlier releases. They are derived data, and the brief asks for a
+# clean recreation, so they are dropped at startup.
+LEGACY_TABLES: tuple[str, ...] = (
+    "documents_fts",
+    "documents",
+    "search_records",
+)
+
+LEGACY_TRIGGERS: tuple[str, ...] = (
+    "documents_ai",
+    "documents_ad",
+    "documents_au",
 )
 
 __all__ = [
     "ENGINE_SCHEMA",
-    "ENGINE_MIGRATIONS",
-    "FTS_TABLE",
-    "FTS_TRIGGERS",
+    "LEGACY_TABLES",
+    "LEGACY_TRIGGERS",
     "FTS_COLUMNS",
-    "DOCUMENTS_TABLE",
+    "BM25_WEIGHTS",
+    "SITES_TABLE",
+    "PAGES_TABLE",
+    "PAGE_FTS",
+    "PAGE_TRIGGERS",
     "CRAWL_TABLES",
 ]

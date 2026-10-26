@@ -14,7 +14,7 @@ import would make that circular. Import the store directly where you need it:
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import rank_documents
-from app.engine.schema import ENGINE_SCHEMA, FTS_TABLE
+from app.engine.schema import BM25_WEIGHTS, ENGINE_SCHEMA, FTS_COLUMNS
 from app.engine.text import ExtractedDocument, extract_document
 
 __all__ = [
@@ -22,7 +22,8 @@ __all__ = [
     "get_engine_settings",
     "rank_documents",
     "ENGINE_SCHEMA",
-    "FTS_TABLE",
+    "FTS_COLUMNS",
+    "BM25_WEIGHTS",
     "ExtractedDocument",
     "extract_document",
 ]
