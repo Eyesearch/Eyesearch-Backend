@@ -353,12 +353,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
-**Driver responses are never trusted.** Every statement goes through
-`execute_safe()` (`app/database.py`), which normalises whatever the LibSQL driver
-returns — `{"result": {...}}`, a bare `{"rows": ...}`, or an object with
-`.rows` — and retries once when a response arrives without its `result` key,
-because that used to surface as `KeyError: 'result'` inside the backlog worker
-and lose the query.
+**The Turso client is ours.** `libsql_client`'s HTTP backend parses the response
+as `response["result"]`, but Turso's pipeline endpoint answers
+`{"results": [{"type": "ok", "response": {"type": "execute", "result": {...}}}]}`.
+That mismatch raised `KeyError: 'result'` on every statement, so reads and
+writes to `crawl_backlog` silently returned nothing. `app/libsql_http.py` now
+speaks the v2 pipeline directly and accepts every shape we have seen —
+`results` lists, a single `result`, plain `cols`/`rows` mappings, and Hrana step
+objects — decoding typed cells (`text`, `integer`, `float`, `null`, `blob`) into
+Python values. An `INSERT` with no rowset is success, not an error, and an empty
+pipeline is "no rows". `execute_safe()` still wraps every call and retries once
+on a malformed response.
 
 ### Continuous discovery
 
@@ -698,12 +703,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
-**Driver responses are never trusted.** Every statement goes through
-`execute_safe()` (`app/database.py`), which normalises whatever the LibSQL driver
-returns — `{"result": {...}}`, a bare `{"rows": ...}`, or an object with
-`.rows` — and retries once when a response arrives without its `result` key,
-because that used to surface as `KeyError: 'result'` inside the backlog worker
-and lose the query.
+**The Turso client is ours.** `libsql_client`'s HTTP backend parses the response
+as `response["result"]`, but Turso's pipeline endpoint answers
+`{"results": [{"type": "ok", "response": {"type": "execute", "result": {...}}}]}`.
+That mismatch raised `KeyError: 'result'` on every statement, so reads and
+writes to `crawl_backlog` silently returned nothing. `app/libsql_http.py` now
+speaks the v2 pipeline directly and accepts every shape we have seen —
+`results` lists, a single `result`, plain `cols`/`rows` mappings, and Hrana step
+objects — decoding typed cells (`text`, `integer`, `float`, `null`, `blob`) into
+Python values. An `INSERT` with no rowset is success, not an error, and an empty
+pipeline is "no rows". `execute_safe()` still wraps every call and retries once
+on a malformed response.
 
 ### Continuous discovery
 
