@@ -65,6 +65,9 @@ class EngineSettings:
     seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 86400))
     # Below this many sites the index counts as uncovered and boot re-seeds it.
     seed_coverage_min_sites: int = field(default_factory=lambda: _int("SEED_COVERAGE_MIN_SITES", 5))
+    # What "covered" means: the share of *registry seeds* present in `sites`.
+    # 1.0 means every seed in seed_registry.py must be indexed.
+    seed_coverage_min_ratio: float = field(default_factory=lambda: _float("SEED_COVERAGE_MIN_RATIO", 1.0))
     # Continuous discovery: batches of ten, a pause between batches, and a hard
     # ceiling on indexed sites (well inside the free Turso allowance).
     discovery_batch_size: int = field(default_factory=lambda: _int("DISCOVERY_BATCH_SIZE", 10))

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 
 import httpx
@@ -26,7 +27,7 @@ from app.crawler.crawler import RobotsCache, fetch_page
 from app.indexer.discovery import discover_domains, is_indian_authoritative
 from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
-from app.database import get_client
+from app.database import execute_safe, get_client
 from app.engine.store import get_store
 from app.engine.text import ExtractedDocument, extract_document, extract_links
 from app.engine.urls import infer_category, is_indexable, normalise_url
@@ -161,6 +162,7 @@ async def crawl_seed(
 async def run_seed_pass(
     categories: list[str] | None = None,
     *,
+    seeds: list[CategorySeed] | None = None,
     settings: EngineSettings | None = None,
     store: object | None = None,
 ) -> dict[str, object]:
@@ -175,8 +177,8 @@ async def run_seed_pass(
         logger.info("seed crawl disabled")
         return report
 
-    seeds = seeds_for(categories)
-    if not seeds:
+    targets = seeds if seeds is not None else seeds_for(categories)
+    if not targets:
         return report
 
     # A single shared HTTP client and a single shared database client: the
@@ -197,7 +199,7 @@ async def run_seed_pass(
                     logger.warning("seed %s failed: %s", seed.url, exc)
                     return seed, SeedReport(category=seed.category), []
 
-        for seed, seed_report, documents in await asyncio.gather(*(run(seed) for seed in seeds)):
+        for seed, seed_report, documents in await asyncio.gather(*(run(seed) for seed in targets)):
             if documents:
                 written = await index.replace_documents([document.as_row() for document in documents])
                 seed_report.stored = int(written.get("pages", 0))
@@ -302,29 +304,42 @@ async def run_discovery_pass(
     return report
 
 
+def _seed_domain(seed: CategorySeed) -> str:
+    return urlparse(seed.url).netloc.lower().removeprefix("www.")
+
+
 async def coverage(store: object | None = None) -> dict[str, object]:
-    """How much of the seed list the index already covers."""
-    index = store or get_store()
+    """Which registry seeds are actually indexed — not merely how many sites exist.
+
+    A site count says nothing about *which* domains are present: 61 old sites
+    once made this report "sufficient" while none of the registry seeds were in
+    the index. This compares the registry against `sites` directly, in a single
+    query, and returns the uncovered seeds so the crawl can target them.
+    """
     settings = get_engine_settings()
-    sites = await index.count_documents()
     seeds = seeds_for(None)
-    domains = {seed.url.split("/")[2].removeprefix("www.") for seed in seeds}
-    covered = 0
-    client = get_client()
-    for domain in domains:
-        try:
-            row = await client.execute("SELECT 1 FROM sites WHERE domain = ? LIMIT 1", [domain])
-            if getattr(row, "rows", ()):
-                covered += 1
-        except Exception as exc:
-            logger.debug("coverage probe failed for %s: %s", domain, exc)
+    wanted = {_seed_domain(seed): seed for seed in seeds}
+
+    indexed: set[str] = set()
+    try:
+        result = await execute_safe("SELECT domain FROM sites")
+        for row in getattr(result, "rows", ()) or ():
+            indexed.add(str(row[0] or "").lower().removeprefix("www."))
+    except Exception as exc:
+        logger.warning("coverage read failed: %s", exc)
+
+    covered = sorted(set(wanted) & indexed)
+    uncovered = sorted(set(wanted) - indexed)
+    ratio = (len(covered) / len(wanted)) if wanted else 1.0
 
     return {
-        "sites": sites,
-        "seed_domains": len(domains),
-        "covered": covered,
-        "threshold": settings.seed_coverage_min_sites,
-        "sufficient": sites >= settings.seed_coverage_min_sites,
+        "sites": len(indexed),
+        "seed_domains": len(wanted),
+        "covered": len(covered),
+        "uncovered": uncovered,
+        "ratio": round(ratio, 4),
+        "threshold": settings.seed_coverage_min_ratio,
+        "sufficient": ratio >= settings.seed_coverage_min_ratio,
     }
 
 
@@ -343,16 +358,19 @@ async def run_autonomous_seed_crawl(store: object | None = None) -> dict[str, ob
 
     if state.get("sufficient"):
         logger.info(
-            "autonomous crawl skipped: %s sites already cover the seeds", state.get("sites")
+            "autonomous crawl skipped: %s/%s registry seeds indexed (%.1f%%)",
+            state.get("covered"), state.get("seed_domains"), float(state.get("ratio") or 0) * 100,
         )
         return {"skipped": True, **state}
 
+    uncovered = set(state.get("uncovered") or ())
+    missing = [seed for seed in seeds_for(None) if _seed_domain(seed) in uncovered]
     logger.info(
-        "autonomous crawl starting: %s sites, %s/%s seed domains covered (threshold %s)",
-        state.get("sites"), state.get("covered"), state.get("seed_domains"), state.get("threshold"),
+        "autonomous crawl starting: %s/%s registry seeds indexed, %s missing",
+        state.get("covered"), state.get("seed_domains"), len(missing),
     )
     try:
-        report = await run_seed_pass()
+        report = await run_seed_pass(seeds=missing)
     except Exception as exc:  # a background task must never take the app down
         logger.warning("autonomous crawl failed: %s", exc)
         return {"skipped": False, "error": str(exc), **state}
@@ -374,7 +392,7 @@ async def run_autonomous_seed_crawl(store: object | None = None) -> dict[str, ob
         "autonomous crawl done: %s documents, %s pages stored, now %s sites / %s seed domains covered",
         report.get("documents"), report.get("stored"), after.get("sites"), after.get("covered"),
     )
-    return {"skipped": False, **report, "coverage_after": after}
+    return {"skipped": False, **state, **report, "coverage_after": after}
 
 
 async def _main() -> None:
