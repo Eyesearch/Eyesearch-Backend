@@ -353,10 +353,12 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
-**The crawl is an audit, not a download.** Each seed root is fetched with a
-browser-shaped agent
-(`Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0`), redirects
-followed and a 15 s timeout (`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). TLS
+**The crawl is an audit, not a download.** Each seed root is fetched as desktop
+Chrome — the plain `Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36` agent plus the
+matching `Accept`, `Accept-Language`, `Sec-Fetch-*` and
+`Upgrade-Insecure-Requests` headers — with redirects followed and a 15 s timeout
+(`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). A bot token in the agent is what
+earns a 403/406 from several government WAFs, so there is none. TLS
 follows `CRAWL_VERIFY_TLS`: `auto` (default) verifies and, when a host presents a
 broken chain — common on NIC portals — retries that one request unverified with a
 warning; `never` skips verification outright; `always` refuses the fallback.
@@ -409,14 +411,16 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**A responding seed always persists a root.** When a seed's entry page returns
-any HTML — a 200 with nothing extractable, a JavaScript shell, even a 403 body —
-the root record is built from the seed label or the hostname
-(`PSPCL - Punjab State Power Corporation Limited`) and committed immediately,
-without waiting for sitelinks. A response with no body at all yields nothing,
-because an empty answer is not a site. Verified with the three cases from the
-report: `pspcl.in` (200, content) → 2 pages, `canarabank.bank.in` (403 with a
-body) → 1 page, `telangana.gov.in` (JS shell) → 1 page.
+**Every seed persists a root — whatever the server answers.** A 200 with
+nothing extractable, a JavaScript shell, a 403, a 406, a 500 or a connection/SSL
+failure all end in a committed root record, titled with the seed label when we
+have content and with the bare hostname when we do not (`eci.gov.in`). Sitelinks
+are optional; only a syntactically invalid domain is skipped. Each seed is
+written as it finishes, so the site count moves with every seed rather than at
+the end of the pass. Verified against all five cases in one run: `eci.gov.in`
+(403), `ssc.nic.in` (406), `sslbroken.gov.in` (SSL failure), `error.gov.in`
+(500) → hostname roots, `karnataka.gov.in` (200) → extracted title; 5 seeds,
+5 sites, 5 pages committed.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
@@ -801,10 +805,12 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
-**The crawl is an audit, not a download.** Each seed root is fetched with a
-browser-shaped agent
-(`Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0`), redirects
-followed and a 15 s timeout (`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). TLS
+**The crawl is an audit, not a download.** Each seed root is fetched as desktop
+Chrome — the plain `Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36` agent plus the
+matching `Accept`, `Accept-Language`, `Sec-Fetch-*` and
+`Upgrade-Insecure-Requests` headers — with redirects followed and a 15 s timeout
+(`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). A bot token in the agent is what
+earns a 403/406 from several government WAFs, so there is none. TLS
 follows `CRAWL_VERIFY_TLS`: `auto` (default) verifies and, when a host presents a
 broken chain — common on NIC portals — retries that one request unverified with a
 warning; `never` skips verification outright; `always` refuses the fallback.
@@ -857,14 +863,16 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**A responding seed always persists a root.** When a seed's entry page returns
-any HTML — a 200 with nothing extractable, a JavaScript shell, even a 403 body —
-the root record is built from the seed label or the hostname
-(`PSPCL - Punjab State Power Corporation Limited`) and committed immediately,
-without waiting for sitelinks. A response with no body at all yields nothing,
-because an empty answer is not a site. Verified with the three cases from the
-report: `pspcl.in` (200, content) → 2 pages, `canarabank.bank.in` (403 with a
-body) → 1 page, `telangana.gov.in` (JS shell) → 1 page.
+**Every seed persists a root — whatever the server answers.** A 200 with
+nothing extractable, a JavaScript shell, a 403, a 406, a 500 or a connection/SSL
+failure all end in a committed root record, titled with the seed label when we
+have content and with the bare hostname when we do not (`eci.gov.in`). Sitelinks
+are optional; only a syntactically invalid domain is skipped. Each seed is
+written as it finishes, so the site count moves with every seed rather than at
+the end of the pass. Verified against all five cases in one run: `eci.gov.in`
+(403), `ssc.nic.in` (406), `sslbroken.gov.in` (SSL failure), `error.gov.in`
+(500) → hostname roots, `karnataka.gov.in` (200) → extracted title; 5 seeds,
+5 sites, 5 pages committed.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
