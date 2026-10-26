@@ -63,6 +63,7 @@ class RawResult:
     position: int = 0
     published_at: str | None = None
     image_url: str | None = None
+    sections: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(slots=True)

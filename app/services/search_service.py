@@ -130,6 +130,7 @@ class SearchService:
                     source="eyesearch_index",
                     position=index,
                     image_url=doc.favicon_url,
+                    sections=doc.sections,
                 )
                 for index, doc in enumerate(local)
             ]
@@ -287,7 +288,7 @@ class SearchService:
         acquisition = await self.acquire(query, needed)
         window = acquisition.results[offset : offset + effective_limit]
         cards: list[SearchResult] = formatter.build_ui_results(
-            window, settings=cfg, limit=effective_limit
+            window, settings=cfg, limit=effective_limit, query=acquisition.query
         )
         return SearchResponse(
             query=acquisition.query,
@@ -317,6 +318,9 @@ class SearchService:
                 url=formatter.canonical_url(raw.url),
                 snippet=formatter.clean_snippet(raw.snippet, cfg.snippet_max_chars),
                 favicon=raw.image_url,
+                sitelinks=formatter.rank_sections(
+                    getattr(raw, "sections", []) or [], acquisition.query, base_url=raw.url
+                ),
             )
             for raw in formatter.dedupe(acquisition.results)[:effective]
         ]

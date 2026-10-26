@@ -17,7 +17,7 @@ from typing import Any, Iterable, Protocol, Sequence
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from app.config import Settings, get_settings
-from app.schemas import AIContextResult, SearchResult
+from app.schemas import AIContextResult, SearchResult, Sitelink
 
 # Query parameters that carry no identity for a page.
 _TRACKING_PARAMS = {
@@ -158,11 +158,44 @@ def dedupe(raws: Iterable[Any]) -> list[Any]:
     return unique
 
 
+def rank_sections(
+    sections: list[dict[str, Any]],
+    query: str,
+    *,
+    base_url: str = "",
+) -> list[Any]:
+    """Sitelinks for a card, with the section the query asked for first.
+
+    A query for "github pricing" matches the Pricing section: it is promoted to
+    the front and marked `matched`, so the frontend can surface it as the primary
+    sub-card. Sections keep their stored order otherwise.
+    """
+    from app.engine.relevance import tokens as query_tokens
+
+    host = urlparse(base_url).netloc.lower().removeprefix("www.") if base_url else ""
+    # The domain's own name appears in every section URL, so it must not count as
+    # a section match: "ztube" should not "match" the Sign in link.
+    wanted = [token for token in query_tokens(query) if not host or token not in host]
+    ranked: list[Any] = []
+    for section in sections or []:
+        title = str(section.get("title") or "")
+        url = str(section.get("url") or "")
+        snippet = str(section.get("snippet") or "")
+        haystack = f"{title} {url} {snippet}".lower()
+        matched = bool(wanted) and any(token in haystack for token in wanted)
+        ranked.append(
+            Sitelink(title=title, url=url, snippet=snippet, matched=matched)
+        )
+    ranked.sort(key=lambda item: (not item.matched,))
+    return ranked
+
+
 def build_ui_results(
     raws: Iterable[Any],
     *,
     settings: Settings | None = None,
     limit: int | None = None,
+    query: str = "",
 ) -> list[SearchResult]:
     """Turn raw provider results into bounded, scored UI cards."""
     cfg = settings or get_settings()
@@ -176,6 +209,8 @@ def build_ui_results(
         title = clean_snippet(_get(raw, "title") or url, 200)
         snippet = clean_snippet(_get(raw, "snippet") or "", cfg.snippet_max_chars)
         poster, thumbnail = derive_media(url)
+        sections = rank_sections(_get(raw, "sections") or [], query, base_url=url)
+        matched_section = any(section.matched for section in sections)
         cards.append(
             SearchResult(
                 id=f"{source}:{hashlib.sha1(canonical_url(url).encode()).hexdigest()[:10]}",
@@ -187,7 +222,9 @@ def build_ui_results(
                 poster_url=_get(raw, "image_url") or poster,
                 thumbnail_url=thumbnail or _get(raw, "image_url"),
                 published_at=_get(raw, "published_at"),
-                score=_score(source, int(_get(raw, "position") or 0), index),
+                score=_score(source, int(_get(raw, "position") or 0), index)
+                + (0.2 if matched_section else 0.0),
+                sitelinks=sections,
             )
         )
     return cards

@@ -11,6 +11,17 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+class Sitelink(BaseModel):
+    """A navigation section under a domain root, rendered as a sub-card."""
+
+    title: str
+    url: str
+    snippet: str = ""
+    matched: bool = Field(
+        default=False, description="True when the query matched this section specifically."
+    )
+
+
 class SearchResult(BaseModel):
     """One result card for the human web UI."""
 
@@ -26,6 +37,10 @@ class SearchResult(BaseModel):
     thumbnail_url: str | None = Field(default=None, description="Absolute thumbnail URL.")
     published_at: str | None = None
     score: float = Field(default=0.0, description="Ranking score, higher is better.")
+    sitelinks: list[Sitelink] = Field(
+        default_factory=list,
+        description="Sub-sections of this domain, matched ones first.",
+    )
 
 
 class SearchResponse(BaseModel):
@@ -83,6 +98,7 @@ class MetaSearchResult(BaseModel):
     url: str
     snippet: str = ""
     favicon: str | None = None
+    sitelinks: list[Sitelink] = Field(default_factory=list)
 
 
 class MetaSearchResponse(BaseModel):
