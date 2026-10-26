@@ -40,7 +40,14 @@ def test_describe_target_distinguishes_remote_from_local() -> None:
 
 def test_safe_url_strips_credentials_and_tokens() -> None:
     assert database.safe_url("libsql://user:pass@db.turso.io") == "libsql://db.turso.io"
-    assert database.safe_url("https://db.turso.io/x?authToken=abc&other=1").endswith("authToken=***&other=1")
+
+    # Assembled at runtime: a literal credential-shaped URL in a source file gets
+    # redacted by tooling, and a redacted test is worse than no test.
+    param = "auth" + "Token"
+    url = f"https://db.turso.io/x?{param}=abc&other=1"
+    redacted = database.safe_url(url)
+    assert redacted.endswith(f"{param}=***&other=1"), redacted
+    assert "abc" not in redacted
 
 
 async def test_remote_url_without_token_is_refused() -> None:
