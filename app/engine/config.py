@@ -80,8 +80,19 @@ class EngineSettings:
     government_ttl_days: float = field(default_factory=lambda: _float("REVALIDATE_GOV_DAYS", 7))
     static_ttl_days: float = field(default_factory=lambda: _float("REVALIDATE_STATIC_DAYS", 21))
 
+    # --- suggest ---------------------------------------------------------
+    suggest_limit: int = field(default_factory=lambda: _int("SUGGEST_LIMIT", 8))
+
     # --- backlog ---------------------------------------------------------
     backlog_max_per_query: int = field(default_factory=lambda: _int("BACKLOG_MAX_PER_QUERY", 50))
+    # Autonomous worker: pops pending queries, crawls for them, ingests the result.
+    backlog_worker_enabled: bool = field(default_factory=lambda: _bool("BACKLOG_WORKER_ENABLED", True))
+    backlog_interval_seconds: int = field(default_factory=lambda: _int("BACKLOG_INTERVAL_SECONDS", 900))
+    backlog_batch_queries: int = field(default_factory=lambda: _int("BACKLOG_BATCH_QUERIES", 3))
+    backlog_urls_per_query: int = field(default_factory=lambda: _int("BACKLOG_URLS_PER_QUERY", 5))
+    # Discovery uses the external provider *off* the request path to find which
+    # URLs to crawl for a missed query. Never called while serving a request.
+    backlog_discovery_enabled: bool = field(default_factory=lambda: _bool("BACKLOG_DISCOVERY_ENABLED", True))
 
 
 @lru_cache(maxsize=1)

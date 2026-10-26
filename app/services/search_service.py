@@ -20,7 +20,15 @@ from app.config import Settings, get_settings
 from app.engine.config import get_engine_settings
 from app.engine.store import get_store
 from app.errors import DatabaseError
-from app.schemas import AIContextResult, RetrieveResponse, SearchResponse, SearchResult
+from app.schemas import (
+    AIContextResult,
+    MetaSearchResponse,
+    MetaSearchResult,
+    RagContextItem,
+    RetrieveResponse,
+    SearchResponse,
+    SearchResult,
+)
 from app.services import formatter, live_retrieval
 from app.services.live_retrieval import RawResult, RetrievalOutcome
 
@@ -160,6 +168,7 @@ class SearchService:
                     snippet=doc.snippet,
                     source="eyesearch_index",
                     position=index,
+                    image_url=doc.favicon_url,
                 )
                 for index, doc in enumerate(local)
             ]
@@ -224,6 +233,13 @@ class SearchService:
         acquisition.source = "live"
         return acquisition
 
+    async def suggest(self, query: str, limit: int | None = None) -> list[str]:
+        """Autocomplete from the index. Never touches the network."""
+        cleaned = " ".join((query or "").split())
+        if len(cleaned) < 2:
+            return []
+        return await get_store().suggest(cleaned, limit or get_engine_settings().suggest_limit)
+
     # -- contracts -------------------------------------------------------
     async def search(
         self,
@@ -258,6 +274,46 @@ class SearchService:
             results=cards,
         )
 
+    async def meta_search(self, query: str, *, limit: int | None = None) -> MetaSearchResponse:
+        """The flat, aggregator-friendly JSON contract (`format=json`)."""
+        started = time.perf_counter()
+        cfg = self._settings
+        effective = min(max(1, limit or cfg.default_limit), cfg.max_limit)
+        acquisition = await self.acquire(query, effective)
+
+        results = [
+            MetaSearchResult(
+                title=formatter.clean_snippet(raw.title or raw.url, 160),
+                url=formatter.canonical_url(raw.url),
+                snippet=formatter.clean_snippet(raw.snippet, cfg.snippet_max_chars),
+                favicon=raw.image_url,
+            )
+            for raw in formatter.dedupe(acquisition.results)[:effective]
+        ]
+        source = "eyesearch_index" if acquisition.source == "index" else f"eyesearch_{acquisition.source}"
+        return MetaSearchResponse(
+            query=acquisition.query,
+            total_hits=max(acquisition.index_hits, len(results), acquisition.total_estimate),
+            took_ms=int((time.perf_counter() - started) * 1000),
+            source=source,
+            results=results,
+        )
+
+    async def rag_context(self, query: str, *, limit: int | None = None) -> tuple[list[RagContextItem], Acquisition]:
+        """Token-optimised context blocks for LLM clients."""
+        cfg = self._settings
+        effective = min(max(1, limit or cfg.default_limit), cfg.max_limit)
+        acquisition = await self.acquire(query, effective)
+        context = [
+            RagContextItem(
+                title=formatter.clean_snippet(raw.title or raw.url, 160),
+                url=formatter.canonical_url(raw.url),
+                text=formatter.clean_snippet(raw.snippet, cfg.ai_snippet_max_chars),
+            )
+            for raw in formatter.dedupe(acquisition.results)[:effective]
+        ]
+        return context, acquisition
+
     async def retrieve(
         self,
         query: str,
@@ -276,6 +332,7 @@ class SearchService:
         self, query: str, *, limit: int | None = None
     ) -> RetrieveResponse:
         results, acquisition = await self.retrieve(query, limit=limit)
+        context = [RagContextItem(title=item.title, url=item.url, text=item.snippet) for item in results]
         return RetrieveResponse(
             query=acquisition.query,
             format="json",
@@ -285,6 +342,7 @@ class SearchService:
             providers=acquisition.providers,
             failed_providers=acquisition.failed_providers,
             results=results,
+            context=context,
         )
 
 

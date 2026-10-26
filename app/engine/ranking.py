@@ -24,6 +24,7 @@ class RankedDocument:
     language: str
     updated_at: str | None
     bm25: float
+    favicon_url: str | None = None
     score: float = 0.0
 
 

@@ -47,10 +47,21 @@ VALUES (?, ?, ?, ?, ?, ?)
 """
 
 _SEARCH_FTS = """
-SELECT url, title, snippet, language, updated_at, bm25(documents_fts) AS rank
-FROM documents_fts
+SELECT f.url, f.title, f.snippet, f.language, f.updated_at, bm25(documents_fts) AS rank,
+       d.favicon_url AS favicon
+FROM documents_fts f
+LEFT JOIN documents d ON d.url = f.url
 WHERE documents_fts MATCH ?
 ORDER BY rank
+LIMIT ?
+"""
+
+# Autocomplete: the document titles that match, most relevant first.
+_SUGGEST_FTS = """
+SELECT f.title
+FROM documents_fts f
+WHERE documents_fts MATCH ?
+ORDER BY bm25(documents_fts)
 LIMIT ?
 """
 
@@ -327,9 +338,44 @@ class IndexStore:
                     language=str(record.get("language") or "en"),
                     updated_at=str(record.get("updated_at") or "") or None,
                     bm25=float(record.get("rank") or 0.0),
+                    favicon_url=str(record.get("favicon") or "") or None,
                 )
             )
         return rank_documents(documents, freshness_weight=self.settings.freshness_weight)
+
+    async def suggest(self, query: str, limit: int = 8) -> list[str]:
+        """OpenSearch autocomplete: matching document titles, deduplicated.
+
+        Falls back to a prefix match when the strict MATCH finds nothing, so a
+        half-typed word still returns something useful.
+        """
+        tokens = _SAFE_TOKEN.findall(query or "")
+        if not tokens:
+            return []
+
+        client = get_client()
+        attempts = [build_match_query(query), f'"{tokens[-1]}"*' if tokens else ""]
+        seen: set[str] = set()
+        suggestions: list[str] = []
+
+        for match in attempts:
+            if not match:
+                continue
+            try:
+                result = await client.execute(_SUGGEST_FTS, [match, max(limit * 2, 12)])
+            except Exception as exc:
+                logger.warning("suggest query failed for %r: %s", query, exc)
+                continue
+            for row in getattr(result, "rows", ()) or ():
+                title = str(row[0] or "").strip()
+                key = title.lower()
+                if not title or key in seen:
+                    continue
+                seen.add(key)
+                suggestions.append(title[:80])
+                if len(suggestions) >= limit:
+                    return suggestions
+        return suggestions
 
     async def count_documents(self) -> int:
         client = get_client()
