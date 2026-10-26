@@ -65,6 +65,21 @@ def _is_blocked(url: str) -> bool:
     return any(host == blocked or host.endswith(f".{blocked}") for blocked in BLOCKED_HOSTS)
 
 
+def crawl_client(settings: EngineSettings) -> httpx.AsyncClient:
+    """The HTTP client for crawling, with TLS configured once.
+
+    `CRAWL_VERIFY_TLS=never` (the default) skips certificate checks entirely so
+    hosts with incomplete chains still index; `auto` verifies and falls back per
+    request; `always` verifies strictly.
+    """
+    policy = (settings.crawl_verify_tls or "never").lower()
+    return httpx.AsyncClient(
+        follow_redirects=True,
+        verify=policy != "never",
+        timeout=settings.crawl_timeout_seconds,
+    )
+
+
 async def _stream_page(
     client: httpx.AsyncClient,
     url: str,
@@ -127,18 +142,9 @@ async def fetch_page(
     if last_modified:
         headers["If-Modified-Since"] = last_modified
 
-    policy = (settings.crawl_verify_tls or "auto").lower()
+    policy = (settings.crawl_verify_tls or "never").lower()
     try:
         try:
-            if policy == "never":
-                # One unverified client for the whole request; httpx sets TLS at
-                # client level, not per call.
-                async with httpx.AsyncClient(
-                    verify=False,
-                    follow_redirects=True,
-                    timeout=settings.crawl_timeout_seconds,
-                ) as insecure:
-                    return await _stream_page(insecure, url, headers, settings)
             return await _stream_page(client, url, headers, settings)
         except (httpx.ConnectError, httpx.ReadError) as exc:
             if policy != "auto" or "certificate" not in str(exc).lower():
@@ -246,4 +252,5 @@ async def crawl_seeds(
     return results
 
 
-__all__ = ["CrawlResult", "crawl_seed", "crawl_seeds", "fetch_page", "RobotsCache"]
+__all__ = [
+    "crawl_client","CrawlResult", "crawl_seed", "crawl_seeds", "fetch_page", "RobotsCache"]

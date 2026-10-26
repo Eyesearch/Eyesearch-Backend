@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from app import database
 from app.config import Settings, get_settings
 from app.errors import AppError, DatabaseError, error_envelope
+from app.engine.config import get_engine_settings
 from app.indexer import crawler as seed_crawler
 from app.indexer import scheduler as revalidate_scheduler
 from app.routes import health, opensearch, retrieve, search

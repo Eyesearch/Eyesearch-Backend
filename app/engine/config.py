@@ -125,10 +125,11 @@ class EngineSettings:
         )
     )
     crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 15.0))
-    # TLS policy for the crawl: "auto" verifies and retries once without
-    # verification when a government site presents a broken chain; "never"
-    # disables verification outright; "always" refuses the fallback.
-    crawl_verify_tls: str = field(default_factory=lambda: _str("CRAWL_VERIFY_TLS", "auto").lower())
+    # TLS policy for the crawl. "never" (the default, as specified) does not
+    # verify certificates at all, because several NIC hosts present an
+    # incomplete chain; "auto" verifies and falls back per request on a
+    # certificate error; "always" verifies strictly and drops such hosts.
+    crawl_verify_tls: str = field(default_factory=lambda: _str("CRAWL_VERIFY_TLS", "never").lower())
     crawl_max_bytes: int = field(default_factory=lambda: _int("CRAWL_MAX_BYTES", 512_000))
     respect_robots: bool = field(default_factory=lambda: _bool("CRAWL_RESPECT_ROBOTS", True))
 
