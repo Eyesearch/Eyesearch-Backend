@@ -26,13 +26,14 @@ _OPENSEARCH_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
   <Description>eyesearch — a unified search gateway over its own index.</Description>
   <InputEncoding>UTF-8</InputEncoding>
   <OutputEncoding>UTF-8</OutputEncoding>
-  <Image width="16" height="16" type="image/svg+xml">{base}/assets/icons/favicon.svg</Image>
-  <Url type="text/html" method="GET" template="{base}/?q={{searchTerms}}" />
+  <Image width="16" height="16" type="image/svg+xml">{web}/assets/icons/favicon.svg</Image>
+  <!-- Humans are sent to the web client; suggestions come from this API. -->
+  <Url type="text/html" method="GET" template="{web}/?q={{searchTerms}}" />
   <Url type="application/x-suggestions+json" method="GET"
-       template="{base}/v1/suggest?q={{searchTerms}}" />
+       template="{api}/v1/suggest?q={{searchTerms}}" />
   <Url type="application/opensearchdescription+xml" rel="self"
-       template="{base}/opensearch.xml" />
-  <moz:SearchForm>{base}/</moz:SearchForm>
+       template="{api}/opensearch.xml" />
+  <moz:SearchForm>{web}/</moz:SearchForm>
   <Developer>EyeSearch</Developer>
   <Contact>https://github.com/Eyesearch/Eyesearch-Backend</Contact>
   <Attribution>Results come from the eyesearch index.</Attribution>
@@ -63,8 +64,9 @@ async def opensearch(request: Request) -> Response:
 
     The suggestion URL is declared here, so browsers get autocomplete for free.
     """
-    base = _public_base(request)
-    body = _OPENSEARCH_TEMPLATE.format(base=escape(base, {'"': "&quot;"}))
+    api_base = escape(_public_base(request), {'"': "&quot;"})
+    web_base = escape((get_settings().web_base_url or _public_base(request)).rstrip("/"), {'"': "&quot;"})
+    body = _OPENSEARCH_TEMPLATE.format(api=api_base, web=web_base)
     return Response(
         content=body,
         media_type="application/opensearchdescription+xml; charset=utf-8",

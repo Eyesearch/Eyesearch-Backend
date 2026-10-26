@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # Absolute origin advertised in /opensearch.xml; empty means "derive from the
     # incoming request", which is right behind Render's proxy.
     public_base_url: str = Field(default="", validation_alias=AliasChoices("PUBLIC_BASE_URL"))
+    # Where the web client is deployed — used by /opensearch.xml for the human
+    # search URL and the icon, which live with the UI rather than the API.
+    web_base_url: str = Field(
+        default="https://eyesearch.github.io/Eyesearch/web",
+        validation_alias=AliasChoices("WEB_BASE_URL"),
+    )
 
     @field_validator("log_level")
     @classmethod

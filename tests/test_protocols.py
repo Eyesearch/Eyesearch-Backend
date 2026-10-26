@@ -57,6 +57,9 @@ async def test_opensearch_description(client) -> None:
     assert 'type="text/html"' in body
     assert 'type="application/x-suggestions+json"' in body
     assert "/v1/suggest?q={searchTerms}" in body
+    # The human search URL and the icon live with the web client, not the API.
+    assert "eyesearch.github.io/Eyesearch/web/?q={searchTerms}" in body
+    assert "eyesearch.github.io/Eyesearch/web/assets/icons/favicon.svg" in body
 
 
 async def test_suggest_returns_opensearch_array(client, seeded) -> None:
