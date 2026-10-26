@@ -338,9 +338,18 @@ category, never a third-party snippet dump:
 | category | seeds |
 | --- | --- |
 | government | `india.gov.in`, `karnataka.gov.in`, `bengaluruurban.nic.in`, `ksrtc.in`, BMRC |
+| banking | `rbi.org.in`, `sbi.co.in`, `hdfcbank.com`, `icicibank.com`, `npci.org.in` |
 | sports | `iplt20.com`, `bcci.tv`, `prokabaddi.com`, `espncricinfo.com` |
+| e-commerce | `flipkart.com`, `myntra.com`, `nykaa.com`, `irctc.co.in`, `amazon.in` |
+| education | `ugc.gov.in`, `iitb.ac.in`, `iisc.ac.in`, `nta.ac.in`, `aicte-india.org` |
 | software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
 | knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
+
+A default pass runs the five India-first categories (government, banking, sports,
+e-commerce, education); `--category software` or `--category knowledge` adds the
+others. Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one
+shared HTTP client and the single Turso connection, and every domain is stored
+as **one root page plus at most five sitelinks** inside the 10 KB domain budget.
 
 A pass crawls each seed's entry page and follows same-host **level-1 links only**,
 storing up to `SEED_CRAWL_PAGES_PER_DOMAIN` pages per domain with
@@ -350,7 +359,9 @@ at startup when the index is empty (the "initial seed crawl pass"), then every
 
 ```bash
 python -m app.indexer.crawler --list
-python -m app.indexer.crawler --category sports
+python -m app.indexer.crawler                      # the five India-first categories
+python -m app.indexer.crawler --category banking
+python -m app.indexer.crawler --verify             # sites, pages, sitelinks, sample searches
 ```
 
 **Depth and budget rules.** Root and level-1 pages only
@@ -631,9 +642,18 @@ category, never a third-party snippet dump:
 | category | seeds |
 | --- | --- |
 | government | `india.gov.in`, `karnataka.gov.in`, `bengaluruurban.nic.in`, `ksrtc.in`, BMRC |
+| banking | `rbi.org.in`, `sbi.co.in`, `hdfcbank.com`, `icicibank.com`, `npci.org.in` |
 | sports | `iplt20.com`, `bcci.tv`, `prokabaddi.com`, `espncricinfo.com` |
+| e-commerce | `flipkart.com`, `myntra.com`, `nykaa.com`, `irctc.co.in`, `amazon.in` |
+| education | `ugc.gov.in`, `iitb.ac.in`, `iisc.ac.in`, `nta.ac.in`, `aicte-india.org` |
 | software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
 | knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
+
+A default pass runs the five India-first categories (government, banking, sports,
+e-commerce, education); `--category software` or `--category knowledge` adds the
+others. Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one
+shared HTTP client and the single Turso connection, and every domain is stored
+as **one root page plus at most five sitelinks** inside the 10 KB domain budget.
 
 A pass crawls each seed's entry page and follows same-host **level-1 links only**,
 storing up to `SEED_CRAWL_PAGES_PER_DOMAIN` pages per domain with
@@ -643,7 +663,9 @@ at startup when the index is empty (the "initial seed crawl pass"), then every
 
 ```bash
 python -m app.indexer.crawler --list
-python -m app.indexer.crawler --category sports
+python -m app.indexer.crawler                      # the five India-first categories
+python -m app.indexer.crawler --category banking
+python -m app.indexer.crawler --verify             # sites, pages, sitelinks, sample searches
 ```
 
 **Depth and budget rules.** Root and level-1 pages only
@@ -748,7 +770,7 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
 `INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (21600),
-`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `INDEX_SECTIONS_MAX` (5),
+`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
