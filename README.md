@@ -407,6 +407,18 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**Storage has two brakes.** Before any pass runs, the crawler compares the page
+count against `STORAGE_PAGE_LIMIT` (300,000 — roughly 3.5–4 GB at our row sizes,
+well inside the 5 GB free allowance) and, when it is reached, logs
+`WARNING: Storage safety threshold reached (300k+ records). Pausing autonomous
+crawling.` and skips the pass. Separately, a Turso write that fails with a
+storage/quota error (`SQLITE_FULL`, `storage quota`, `database or disk is full`)
+trips a breaker: the error is logged once as `STORAGE QUOTA EXHAUSTED`, and every
+scheduled pass returns immediately for `STORAGE_PAUSE_SECONDS` (6 h) instead of
+tight-looping. Neither brake touches the read path — `/v1/search` keeps serving
+from the existing index, and `GET /v1/stats` reports
+`storage: {pages, limit, over_limit, quota_tripped, paused}`.
+
 **The quality gate is strict.** A page is indexed only with a semantic
 `<title>` (≥ 3 chars), a meaningful meta description (≥ 20 chars) and **at least
 80 characters of server-rendered text**. JavaScript shells, WAF block pages
@@ -496,7 +508,8 @@ storing one root page plus at most five sitelinks per domain with
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
 the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000), launches
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `STORAGE_PAGE_LIMIT` (300000),
+`STORAGE_PAUSE_SECONDS` (21600), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
 missing seeds** so repeated boots make progress instead of repeating work. The
 port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
@@ -866,6 +879,18 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**Storage has two brakes.** Before any pass runs, the crawler compares the page
+count against `STORAGE_PAGE_LIMIT` (300,000 — roughly 3.5–4 GB at our row sizes,
+well inside the 5 GB free allowance) and, when it is reached, logs
+`WARNING: Storage safety threshold reached (300k+ records). Pausing autonomous
+crawling.` and skips the pass. Separately, a Turso write that fails with a
+storage/quota error (`SQLITE_FULL`, `storage quota`, `database or disk is full`)
+trips a breaker: the error is logged once as `STORAGE QUOTA EXHAUSTED`, and every
+scheduled pass returns immediately for `STORAGE_PAUSE_SECONDS` (6 h) instead of
+tight-looping. Neither brake touches the read path — `/v1/search` keeps serving
+from the existing index, and `GET /v1/stats` reports
+`storage: {pages, limit, over_limit, quota_tripped, paused}`.
+
 **The quality gate is strict.** A page is indexed only with a semantic
 `<title>` (≥ 3 chars), a meaningful meta description (≥ 20 chars) and **at least
 80 characters of server-rendered text**. JavaScript shells, WAF block pages
@@ -955,7 +980,8 @@ storing one root page plus at most five sitelinks per domain with
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
 the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000), launches
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `STORAGE_PAGE_LIMIT` (300000),
+`STORAGE_PAUSE_SECONDS` (21600), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
 missing seeds** so repeated boots make progress instead of repeating work. The
 port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
@@ -1081,7 +1107,8 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (86400),
 `SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000),
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `STORAGE_PAGE_LIMIT` (300000),
+`STORAGE_PAUSE_SECONDS` (21600), `MAX_INDEXED_SITES` (50000),
 `CRAWL_TIMEOUT_SECONDS` (15), `CRAWL_VERIFY_TLS` (auto), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
