@@ -16,6 +16,7 @@ from typing import Any, Iterable, Sequence
 from app.database import get_client
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
+from app.engine.relevance import is_relevant
 from app.engine.schema import ENGINE_MIGRATIONS, ENGINE_SCHEMA
 from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 from app.errors import DatabaseError
@@ -90,26 +91,16 @@ def query_tokens(query: str) -> list[str]:
 def passes_relevance(query: str, document: RankedDocument, settings: EngineSettings) -> bool:
     """Reject a hit that only matched a passing mention.
 
-    A document is relevant when the query's words appear in a field that
-    describes the page — its title, its URL or its snippet — rather than only
-    somewhere in the body. That is what stops "google" matching a cricket page
-    because a footer once said "Google Play".
+    Delegates to the universal gate in `app.engine.relevance`: the query's words
+    must appear in the title, URL or snippet — not only somewhere in the body.
     """
-    tokens = query_tokens(query)
-    if not tokens:
-        return False
-
-    described = " ".join(
-        (document.title or "", document.url or "", document.snippet or "")
-    ).lower()
-    matched = [token for token in tokens if token in described]
-
-    if len(tokens) == 1:
-        # A single word must appear in a descriptive field, not only in the body.
-        return bool(matched) if settings.relevance_require_strong_field else True
-
-    coverage = len(matched) / len(tokens)
-    return coverage >= settings.relevance_min_token_coverage
+    return is_relevant(
+        query,
+        title=document.title or "",
+        url=document.url or "",
+        snippet=document.snippet or "",
+        min_coverage=settings.relevance_min_token_coverage,
+    )
 
 
 def build_match_query(query: str) -> str:
@@ -153,9 +144,21 @@ class IndexStore:
                 continue
 
     # -- ingestion ------------------------------------------------------
-    async def ingest_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
-        """Insert new documents; reject duplicates, over-cap domains and oversize rows."""
-        outcome = {"inserted": 0, "duplicate": 0, "domain_cap": 0, "not_indexable": 0, "over_budget": 0}
+    async def ingest_documents(
+        self,
+        documents: Sequence[dict[str, Any]],
+        *,
+        mode: str = "insert",
+    ) -> dict[str, int]:
+        """Write documents into `documents` and `documents_fts`.
+
+        ``mode="insert"`` (the crawler's rule) rejects a URL that already exists.
+        ``mode="upsert"`` replaces it in place — what the on-demand extraction
+        pipeline uses, so a verified page is refreshed rather than duplicated.
+        """
+        outcome = {"inserted": 0, "replaced": 0, "duplicate": 0, "domain_cap": 0,
+                   "not_indexable": 0, "over_budget": 0}
+        upsert = mode == "upsert"
         if not documents:
             return outcome
 
@@ -191,45 +194,75 @@ class IndexStore:
                 outcome["domain_cap"] += 1
                 continue
 
-            # Reject, do not overwrite: revalidation is the only path that updates.
             try:
                 probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [url])
-                if getattr(probe, "rows", ()):
-                    outcome["duplicate"] += 1
-                    continue
+                already_present = bool(getattr(probe, "rows", ()))
             except Exception as exc:
                 logger.warning("duplicate probe failed for %s: %s", url, exc)
+                already_present = False
+
+            if already_present and not upsert:
+                # The crawler's rule: a URL is indexed once, then revalidated.
+                outcome["duplicate"] += 1
+                continue
 
             content = str(doc.get("content") or "")
-            statements.append(
-                (
-                    _INSERT_DOCUMENT,
-                    [
-                        url,
-                        doc.get("canonical_url") or url,
-                        doc.get("domain") or "",
-                        domain,
-                        doc.get("domain_class") or domain_class(url),
-                        title,
-                        doc.get("snippet") or "",
-                        content,
-                        doc.get("language") or "en",
-                        doc.get("favicon_url"),
-                        payload,
-                        _content_hash(title, str(doc.get("snippet") or "")),
-                        None,
-                        None,
-                        None,   # last_checked_at: a crawl is not a revalidation
-                        stamp,
-                    ],
+            if already_present:
+                statements.append(
+                    (
+                        _UPDATE_DOCUMENT,
+                        [
+                            doc.get("canonical_url") or url,
+                            doc.get("domain") or "",
+                            domain,
+                            doc.get("domain_class") or domain_class(url),
+                            title,
+                            doc.get("snippet") or "",
+                            content,
+                            doc.get("language") or "en",
+                            doc.get("favicon_url"),
+                            payload,
+                            _content_hash(title, str(doc.get("snippet") or "")),
+                            None,
+                            None,
+                            stamp,
+                            stamp,
+                            url,
+                        ],
+                    )
                 )
-            )
+                outcome["replaced"] += 1
+            else:
+                statements.append(
+                    (
+                        _INSERT_DOCUMENT,
+                        [
+                            url,
+                            doc.get("canonical_url") or url,
+                            doc.get("domain") or "",
+                            domain,
+                            doc.get("domain_class") or domain_class(url),
+                            title,
+                            doc.get("snippet") or "",
+                            content,
+                            doc.get("language") or "en",
+                            doc.get("favicon_url"),
+                            payload,
+                            _content_hash(title, str(doc.get("snippet") or "")),
+                            None,
+                            None,
+                            None,   # last_checked_at: a crawl is not a revalidation
+                            stamp,
+                        ],
+                    )
+                )
+                outcome["inserted"] += 1
             statements.append((_DELETE_FTS, [url]))
             statements.append(
                 (_INSERT_FTS, [url, title, doc.get("snippet") or "", content, doc.get("language") or "en", stamp])
             )
-            counts[domain] = counts.get(domain, 0) + 1
-            outcome["inserted"] += 1
+            if not already_present:
+                counts[domain] = counts.get(domain, 0) + 1
 
         if statements:
             try:
