@@ -24,6 +24,7 @@ import httpx
 
 from app.crawler.crawler import RobotsCache, fetch_page
 from app.engine.config import EngineSettings, get_engine_settings
+from app.database import get_client
 from app.engine.store import get_store
 from app.engine.text import ExtractedDocument, extract_document, extract_links
 from app.engine.urls import is_indexable, normalise_url
@@ -52,6 +53,24 @@ CATEGORY_SEEDS: tuple[CategorySeed, ...] = (
     CategorySeed("https://www.bcci.tv", "BCCI", "sports"),
     CategorySeed("https://www.prokabaddi.com", "Pro Kabaddi League", "sports"),
     CategorySeed("https://www.espncricinfo.com", "ESPNcricinfo", "sports"),
+    # --- banking and finance ---------------------------------------------
+    CategorySeed("https://www.rbi.org.in", "Reserve Bank of India", "banking"),
+    CategorySeed("https://www.sbi.co.in", "State Bank of India", "banking"),
+    CategorySeed("https://www.hdfcbank.com", "HDFC Bank", "banking"),
+    CategorySeed("https://www.icicibank.com", "ICICI Bank", "banking"),
+    CategorySeed("https://www.npci.org.in", "NPCI (UPI)", "banking"),
+    # --- e-commerce -------------------------------------------------------
+    CategorySeed("https://www.flipkart.com", "Flipkart", "ecommerce"),
+    CategorySeed("https://www.myntra.com", "Myntra", "ecommerce"),
+    CategorySeed("https://www.nykaa.com", "Nykaa", "ecommerce"),
+    CategorySeed("https://www.irctc.co.in", "IRCTC", "ecommerce"),
+    CategorySeed("https://www.amazon.in", "Amazon India", "ecommerce"),
+    # --- education --------------------------------------------------------
+    CategorySeed("https://www.ugc.gov.in", "UGC", "education"),
+    CategorySeed("https://www.iitb.ac.in", "IIT Bombay", "education"),
+    CategorySeed("https://www.iisc.ac.in", "IISc Bengaluru", "education"),
+    CategorySeed("https://www.nta.ac.in", "National Testing Agency", "education"),
+    CategorySeed("https://www.aicte-india.org", "AICTE", "education"),
     # --- software and technology ----------------------------------------
     CategorySeed("https://github.com", "GitHub", "software"),
     CategorySeed("https://www.python.org", "Python", "software"),
@@ -65,7 +84,12 @@ CATEGORY_SEEDS: tuple[CategorySeed, ...] = (
     CategorySeed("https://en.wikipedia.org/wiki/Indian_Space_Research_Organisation", "Wikipedia — ISRO", "knowledge"),
 )
 
-CATEGORIES: tuple[str, ...] = ("government", "sports", "software", "knowledge")
+CATEGORIES: tuple[str, ...] = (
+    "government", "banking", "sports", "ecommerce", "education", "software", "knowledge",
+)
+
+# The default seed run: the five India-first categories from the brief.
+DEFAULT_CATEGORIES: tuple[str, ...] = ("government", "banking", "sports", "ecommerce", "education")
 
 
 @dataclass
@@ -87,7 +111,7 @@ class SeedReport:
 
 
 def seeds_for(categories: list[str] | None = None) -> list[CategorySeed]:
-    wanted = set(categories or CATEGORIES)
+    wanted = set(categories or DEFAULT_CATEGORIES)
     return [seed for seed in CATEGORY_SEEDS if seed.category in wanted]
 
 
@@ -152,7 +176,9 @@ async def run_seed_pass(
     """Crawl every seed in the requested categories and store what comes back."""
     cfg = settings or get_engine_settings()
     index = store or get_store()
-    report: dict[str, object] = {"categories": {}, "documents": 0, "stored": 0, "fetched": 0}
+    report: dict[str, object] = {
+        "categories": {}, "documents": 0, "stored": 0, "fetched": 0, "sites": 0, "sitelinks": 0
+    }
 
     if not cfg.seed_crawl_enabled or not cfg.crawl_enabled:
         logger.info("seed crawl disabled")
@@ -162,22 +188,32 @@ async def run_seed_pass(
     if not seeds:
         return report
 
+    # A single shared HTTP client and a single shared database client: the
+    # concurrency limit protects both the target sites and the Turso connection.
+    semaphore = asyncio.Semaphore(max(1, cfg.seed_crawl_concurrency))
+
     async with httpx.AsyncClient(follow_redirects=True) as client:
         robots = RobotsCache(client, cfg.crawl_user_agent)
-        for seed in seeds:
-            try:
-                seed_report, documents = await crawl_seed(
-                    seed, client=client, settings=cfg, robots=robots
-                )
-            except Exception as exc:  # one dead domain must not stop the pass
-                logger.warning("seed %s failed: %s", seed.url, exc)
-                continue
 
+        async def run(seed: CategorySeed) -> tuple[CategorySeed, SeedReport, list]:
+            async with semaphore:
+                try:
+                    seed_report, documents = await crawl_seed(
+                        seed, client=client, settings=cfg, robots=robots
+                    )
+                    return seed, seed_report, documents
+                except Exception as exc:  # one dead domain must not stop the pass
+                    logger.warning("seed %s failed: %s", seed.url, exc)
+                    return seed, SeedReport(category=seed.category), []
+
+        for seed, seed_report, documents in await asyncio.gather(*(run(seed) for seed in seeds)):
             if documents:
                 written = await index.replace_documents([document.as_row() for document in documents])
                 seed_report.stored = int(written.get("pages", 0))
                 report["documents"] = int(report["documents"]) + len(documents)
                 report["stored"] = int(report["stored"]) + seed_report.stored
+                report["sitelinks"] = int(report.get("sitelinks", 0)) + int(written.get("sitelinks", 0))
+                report["sites"] = int(report.get("sites", 0)) + int(written.get("sites", 0))
 
             report["fetched"] = int(report["fetched"]) + seed_report.fetched
             report["categories"][seed.label] = seed_report.as_dict()
@@ -196,6 +232,7 @@ async def _main() -> None:
     parser = argparse.ArgumentParser(description="EyeSearch category-seed crawler")
     parser.add_argument("--category", action="append", choices=list(CATEGORIES))
     parser.add_argument("--list", action="store_true", help="print the seed list and exit")
+    parser.add_argument("--verify", action="store_true", help="print index and search verification")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
@@ -205,16 +242,67 @@ async def _main() -> None:
             print(f"{seed.category:12} {seed.url:52} {seed.label}")
         return
 
+    from dataclasses import replace
+
     from app import database
     from app.config import get_settings
+    from app.engine.config import get_engine_settings
 
     settings = get_settings()
+    # An explicit CLI run is always allowed: SEED_CRAWL_ENABLED gates the
+    # background scheduler, not the operator asking for a crawl.
+    engine_settings = replace(get_engine_settings(), seed_crawl_enabled=True)
     await database.connect(settings)
     try:
         await database.initialize_schema()
-        print(await run_seed_pass(args.category))
+        if args.verify:
+            await verify_index()
+        else:
+            print(await run_seed_pass(args.category, settings=engine_settings))
     finally:
         await database.close()
+
+
+async def verify_index(sample_queries: tuple[str, ...] | None = None) -> dict[str, object]:
+    """Report what the crawl produced and prove it is searchable."""
+    client = get_client()
+    totals = await client.execute(
+        "SELECT (SELECT COUNT(*) FROM sites), (SELECT COUNT(*) FROM pages), "
+        "(SELECT COUNT(*) FROM pages WHERE kind = 'root'), "
+        "(SELECT COUNT(*) FROM pages WHERE kind = 'sitelink'), "
+        "(SELECT COUNT(*) FROM page_fts)"
+    )
+    rows = getattr(totals, "rows", ()) or ()
+    sites, pages, roots, sitelinks, indexed = (int(value) for value in rows[0]) if rows else (0, 0, 0, 0, 0)
+
+    per_category = await client.execute(
+        "SELECT category, COUNT(*) FROM sites GROUP BY category ORDER BY COUNT(*) DESC"
+    )
+    categories = {str(row[0]): int(row[1]) for row in (getattr(per_category, "rows", ()) or ())}
+
+    logger.info(
+        "verify: %d sites, %d pages (%d root + %d sitelink), %d indexed",
+        sites, pages, roots, sitelinks, indexed,
+    )
+    print(
+        f"SITES {sites} | PAGES {pages} ({roots} root + {sitelinks} sitelink) | FTS {indexed} | "
+        f"categories {categories}"
+    )
+
+    queries = sample_queries or ("india", "bank", "ipl", "metro", "karnataka")
+    store = get_store()
+    for query in queries:
+        hits = await store.search_local(query, limit=3)
+        top = hits[0] if hits else None
+        print(
+            f"SEARCH {query!r:14} hits={len(hits)}"
+            + (f" -> {top.title[:48]!r} ({top.url}) sitelinks={len(top.sections)}" if top else " -> none")
+        )
+
+    return {
+        "sites": sites, "pages": pages, "roots": roots, "sitelinks": sitelinks,
+        "indexed": indexed, "categories": categories,
+    }
 
 
 if __name__ == "__main__":
@@ -222,6 +310,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "DEFAULT_CATEGORIES",
+    "verify_index",
     "CATEGORY_SEEDS",
     "CATEGORIES",
     "CategorySeed",

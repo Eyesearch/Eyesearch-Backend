@@ -63,6 +63,9 @@ class EngineSettings:
     seed_crawl_enabled: bool = field(default_factory=lambda: _bool("SEED_CRAWL_ENABLED", True))
     seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 21600))
     seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
+    # Domains crawled at once: bounded so the target sites and the single Turso
+    # connection both stay stable.
+    seed_crawl_concurrency: int = field(default_factory=lambda: _int("SEED_CRAWL_CONCURRENCY", 5))
 
     # --- relevance -------------------------------------------------------
     # A single-word query must appear in the title, URL or snippet — never only
