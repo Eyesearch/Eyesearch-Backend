@@ -65,6 +65,11 @@ class EngineSettings:
     seed_crawl_interval_seconds: int = field(default_factory=lambda: _int("SEED_CRAWL_INTERVAL_SECONDS", 86400))
     # Below this many sites the index counts as uncovered and boot re-seeds it.
     seed_coverage_min_sites: int = field(default_factory=lambda: _int("SEED_COVERAGE_MIN_SITES", 5))
+    # Continuous discovery: batches of ten, a pause between batches, and a hard
+    # ceiling on indexed sites (well inside the free Turso allowance).
+    discovery_batch_size: int = field(default_factory=lambda: _int("DISCOVERY_BATCH_SIZE", 10))
+    discovery_batch_pause_seconds: float = field(default_factory=lambda: _float("DISCOVERY_BATCH_PAUSE_SECONDS", 0.5))
+    max_indexed_sites: int = field(default_factory=lambda: _int("MAX_INDEXED_SITES", 50000))
     seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
     # Domains crawled at once: bounded so the target sites and the single Turso
     # connection both stay stable.

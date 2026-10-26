@@ -103,6 +103,8 @@ CRAWL_TABLES: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS crawl_backlog (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         query TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'query',
+        reason TEXT,
         hits INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -110,6 +112,7 @@ CRAWL_TABLES: tuple[str, ...] = (
     )
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_query ON crawl_backlog(query)",
+    "CREATE INDEX IF NOT EXISTS idx_backlog_kind ON crawl_backlog(kind, status)",
     """
     CREATE TABLE IF NOT EXISTS crawl_queue (
         url TEXT PRIMARY KEY,
@@ -152,7 +155,14 @@ LEGACY_TRIGGERS: tuple[str, ...] = (
     "documents_au",
 )
 
+# Columns added to an existing database after the first release.
+ENGINE_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("crawl_backlog", "kind TEXT NOT NULL DEFAULT 'query'"),
+    ("crawl_backlog", "reason TEXT"),
+)
+
 __all__ = [
+    "ENGINE_MIGRATIONS",
     "ENGINE_SCHEMA",
     "LEGACY_TABLES",
     "LEGACY_TRIGGERS",

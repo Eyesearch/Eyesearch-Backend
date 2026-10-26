@@ -20,7 +20,14 @@ from urllib.parse import urlparse
 import libsql_client
 
 from app.config import Settings, get_settings
-from app.engine.schema import ENGINE_SCHEMA, LEGACY_TABLES, LEGACY_TRIGGERS, PAGE_FTS, PAGE_TRIGGERS
+from app.engine.schema import (
+    ENGINE_MIGRATIONS,
+    ENGINE_SCHEMA,
+    LEGACY_TABLES,
+    LEGACY_TRIGGERS,
+    PAGE_FTS,
+    PAGE_TRIGGERS,
+)
 from app.errors import DatabaseError
 
 # What a database URL should look like once we are done with it: no token, no
@@ -221,6 +228,17 @@ async def _drop_legacy_index() -> None:
         raise DatabaseError(f"legacy index cleanup failed: {exc}") from exc
 
 
+async def _apply_migrations() -> None:
+    """Add columns that arrived after the first release (safe to repeat)."""
+    client = get_client()
+    for table, column_ddl in ENGINE_MIGRATIONS:
+        try:
+            await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_ddl}")
+            logger.info("migration applied: %s.%s", table, column_ddl.split()[0])
+        except Exception:
+            continue  # already present
+
+
 async def _ensure_page_fts() -> None:
     """Create or repair the external-content FTS index and its triggers."""
     client = get_client()
@@ -278,6 +296,7 @@ async def initialize_schema() -> None:
         raise DatabaseError(f"schema initialisation failed: {exc}") from exc
     # Runs after the base tables exist: the FTS rebuild reads `pages`.
     await _ensure_page_fts()
+    await _apply_migrations()
     try:
         counts = await get_client().execute(
             "SELECT (SELECT COUNT(*) FROM sites), (SELECT COUNT(*) FROM pages), "

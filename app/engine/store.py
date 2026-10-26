@@ -674,8 +674,8 @@ class IndexStore:
         try:
             await client.execute(
                 """
-                INSERT INTO crawl_backlog (query, hits, status, created_at)
-                VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)
+                INSERT INTO crawl_backlog (query, kind, hits, status, created_at)
+                VALUES (?, 'query', ?, 'pending', CURRENT_TIMESTAMP)
                 ON CONFLICT(query) DO UPDATE SET hits = crawl_backlog.hits + 1, status = 'pending'
                 """,
                 [cleaned, max(0, hits)],
@@ -693,8 +693,8 @@ class IndexStore:
         client = get_client()
         try:
             result = await client.execute(
-                "SELECT 1 FROM crawl_backlog WHERE query = ? AND status = 'pending' "
-                "AND created_at >= ? LIMIT 1",
+                "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'query' "
+                "AND status = 'pending' AND created_at >= ? LIMIT 1",
                 [cleaned, cutoff],
             )
             return bool(getattr(result, "rows", ()))
@@ -705,7 +705,7 @@ class IndexStore:
     async def pending_backlog(self, limit: int = 20) -> list[str]:
         client = get_client()
         result = await client.execute(
-            "SELECT query FROM crawl_backlog WHERE status = 'pending' "
+            "SELECT query FROM crawl_backlog WHERE status = 'pending' AND kind = 'query' "
             "ORDER BY hits DESC, created_at ASC LIMIT ?",
             [limit],
         )
@@ -715,9 +715,69 @@ class IndexStore:
         client = get_client()
         await client.execute(
             "UPDATE crawl_backlog SET status = 'processed', processed_at = CURRENT_TIMESTAMP "
-            "WHERE query = ?",
+            "WHERE query = ? AND kind = 'query'",
             [query.strip().lower()],
         )
+
+    async def site_exists(self, host: str) -> bool:
+        """True when this host is already indexed (strict deduplication)."""
+        cleaned = (host or "").strip().lower().removeprefix("www.")
+        if not cleaned:
+            return False
+        client = get_client()
+        try:
+            row = await client.execute("SELECT 1 FROM sites WHERE domain = ? LIMIT 1", [cleaned])
+            return bool(getattr(row, "rows", ()))
+        except Exception as exc:
+            logger.debug("site probe failed for %s: %s", cleaned, exc)
+            return False
+
+    async def enqueue_domain(self, host: str, *, reason: str = "discovered") -> bool:
+        """Add a discovered domain to the backlog. False when already queued."""
+        cleaned = (host or "").strip().lower().removeprefix("www.")
+        if not cleaned or not is_indexable(f"https://{cleaned}/"):
+            return False
+        client = get_client()
+        try:
+            existing = await client.execute(
+                "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'domain' LIMIT 1", [cleaned]
+            )
+            if getattr(existing, "rows", ()):
+                return False
+            await client.execute(
+                "INSERT INTO crawl_backlog (query, kind, reason, hits, status, created_at) "
+                "VALUES (?, 'domain', ?, 0, 'pending', CURRENT_TIMESTAMP)",
+                [cleaned, reason],
+            )
+            return True
+        except Exception as exc:
+            logger.debug("domain enqueue failed for %s: %s", cleaned, exc)
+            return False
+
+    async def pending_domains(self, limit: int = 10) -> list[str]:
+        client = get_client()
+        result = await client.execute(
+            "SELECT query FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending' "
+            "ORDER BY created_at ASC LIMIT ?",
+            [max(1, limit)],
+        )
+        return [str(row[0]) for row in getattr(result, "rows", ()) or ()]
+
+    async def mark_domain_processed(self, host: str, *, status: str = "processed") -> None:
+        client = get_client()
+        await client.execute(
+            "UPDATE crawl_backlog SET status = ?, processed_at = CURRENT_TIMESTAMP "
+            "WHERE query = ? AND kind = 'domain'",
+            [status, (host or "").strip().lower().removeprefix("www.")],
+        )
+
+    async def pending_domain_count(self) -> int:
+        client = get_client()
+        result = await client.execute(
+            "SELECT COUNT(*) FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending'"
+        )
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
 
     async def enqueue_urls(self, urls: Iterable[str], reason: str) -> int:
         client = get_client()
