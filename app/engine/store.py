@@ -26,7 +26,8 @@ from app.engine.relevance import is_relevant
 from app.engine.schema import BM25_WEIGHTS
 from app.engine.text import detect_language
 from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
-from app.errors import DatabaseError
+from app.errors import DatabaseError, StorageQuotaError
+from app.indexer.guard import is_quota_error, trip_quota
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,11 @@ async def _batch(client: Any, statements: Sequence[tuple[str, list[Any]]], *, st
         await client.batch(list(statements), strict=strict)
     except TypeError:
         await client.batch(list(statements))
+    except Exception as exc:
+        if is_quota_error(exc):
+            trip_quota(str(exc)[:200])
+            raise StorageQuotaError(f"database storage exhausted: {exc}") from exc
+        raise
 
 
 def _now_epoch() -> int:
@@ -263,6 +269,8 @@ class IndexStore:
             # Sites commit on their own, in their own request: a failure writing
             # pages later can never take the site rows with it.
             await _batch(client, site_statements, strict=False)
+        except StorageQuotaError:
+            raise
         except Exception as exc:
             logger.error(
                 "site write failed for %s: %s: %s (statement: %s)",
@@ -420,6 +428,8 @@ class IndexStore:
                     outcome["failed_statements"] = len(errors)
                     for message in errors[:3]:
                         logger.error("page write step failed: %s", message)
+            except StorageQuotaError:
+                raise
             except Exception as exc:
                 logger.error(
                     "page write failed for %s: %s: %s (statement: %s)",
