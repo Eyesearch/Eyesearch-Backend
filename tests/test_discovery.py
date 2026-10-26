@@ -386,13 +386,30 @@ async def test_a_fetched_seed_always_persists_a_root(temp_db, monkeypatch) -> No
     assert stored["category"] == "utilities"
 
 
-async def test_a_blocked_status_still_yields_no_root(temp_db, monkeypatch) -> None:
-    """A 403 is not evidence of a real page; it must not be indexed."""
+async def test_a_responding_seed_persists_even_on_a_non_200_status(temp_db, monkeypatch) -> None:
+    """A seed that answers at all is indexed: minor blocks must not lose the domain."""
     store = get_store()
-    seed = seed_crawler.CategorySeed("https://blocked.gov.in", "Blocked", "government")
+    seed = seed_crawler.CategorySeed("https://canarabank.bank.in", "Canara Bank", "banking")
 
     async def _fetch(client, url, settings, **kwargs):
         return "<html><body>Forbidden</body></html>", 403
+
+    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    assert report["stored"] == 1
+    assert await store.count_documents() == 1
+
+
+async def test_a_seed_with_no_body_at_all_still_yields_nothing(temp_db, monkeypatch) -> None:
+    """No HTML, no record: an empty response is not a site."""
+    store = get_store()
+    seed = seed_crawler.CategorySeed("https://empty-body.gov.in", "Empty", "government")
+
+    async def _fetch(client, url, settings, **kwargs):
+        return "", 502
 
     monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
@@ -463,3 +480,65 @@ async def test_a_step_level_error_inside_a_200_response_is_raised() -> None:
     assert "UNIQUE constraint" in message
     assert "statement:" in message
     await client.close()
+
+
+# --- instrumentation: prove what is actually being executed ---------------
+
+async def test_pipeline_statements_are_logged_with_their_verbs(caplog) -> None:
+    """'Hundreds of POSTs, no writes' must be answerable from the log."""
+    import httpx
+
+    from app.libsql_http import TursoHTTPClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"results": [{"type": "ok", "response": {"type": "execute", "result": {"cols": [], "rows": []}}}]},
+        )
+
+    TursoHTTPClient._COUNTS = {}
+    TursoHTTPClient._TOTAL = 0
+    client = TursoHTTPClient("https://db.turso.io", transport=httpx.MockTransport(handler))
+
+    with caplog.at_level("INFO"):
+        await client.execute("SELECT domain FROM sites WHERE domain = ?", ["a.in"])
+        await client.execute("INSERT INTO sites (domain) VALUES (?)", ["a.in"])
+
+    lines = [record.message for record in caplog.records if "TURSO PIPELINE EXECUTE" in record.message]
+    assert len(lines) == 2
+    assert "SELECT domain FROM sites" in lines[0]
+    assert "INSERT INTO sites" in lines[1]
+    await client.close()
+
+
+async def test_the_seed_entry_and_exit_points_are_logged(temp_db, monkeypatch, caplog) -> None:
+    store = get_store()
+    seed = seed_crawler.CategorySeed("https://logged.gov.in", "Logged", "government")
+
+    async def _fetch(client, url, settings, **kwargs):
+        return ("<html><head><title>Logged portal</title></head>"
+                "<body><p>Official portal text here.</p></body></html>", 200)
+
+    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    with caplog.at_level("INFO"):
+        await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    messages = [record.message for record in caplog.records]
+    assert any("SEED START: processing domain logged.gov.in" in m for m in messages)
+    assert any("SEED FETCHED: domain logged.gov.in returned status 200" in m for m in messages)
+    assert any("PREPARING DB WRITE" in m and "logged.gov.in" in m for m in messages)
+    assert any("DB COMMIT SUCCESS: Indexed logged.gov.in" in m for m in messages)
+
+
+def test_the_running_commit_is_reported(monkeypatch, caplog) -> None:
+    from app import main
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abc1234")
+    assert main._running_commit() == "abc1234 (RENDER_GIT_COMMIT)"
+
+    monkeypatch.delenv("RENDER_GIT_COMMIT")
+    for name in ("GIT_COMMIT", "SOURCE_VERSION", "COMMIT_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    assert "unknown" in main._running_commit()
