@@ -198,7 +198,26 @@ class TursoHTTPClient:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
+    # Statement-type counters, so "hundreds of POSTs, no writes" is answerable
+    # from the log instead of by inference.
+    _COUNTS: dict[str, int] = {}
+    _TOTAL = 0
+
+    @classmethod
+    def _record(cls, requests: list[dict[str, Any]]) -> None:
+        heads: list[str] = []
+        for request in requests:
+            sql = str(request.get("stmt", {}).get("sql", "")).strip()
+            verb = sql.split()[0].upper() if sql else "?"
+            cls._COUNTS[verb] = cls._COUNTS.get(verb, 0) + 1
+            cls._TOTAL += 1
+            heads.append(sql.splitlines()[0][:60])
+        logger.info("TURSO PIPELINE EXECUTE: %s", heads)
+        if cls._TOTAL % 50 < len(requests):
+            logger.info("TURSO STATEMENTS SO FAR: %s", dict(sorted(cls._COUNTS.items())))
+
     async def _post(self, requests: list[dict[str, Any]]) -> list[ResultSet]:
+        self._record(requests)
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout, transport=self._transport)
         try:

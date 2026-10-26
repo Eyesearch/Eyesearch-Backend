@@ -29,6 +29,17 @@ from app.services import live_retrieval, search_service
 logger = logging.getLogger(__name__)
 
 
+def _running_commit() -> str:
+    """Which commit this process is actually running — Render exposes it."""
+    import os
+
+    for name in ("RENDER_GIT_COMMIT", "GIT_COMMIT", "SOURCE_VERSION", "COMMIT_SHA"):
+        value = os.getenv(name)
+        if value:
+            return f"{value} ({name})"
+    return "unknown (set RENDER_GIT_COMMIT or GIT_COMMIT)"
+
+
 def _configure_logging(settings: Settings) -> None:
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
