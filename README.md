@@ -353,6 +353,26 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Nothing is skipped silently.** Every page the crawler rejects is logged with
+the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
+`skipped: not_indexable`, `skipped: low_text_density`, `skipped: fetch_failed`,
+`skipped: robots_disallowed` — and the per-seed summary carries the tally
+(`produced no indexable pages (fetched 1, skipped 1: no_title=1)`). A successful
+commit logs `DB COMMIT SUCCESS: Indexed <domain> with N pages (Running total: M)`,
+where M is read back from the database, so the line is proof of the commit and
+not just of the attempt.
+
+The extraction gate was also too strict for government homepages: it required
+80 characters of server-rendered body text, which threw away JavaScript shells
+that carry a real title and meta description. Since the schema stores no page
+body, a page is now accepted when it has an identity and something to match on —
+title, description, headings or navigation vocabulary — and rejected only when
+it has none of them.
+
+`GET /v1/stats` returns `sites`, `pages`, `indexed`, `query_backlog`,
+`discovered_backlog` and `max_payload_bytes`, read from the database on every
+call with no caching anywhere.
+
 **Writes land per domain, not per pass.** Each seed's pages are written the
 moment that seed finishes (`asyncio.as_completed`), so a long pass no longer
 holds every write until the end — on a free instance that used to mean a restart
@@ -715,6 +735,26 @@ national digital services — plus banking, sports, e-commerce and software.
 Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
+
+**Nothing is skipped silently.** Every page the crawler rejects is logged with
+the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
+`skipped: not_indexable`, `skipped: low_text_density`, `skipped: fetch_failed`,
+`skipped: robots_disallowed` — and the per-seed summary carries the tally
+(`produced no indexable pages (fetched 1, skipped 1: no_title=1)`). A successful
+commit logs `DB COMMIT SUCCESS: Indexed <domain> with N pages (Running total: M)`,
+where M is read back from the database, so the line is proof of the commit and
+not just of the attempt.
+
+The extraction gate was also too strict for government homepages: it required
+80 characters of server-rendered body text, which threw away JavaScript shells
+that carry a real title and meta description. Since the schema stores no page
+body, a page is now accepted when it has an identity and something to match on —
+title, description, headings or navigation vocabulary — and rejected only when
+it has none of them.
+
+`GET /v1/stats` returns `sites`, `pages`, `indexed`, `query_backlog`,
+`discovered_backlog` and `max_payload_bytes`, read from the database on every
+call with no caching anywhere.
 
 **Writes land per domain, not per pass.** Each seed's pages are written the
 moment that seed finishes (`asyncio.as_completed`), so a long pass no longer
