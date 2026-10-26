@@ -246,7 +246,7 @@ async def test_a_failed_write_does_not_kill_the_pass(temp_db, monkeypatch, caplo
 
     assert calls["n"] == 3
     assert await store.count_documents() == 2      # the other two persisted
-    assert any("index write failed" in record.message for record in caplog.records)
+    assert any("index write failed" in record.getMessage() for record in caplog.records)
 
 
 async def test_successful_writes_are_logged_with_the_total(temp_db, monkeypatch, caplog) -> None:
@@ -271,15 +271,15 @@ async def test_successful_writes_are_logged_with_the_total(temp_db, monkeypatch,
         await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
     assert any(
-        "DB COMMIT SUCCESS: Indexed logged.gov.in" in record.message for record in caplog.records
+        "DB COMMIT SUCCESS: Indexed logged.gov.in" in record.getMessage() for record in caplog.records
     )
 
 
 # --- extraction gate: government homepages must not be silently dropped ----
 
-def test_a_javascript_homepage_with_a_title_is_indexable() -> None:
-    """The reported case: fetched, then "produced no indexable pages"."""
-    from app.engine.text import extract_document_with_reason
+def test_a_javascript_shell_is_refused_by_the_gate() -> None:
+    """No server-rendered text means no document, whatever the title says."""
+    from app.engine.text import SKIP_THIN, extract_document_with_reason
 
     shell = (
         "<html><head><title>Government of Odisha</title>"
@@ -288,9 +288,8 @@ def test_a_javascript_homepage_with_a_title_is_indexable() -> None:
     )
     document, reason = extract_document_with_reason("https://odisha.gov.in/", shell)
 
-    assert document is not None, reason
-    assert document.title == "Government of Odisha"
-    assert document.description
+    assert document is None
+    assert reason == SKIP_THIN
 
 
 def test_skip_reasons_are_specific() -> None:
@@ -316,20 +315,23 @@ async def test_skip_reasons_are_logged_per_seed(temp_db, monkeypatch, caplog) ->
     seed = seed_crawler.CategorySeed("https://empty.gov.in", "Empty", "government")
 
     async def _fetch(client, url, settings, **kwargs):
-        return "<html><body><div id='app'></div></body></html>", 200
+        # A shell: title and description present, no server-rendered text.
+        return ("<html><head><title>Empty portal</title>"
+                "<meta name='description' content='Official portal with no rendered text.'>"
+                "</head><body><div id='app'></div></body></html>", 200)
 
     monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
     with caplog.at_level("INFO"):
-        await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+        report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
-    # The page is still reported as skipped, with the rule that rejected it…
-    assert any("skipped: no_title" in record.message for record in caplog.records)
-    # …but the seed's own root is committed from fallback metadata, so the domain
-    # is never lost just because its entry page had nothing to extract.
-    assert any("using fallback metadata" in record.message for record in caplog.records)
-    assert any("DB COMMIT SUCCESS: Indexed empty.gov.in" in record.message for record in caplog.records)
+    # The reason is recorded against the seed, and the whitelisted .gov.in seed
+    # keeps a root card instead of being lost.
+    reasons = report["categories"]["Empty"]["reasons"]
+    assert reasons.get("low_text_density") == 1
+    assert any("keeping a root card for empty.gov.in" in r.getMessage() for r in caplog.records)
+    assert any("DB COMMIT SUCCESS: Indexed empty.gov.in" in r.getMessage() for r in caplog.records)
     assert await store.count_documents() == 1
 
 
@@ -363,11 +365,11 @@ async def test_stats_endpoint_reads_live_counts(temp_db) -> None:
 
 # --- the root domain must persist even when extraction fails ---------------
 
-async def test_a_fetched_seed_always_persists_a_root(temp_db, monkeypatch) -> None:
-    """The PSPCL case: HTTP 200, no extractable content, domain still indexed."""
+async def test_a_whitelisted_seed_persists_a_root_without_content(temp_db, monkeypatch) -> None:
+    """A .gov.in/.nic.in portal that answers 200 with nothing extractable."""
     store = get_store()
     seed = seed_crawler.CategorySeed(
-        "https://www.pspcl.in", "PSPCL - Punjab State Power Corporation Limited", "utilities"
+        "https://www.pspcl.gov.in", "PSPCL - Punjab State Power Corporation Limited", "utilities"
     )
 
     async def _fetch(client, url, settings, **kwargs):
@@ -380,16 +382,16 @@ async def test_a_fetched_seed_always_persists_a_root(temp_db, monkeypatch) -> No
 
     assert report["stored"] == 1
     assert await store.count_documents() == 1
-    stored = await store.get_document("https://pspcl.in/")
+    stored = await store.get_document("https://pspcl.gov.in/")
     assert stored is not None
     assert "PSPCL" in stored["title"]
     assert stored["category"] == "utilities"
 
 
-async def test_a_responding_seed_persists_even_on_a_non_200_status(temp_db, monkeypatch) -> None:
-    """A seed that answers at all is indexed: minor blocks must not lose the domain."""
+async def test_a_whitelisted_seed_survives_a_403(temp_db, monkeypatch) -> None:
+    """A government portal that refuses us keeps a root card."""
     store = get_store()
-    seed = seed_crawler.CategorySeed("https://canarabank.bank.in", "Canara Bank", "banking")
+    seed = seed_crawler.CategorySeed("https://eci.gov.in", "Election Commission of India", "government")
 
     async def _fetch(client, url, settings, **kwargs):
         return None, 403
@@ -401,8 +403,8 @@ async def test_a_responding_seed_persists_even_on_a_non_200_status(temp_db, monk
 
     assert report["stored"] == 1
     assert await store.count_documents() == 1
-    stored = await store.get_document("https://canarabank.bank.in/")
-    assert stored is not None and stored["title"] == "canarabank.bank.in"
+    stored = await store.get_document("https://eci.gov.in/")
+    assert stored is not None and stored["title"] == "eci.gov.in"
 
 
 async def test_a_5xx_or_ssl_failure_still_persists_the_hostname_root(temp_db, monkeypatch) -> None:
@@ -410,7 +412,7 @@ async def test_a_5xx_or_ssl_failure_still_persists_the_hostname_root(temp_db, mo
     store = get_store()
     cases = [
         ("https://broken.gov.in", None, 502),
-        ("https://sslbroken.gov.in", None, None),   # connection / SSL failure
+        ("https://sslbroken.nic.in", None, None),   # connection / SSL failure
         ("https://eci.gov.in", None, 403),
     ]
 
@@ -465,7 +467,7 @@ async def test_startup_write_probe_fails_loudly_on_a_read_only_database(temp_db,
 
     assert report["writable"] is False
     assert "READONLY" in report["error"] or "readonly" in report["error"].lower()
-    assert any("startup write check FAILED" in record.message for record in caplog.records)
+    assert any("startup write check FAILED" in record.getMessage() for record in caplog.records)
 
 
 async def test_a_step_level_error_inside_a_200_response_is_raised() -> None:
@@ -515,11 +517,11 @@ async def test_pipeline_statements_are_logged_with_their_verbs(caplog) -> None:
     TursoHTTPClient._TOTAL = 0
     client = TursoHTTPClient("https://db.turso.io", transport=httpx.MockTransport(handler))
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         await client.execute("SELECT domain FROM sites WHERE domain = ?", ["a.in"])
         await client.execute("INSERT INTO sites (domain) VALUES (?)", ["a.in"])
 
-    lines = [record.message for record in caplog.records if "TURSO PIPELINE EXECUTE" in record.message]
+    lines = [record.getMessage() for record in caplog.records if "pipeline execute" in record.getMessage()]
     assert len(lines) == 2
     assert "SELECT domain FROM sites" in lines[0]
     assert "INSERT INTO sites" in lines[1]
@@ -531,20 +533,22 @@ async def test_the_seed_entry_and_exit_points_are_logged(temp_db, monkeypatch, c
     seed = seed_crawler.CategorySeed("https://logged.gov.in", "Logged", "government")
 
     async def _fetch(client, url, settings, **kwargs):
-        return ("<html><head><title>Logged portal</title></head>"
-                "<body><p>Official portal text here.</p></body></html>", 200)
+        return ("<html><head><title>Logged portal</title>"
+                "<meta name='description' content='Official portal with services and notices.'>"
+                "</head><body><p>" + ("Official portal text for citizens. " * 4) + "</p></body></html>", 200)
 
     monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("DEBUG"):
         await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
-    messages = [record.message for record in caplog.records]
-    assert any("SEED START: processing domain logged.gov.in" in m for m in messages)
-    assert any("SEED FETCHED: domain logged.gov.in returned status 200" in m for m in messages)
-    assert any("PREPARING DB WRITE" in m and "logged.gov.in" in m for m in messages)
+    messages = [record.getMessage() for record in caplog.records]
+    # INFO: the commit, and the pass summary.
     assert any("DB COMMIT SUCCESS: Indexed logged.gov.in" in m for m in messages)
+    assert any("seed pass complete" in m for m in messages)
+    # DEBUG: the per-URL trace stays available but off the INFO stream.
+    assert any("fetched logged.gov.in -> 200" in m for m in messages)
 
 
 def test_the_running_commit_is_reported(monkeypatch, caplog) -> None:
@@ -609,7 +613,7 @@ async def test_a_broken_certificate_is_retried_unverified(monkeypatch, caplog) -
 
     assert result is not None, "the unverified retry should have succeeded"
     assert len(calls) == 2
-    assert any("retrying this request unverified" in record.message for record in caplog.records)
+    assert any("retrying this request unverified" in record.getMessage() for record in caplog.records)
 
 
 async def test_the_tls_policy_can_forbid_the_fallback(monkeypatch) -> None:
