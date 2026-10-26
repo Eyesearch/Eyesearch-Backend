@@ -248,19 +248,35 @@ higher-is-better, normalised across the result set, then blended with an
 exponential freshness decay (30-day half-life) and a small host-trust term that
 favours official and regional domains.
 
-**Routing** (`app/services/search_service.py`) — cache-first, and never live:
+**Routing** (`app/services/search_service.py`) — live-fetch-once, cache-forever:
 
 ```
-documents_fts  →  (≥ INDEX_THRESHOLD hits)  →  source: "index"
-              →  Turso result cache         →  source: "cache"
-              →  miss                       →  source: "queued", query added to crawl_backlog
+documents_fts  →  any hit          →  source: "index"   (no outbound call, ever)
+              →  Turso result cache →  source: "cache"   (no outbound call)
+              →  zero local hits    →  live fetch once   →  source: "live"
+                                        ↘ ingest the live results into documents_fts
+                                        ↘ (or queue the query if none were indexable)
 ```
 
-The request path performs **no external HTTP**. A miss returns immediately
-(measured 3–5 ms warm in the smoke test) with an empty result set and
-`source: "queued"`; the background crawler picks the query up. Set
-`LIVE_SEARCH_ENABLED=true` only as an emergency escape hatch — the smoke suite
-covers that path, the default is off.
+The first query for a topic pays for one live fetch and its results are written
+straight into the index — title, URL and snippet, fitted to the same 2 KB budget,
+through the same dedupe and domain caps. Every later query for that topic is a
+`documents_fts` hit: no provider call, single-digit milliseconds.
+
+Verified through the API with `q=Github`:
+
+| request | source | took_ms | live calls |
+| --- | --- | --- | --- |
+| 1 | `eyesearch_live` | 9 | 1 (auto-ingested 1 document) |
+| 2 | `eyesearch_index` | 15 | still 1 |
+| 3 | `eyesearch_index` | 1 | still 1 |
+
+`auto_ingested` on the response reports how many documents that request wrote.
+A query whose live results are all rejected by the crawl rules (repository
+loops, deep paths) is queued for the crawler instead, and a repeat of it within
+ten minutes is answered locally rather than retried against the providers.
+`LIVE_SEARCH_ENABLED=false` gives a strictly local deployment where a miss
+returns `source: "queued"` and nothing outbound happens at all.
 
 Every response now carries `source` (`index` | `cache` | `live`) and
 `index_hits`, so a client can tell whether the answer came from our own index.
@@ -296,7 +312,8 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_FRESHNESS_WEIGHT` (0.25), `INDEX_MAX_PAYLOAD_BYTES` (2048),
 `INDEX_TITLE_MAX_CHARS` (100), `INDEX_SNIPPET_MAX_CHARS` (200),
 `INDEX_CONTENT_MAX_CHARS` (1200), `INDEX_MAX_URLS_PER_DOMAIN` (12),
-`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (false), `PUBLIC_BASE_URL` ("")
+`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (true), `AUTO_INGEST_ENABLED` (true),
+`AUTO_INGEST_MAX_RESULTS` (5), `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
 `BACKLOG_URLS_PER_QUERY` (5), `BACKLOG_DISCOVERY_ENABLED` (true),
