@@ -30,6 +30,7 @@ from app.engine.schema import (
     PAGE_TRIGGERS,
 )
 from app.errors import DatabaseError
+from app.libsql_http import ResultSet, TursoHTTPClient
 
 # What a database URL should look like once we are done with it: no token, no
 # credentials, safe to put in a log line or an HTTP response.
@@ -128,15 +129,25 @@ async def connect(settings: Settings | None = None) -> libsql_client.Client:
             safe_url(effective_url),
         )
 
-    kwargs: dict[str, Any] = {"url": effective_url}
-    if cfg.turso_auth_token:
-        # libsql_client sends this as `Authorization: Bearer <token>`.
-        kwargs["auth_token"] = cfg.turso_auth_token
-    try:
-        _client = libsql_client.create_client(**kwargs)
-    except Exception as exc:
-        logger.error("database client creation failed for %s: %s", target["url"], exc)
-        raise DatabaseError(f"could not create database client: {exc}") from exc
+    if cfg.is_remote_db:
+        # Our own HTTP client: the library's backend indexes `response["result"]`,
+        # and Turso's pipeline answers with `{"results": [...]}`, which raised
+        # KeyError: 'result' on every statement.
+        _client = TursoHTTPClient(
+            effective_url,
+            auth_token=cfg.turso_auth_token,
+            timeout=cfg.db_timeout_s * 2,
+        )
+        logger.info("database client: TursoHTTPClient (v2 pipeline)")
+    else:
+        kwargs: dict[str, Any] = {"url": effective_url}
+        if cfg.turso_auth_token:
+            kwargs["auth_token"] = cfg.turso_auth_token
+        try:
+            _client = libsql_client.create_client(**kwargs)
+        except Exception as exc:
+            logger.error("database client creation failed for %s: %s", target["url"], exc)
+            raise DatabaseError(f"could not create database client: {exc}") from exc
 
     client_class = type(_client).__name__
     if cfg.is_remote_db:
