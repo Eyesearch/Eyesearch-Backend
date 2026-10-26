@@ -52,6 +52,34 @@ async def health() -> HealthResponse:
     return await _health()
 
 
+@router.get("/v1/stats", summary="Live index statistics")
+async def stats() -> dict[str, object]:
+    """Counts read straight from the database on every call — never cached.
+
+    The frontend's "indexed sites" number comes from here, so a stale figure here
+    would hide a stalled ingestion pipeline.
+    """
+    store = get_store()
+    try:
+        live = await store.stats()
+    except Exception as exc:
+        logger.warning("stats read failed: %s", exc)
+        live = {"documents": 0, "sites": 0, "pages": 0, "backlog": 0, "max_payload_bytes": 0}
+    try:
+        pending_domains = await store.pending_domain_count()
+    except Exception:
+        pending_domains = 0
+    return {
+        "sites": live.get("sites", live.get("documents", 0)),
+        "pages": live.get("pages", 0),
+        "indexed": live.get("pages", 0),
+        "query_backlog": live.get("backlog", 0),
+        "discovered_backlog": pending_domains,
+        "max_payload_bytes": live.get("max_payload_bytes", 0),
+        "source": "database",
+    }
+
+
 @router.get("/healthz", response_model=HealthResponse, summary="Liveness probe (alias)")
 async def healthz() -> HealthResponse:
     return await _health()
