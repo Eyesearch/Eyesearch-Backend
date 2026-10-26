@@ -44,6 +44,10 @@ class SearchResponse(BaseModel):
         "queued = nothing local yet and the query is queued for the crawler.",
     )
     index_hits: int = Field(default=0, description="Documents matched in the EyeSearch index.")
+    auto_ingested: int = Field(
+        default=0,
+        description="Documents written into the index from this response's live results.",
+    )
     providers: dict[str, int] = Field(default_factory=dict)
     results: list[SearchResult] = Field(default_factory=list)
 
@@ -87,7 +91,10 @@ class MetaSearchResponse(BaseModel):
     query: str
     total_hits: int = 0
     took_ms: int = 0
-    source: str = Field(description="`eyesearch_index`, `eyesearch_cache` or `eyesearch_queued`.")
+    source: str = Field(
+        description="`eyesearch_index`, `eyesearch_cache`, `eyesearch_live` or `eyesearch_queued`."
+    )
+    auto_ingested: int = 0
     results: list[MetaSearchResult] = Field(default_factory=list)
 
 

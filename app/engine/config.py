@@ -40,9 +40,13 @@ class EngineSettings:
     index_threshold: int = field(default_factory=lambda: _int("INDEX_THRESHOLD", 1))
     index_limit: int = field(default_factory=lambda: _int("INDEX_LIMIT", 20))
     freshness_weight: float = field(default_factory=lambda: _float("INDEX_FRESHNESS_WEIGHT", 0.25))
-    # The request path never calls an external provider: a miss returns at once
-    # and the query is queued for the crawler. Flip this only for emergencies.
-    live_search_enabled: bool = field(default_factory=lambda: _bool("LIVE_SEARCH_ENABLED", False))
+    # Live-fetch-once: the first query for a topic calls the providers, the
+    # results are ingested, and every later query is answered from the index.
+    # Set false for a strictly local-only deployment.
+    live_search_enabled: bool = field(default_factory=lambda: _bool("LIVE_SEARCH_ENABLED", True))
+    # Write the live results into documents_fts so the next query is local.
+    auto_ingest_enabled: bool = field(default_factory=lambda: _bool("AUTO_INGEST_ENABLED", True))
+    auto_ingest_max_results: int = field(default_factory=lambda: _int("AUTO_INGEST_MAX_RESULTS", 5))
 
     # --- storage budget (1-2 KB per page) --------------------------------
     max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 2048))
