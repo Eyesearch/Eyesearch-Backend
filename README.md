@@ -13,7 +13,9 @@ contracts: rich cards for the UI and token-optimised context for AI clients.
 
 | Method | Path | Params | Response |
 | --- | --- | --- | --- |
-| GET | `/v1/search` | `q` (required, ≤512 chars), `limit` (1–50, default 10), `page` (1–20, default 1) | `SearchResponse` JSON |
+| GET | `/v1/search` | `q`, `limit` (1–50), `page` (1–20), `format` (`cards`\|`json`) | `SearchResponse` cards, or the flat meta-search JSON |
+| GET | `/opensearch.xml` | — | OpenSearch description document |
+| GET | `/v1/suggest` | `q`, `limit` (1–20) | `[query, [completions…]]` (OpenSearch suggestions) |
 | POST | `/v1/retrieve` | body `{"query": str, "format": "markdown"\|"json", "limit": 1–50}` | `text/markdown` (default) or `RetrieveResponse` JSON |
 | GET | `/v1/retrieve` | `q`, `format`, `limit` | same as POST, query-string form |
 | GET | `/health` · `/healthz` | — | `HealthResponse` JSON, never raises |
@@ -99,6 +101,83 @@ Both endpoints share one envelope:
 Codes: `bad_request` (400), `not_found` (404), `rate_limited` (429),
 `provider_unavailable` (503), `database_error` (503), `internal` (500).
 `retryable` is a real judgement — it is `false` for `bad_request`.
+
+## Consumer protocols
+
+One index, four ways in — each shaped for a different consumer:
+
+**Browsers.** `GET /opensearch.xml` returns an
+`application/opensearchdescription+xml` document (`ShortName: eyesearch`) with
+both a `text/html` search URL and a `application/x-suggestions+json` URL, so
+Chromium, Firefox and Brave can install eyesearch as a search engine and get
+autocomplete in the address bar. The template origin comes from
+`PUBLIC_BASE_URL` when set, otherwise from the request's forwarded headers.
+
+**Autocomplete.** `GET /v1/suggest?q=bengaluru+metro` →
+`["bengaluru metro", ["Bengaluru Metro Purple Line timings"]]`, drawn from the
+titles in `documents_fts`, deduplicated, with a prefix fallback so a half-typed
+word still completes. It never errors — a bad query returns `[q, []]`.
+
+**Meta-search aggregators.** `GET /v1/search?q=…&format=json`:
+
+```json
+{
+  "query": "bengaluru metro",
+  "total_hits": 1,
+  "took_ms": 18,
+  "source": "eyesearch_index",
+  "results": [
+    {"title": "Bengaluru Metro Purple Line timings",
+     "url": "https://english.bmrc.co.in/metro-timings",
+     "snippet": "Purple Line services run 05:00 to 23:00 on weekdays.",
+     "favicon": "https://english.bmrc.co.in/favicon.ico"}
+  ]
+}
+```
+
+`source` is `eyesearch_index`, `eyesearch_cache` or `eyesearch_queued`. Without
+`format=json` the endpoint keeps returning the card shape the web UI uses.
+
+**AI / LLM agents (RAG).** `GET /v1/retrieve?q=…&max_results=5`:
+
+```json
+{
+  "query": "bengaluru metro",
+  "source": "index",
+  "context": [
+    {"title": "Bengaluru Metro Purple Line timings",
+     "url": "https://english.bmrc.co.in/metro-timings",
+     "text": "Purple Line services run 05:00 to 23:00 on weekdays."}
+  ]
+}
+```
+
+Clean text only — no HTML, no navigation, no boilerplate, snippets trimmed at a
+word boundary. `format=markdown` returns the same content as a markdown document
+for prompt assembly, and `POST /v1/retrieve` keeps its original contract (now
+carrying `context` alongside the legacy `results`).
+
+## Autonomous backlog worker
+
+A missed query is written to `crawl_backlog` by the request path and resolved by
+`app/indexer/backlog_worker.py`, off the request path:
+
+1. pop pending queries (`BACKLOG_BATCH_QUERIES`, default 3 per pass)
+2. work out candidate URLs — seed portals whose label matches the query, plus
+   optional provider discovery (`BACKLOG_DISCOVERY_ENABLED`), which happens here
+   and never while a user waits
+3. filter through the same `is_indexable()` rules, then order by authority
+   (government → news → other, shallower paths first), capped at
+   `BACKLOG_URLS_PER_QUERY` (5)
+4. fetch with the crawler's politeness and byte caps, extract to the same 2 KB
+   budget, ingest under the same dedupe rules
+5. mark the query processed **only if something was actually indexed** — an
+   unresolved query stays pending for the next pass
+
+The loop runs from the gateway lifespan (`BACKLOG_WORKER_ENABLED`,
+`BACKLOG_INTERVAL_SECONDS` default 900, jittered). Verified end to end: a query
+returning `source: eyesearch_queued, total_hits: 0` became
+`source: eyesearch_index, total_hits: 1` after one worker pass.
 
 ## Own index: crawler + indexer
 
@@ -217,7 +296,10 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_FRESHNESS_WEIGHT` (0.25), `INDEX_MAX_PAYLOAD_BYTES` (2048),
 `INDEX_TITLE_MAX_CHARS` (100), `INDEX_SNIPPET_MAX_CHARS` (200),
 `INDEX_CONTENT_MAX_CHARS` (1200), `INDEX_MAX_URLS_PER_DOMAIN` (12),
-`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (false),
+`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (false), `PUBLIC_BASE_URL` ("")
+`SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
+`BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
+`BACKLOG_URLS_PER_QUERY` (5), `BACKLOG_DISCOVERY_ENABLED` (true),
 `REVALIDATE_ENABLED` (true), `REVALIDATE_INTERVAL_SECONDS` (3600),
 `REVALIDATE_NEWS_DAYS` (1.5), `REVALIDATE_GOV_DAYS` (7),
 `REVALIDATE_STATIC_DAYS` (21), `CRAWL_ENABLED` (true),
