@@ -299,6 +299,226 @@ higher-is-better, normalised across the result set, then blended with an
 exponential freshness decay (30-day half-life) and a small host-trust term that
 favours official and regional domains.
 
+**Routing** (`app/services/search_service.py`) — index first, verified extraction on a miss:
+
+```
+documents_fts  →  any hit  →  serve immediately (source: "index", no outbound call)
+              →  miss      →  providers supply *candidate URLs only*
+                             → universal relevance gate (≥ 60% of query words in title/URL/snippet)
+                             → native extractor fetches and parses the survivors
+                             → gate again on our own extract
+                             → upsert into documents + documents_fts
+                             → serve our extracts (source: "index")
+                             → nothing verified: source "queued", query goes to the crawler
+```
+
+Provider titles and snippets are **never served and never stored**. The provider
+tells us which URLs might answer the query; what the user sees is our own
+extract of that page — title, URL, snippet and favicon from `documents`, capped
+at the same 2 KB budget. That is what stops unverified provider dumps from
+becoming results.
+
+Verified through the API with three candidates for one query:
+
+| step | outcome |
+| --- | --- |
+| gate | 3 candidates in, weather page dropped, 2 pass |
+| request 1 | `eyesearch_index`, 2 documents extracted and stored, 1 provider call |
+| request 2 | `eyesearch_index`, 19 ms, no provider call |
+| request 3 | `eyesearch_index`, 4 ms |
+| `search_records` | 0 rows — nothing is dumped there any more |
+
+`auto_ingested` reports how many documents that request wrote. A query whose
+candidates all fail the gate is queued for the crawler, and a repeat within ten
+minutes is answered locally rather than retried. `LIVE_SEARCH_ENABLED=false`
+gives a strictly local deployment.
+
+### The universal relevance gate
+
+One rule, no special cases — `app/engine/relevance.py`:
+
+- the query is tokenised (Latin, Devanagari and Kannada), lower-cased, stopworded;
+- a candidate passes when **≥ 60 %** of those words appear in its title, URL or
+  snippet (`RELEVANCE_MIN_TOKEN_COVERAGE`);
+- prefix matching absorbs simple stemming ("bengal" ↔ "bengaluru");
+- a word that appears only in the page body does not count, which is what stops
+  a passing footer mention from being served as an answer.
+
+The same function gates index hits and freshly discovered candidates, so there
+is exactly one definition of "relevant" in the system.
+
+### Native extraction (`app/indexer/extractor.py`)
+
+`extract_candidate()` fetches one URL (robots.txt honoured, byte-capped) and runs
+it through the extractor; `extract_candidates()` does up to
+`ON_DEMAND_MAX_FETCHES` (5) with bounded concurrency. The extractor strips
+scripts, styles, navigation, footers, ads, inline images and base64 payloads,
+keeps the title (≤ 100 chars), snippet (≤ 200) and a short lead, and fits the
+whole row to the 2 KB budget. Ingestion uses `mode="upsert"`, so a re-verified
+page replaces its row in place rather than duplicating it; the crawler keeps its
+stricter insert-only rule.
+
+### Result cache
+
+`search_records` is no longer part of the serving path. It is emptied at startup
+(`purge_unverified_cache()`) so old provider dumps cannot resurface, and its
+schema is keyed by `UNIQUE (query_key, url)` with
+`query_key = sha256(" ".join(q.split()).lower())[:40]` for any future use.
+
+## Consumer protocols
+
+One index, four ways in — each shaped for a different consumer:
+
+**Browsers.** `GET /opensearch.xml` returns an
+`application/opensearchdescription+xml` document (`ShortName: eyesearch`) with
+both a `text/html` search URL and a `application/x-suggestions+json` URL, so
+Chromium, Firefox and Brave can install eyesearch as a search engine and get
+autocomplete in the address bar. The template origin comes from
+`PUBLIC_BASE_URL` when set, otherwise from the request's forwarded headers.
+
+**Autocomplete.** `GET /v1/suggest?q=bengaluru+metro` →
+`["bengaluru metro", ["Bengaluru Metro Purple Line timings"]]`, drawn from the
+titles in `documents_fts`, deduplicated, with a prefix fallback so a half-typed
+word still completes. It never errors — a bad query returns `[q, []]`.
+
+**Meta-search aggregators.** `GET /v1/search?q=…&format=json`:
+
+```json
+{
+  "query": "bengaluru metro",
+  "total_hits": 1,
+  "took_ms": 18,
+  "source": "eyesearch_index",
+  "results": [
+    {"title": "Bengaluru Metro Purple Line timings",
+     "url": "https://english.bmrc.co.in/metro-timings",
+     "snippet": "Purple Line services run 05:00 to 23:00 on weekdays.",
+     "favicon": "https://english.bmrc.co.in/favicon.ico"}
+  ]
+}
+```
+
+`source` is `eyesearch_index`, `eyesearch_cache` or `eyesearch_queued`. Without
+`format=json` the endpoint keeps returning the card shape the web UI uses.
+
+**AI / LLM agents (RAG).** `GET /v1/retrieve?q=…&max_results=5`:
+
+```json
+{
+  "query": "bengaluru metro",
+  "source": "index",
+  "context": [
+    {"title": "Bengaluru Metro Purple Line timings",
+     "url": "https://english.bmrc.co.in/metro-timings",
+     "text": "Purple Line services run 05:00 to 23:00 on weekdays."}
+  ]
+}
+```
+
+Clean text only — no HTML, no navigation, no boilerplate, snippets trimmed at a
+word boundary. `format=markdown` returns the same content as a markdown document
+for prompt assembly, and `POST /v1/retrieve` keeps its original contract (now
+carrying `context` alongside the legacy `results`).
+
+## Autonomous backlog worker
+
+A missed query is written to `crawl_backlog` by the request path and resolved by
+`app/indexer/backlog_worker.py`, off the request path:
+
+1. pop pending queries (`BACKLOG_BATCH_QUERIES`, default 3 per pass)
+2. work out candidate URLs — seed portals whose label matches the query, plus
+   optional provider discovery (`BACKLOG_DISCOVERY_ENABLED`), which happens here
+   and never while a user waits
+3. filter through the same `is_indexable()` rules, then order by authority
+   (government → news → other, shallower paths first), capped at
+   `BACKLOG_URLS_PER_QUERY` (5)
+4. fetch with the crawler's politeness and byte caps, extract to the same 2 KB
+   budget, ingest under the same dedupe rules
+5. mark the query processed **only if something was actually indexed** — an
+   unresolved query stays pending for the next pass
+
+The loop runs from the gateway lifespan (`BACKLOG_WORKER_ENABLED`,
+`BACKLOG_INTERVAL_SECONDS` default 900, jittered). Verified end to end: a query
+returning `source: eyesearch_queued, total_hits: 0` became
+`source: eyesearch_index, total_hits: 1` after one worker pass.
+
+## Own index: crawler + indexer
+
+The gateway is no longer only a proxy. `app/engine/`, `app/crawler/` and
+`app/indexer/` add a proprietary index that answers queries before any external
+provider is touched.
+
+### Storage budget: 2 KB per page, enforced
+
+The index stores answers, not copies. A row is capped at
+`INDEX_MAX_PAYLOAD_BYTES` (2048 by default) and holds only:
+
+| field | limit |
+| --- | --- |
+| `title` | ≤ 100 characters, cut at a word boundary |
+| `canonical_url` | normalised (no tracking, no trailing slash, no hash) |
+| `snippet` | meta description, else the first ~200 clean characters |
+| `favicon` | absolute URL |
+| `language` | `en` / `kn` / `hi`, detected by script |
+| `content` | a short lead only, so FTS5 has text to match — ≤ 1200 chars |
+
+Markup, scripts, stylesheets, inline images, `data:` URIs, base64 blobs,
+tracking pixels and paragraph dumps are stripped before storage, and
+`ExtractedDocument.fit_to_budget()` trims content → snippet → title until the
+whole row fits. A real page comes out around 0.3–1 KB.
+
+### Deduplication and crawl scope
+
+- URLs are normalised through one function (`app/engine/urls.normalise_url`):
+  lowercase host, `www.` removed, `utm_*`/`ref`/`gclid`/`fbclid`/`source`/
+  `campaign` and friends dropped, query keys sorted, trailing slash and hash
+  removed. That normalised string is the primary key.
+- Ingestion **rejects** a URL that already exists — it does not overwrite. Only
+  revalidation updates a row, and it updates in place.
+- At most `INDEX_MAX_URLS_PER_DOMAIN` (12) URLs per registrable domain, counting
+  `.gov.in`/`.nic.in`/`.co.in` style suffixes as one unit.
+- `is_indexable()` keeps the index to entry portals: path depth ≤ 2, no
+  `/commit/`, `/pulls/`, `/issues`, `/blob/`, `/tree/`, `/search`, `/login`,
+  cart/checkout paths, pagination (`/page/2`, `?page=3`), long dynamic query
+  chains, repository `owner/repo` loops, and non-document extensions.
+
+**Result cache keying** — `search_records` is keyed by
+`UNIQUE (query_key, url)` where `query_key = sha256(" ".join(q.split()).lower())[:40]`.
+Two queries can cache the same URL without one taking it from the other, and a
+query can only ever read rows written for itself — the lookup is
+`WHERE query_key = ?`, never a shared or partial key. A pre-existing table with
+the old `url UNIQUE` constraint is dropped and recreated on startup (it is a
+cache, and dropping it also clears rows poisoned by the old matching bug).
+
+**Schema** (applied at startup with the rest of the DDL):
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
+    url, title, snippet, content, language, updated_at UNINDEXED
+);
+```
+
+backed by `documents` (one row per URL: canonical URL, domain, title, snippet,
+clean body, language, favicon, timestamps), `crawl_backlog` (queries the index
+could not answer) and `crawl_queue` (URLs to fetch).
+
+**Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
+regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
+Kannada Wikipedia, Prajuna/Deccan Herald/The Hindu Karnataka), robots.txt
+honoured, one request at a time per host with a delay, a byte cap per page, a
+page budget per seed, same-host links only, and an SSRF guard that refuses
+link-local hosts. Every failure is skipped, never fatal.
+
+**Extractor** (`app/engine/text.py`) — title (falling back to `<h1>`), meta
+description, canonical URL, favicon, and a clean body with navigation, footers,
+scripts and forms stripped. It detects Kannada and Devanagari by script, and
+refuses pages with no title or almost no text.
+
+**Ranking** (`app/engine/ranking.py`) — SQLite's `bm25()` flipped to
+higher-is-better, normalised across the result set, then blended with an
+exponential freshness decay (30-day half-life) and a small host-trust term that
+favours official and regional domains.
+
 **Routing** (`app/services/search_service.py`) — live-fetch-once, cache-forever:
 
 ```
@@ -369,8 +589,10 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_FRESHNESS_WEIGHT` (0.25), `INDEX_MAX_PAYLOAD_BYTES` (2048),
 `INDEX_TITLE_MAX_CHARS` (100), `INDEX_SNIPPET_MAX_CHARS` (200),
 `INDEX_CONTENT_MAX_CHARS` (1200), `INDEX_MAX_URLS_PER_DOMAIN` (12),
-`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (true), `AUTO_INGEST_ENABLED` (true),
-`AUTO_INGEST_MAX_RESULTS` (5), `PUBLIC_BASE_URL` ("")
+`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (true),
+`RELEVANCE_MIN_TOKEN_COVERAGE` (0.6), `ON_DEMAND_MAX_CANDIDATES` (8),
+`ON_DEMAND_MAX_FETCHES` (5), `ON_DEMAND_CONCURRENCY` (3),
+`ON_DEMAND_BUDGET_SECONDS` (12), `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
 `BACKLOG_URLS_PER_QUERY` (5), `BACKLOG_DISCOVERY_ENABLED` (true),
