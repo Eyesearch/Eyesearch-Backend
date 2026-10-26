@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
+
 import pytest
 
 from app import database
@@ -269,5 +271,89 @@ async def test_successful_writes_are_logged_with_the_total(temp_db, monkeypatch,
         await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
     assert any(
-        "Successfully indexed site: logged.gov.in" in record.message for record in caplog.records
+        "DB COMMIT SUCCESS: Indexed logged.gov.in" in record.message for record in caplog.records
     )
+
+
+# --- extraction gate: government homepages must not be silently dropped ----
+
+def test_a_javascript_homepage_with_a_title_is_indexable() -> None:
+    """The reported case: fetched, then "produced no indexable pages"."""
+    from app.engine.text import extract_document_with_reason
+
+    shell = (
+        "<html><head><title>Government of Odisha</title>"
+        "<meta name='description' content='Official portal of the Government of Odisha.'>"
+        "</head><body><div id='app'></div><noscript>Enable JavaScript</noscript></body></html>"
+    )
+    document, reason = extract_document_with_reason("https://odisha.gov.in/", shell)
+
+    assert document is not None, reason
+    assert document.title == "Government of Odisha"
+    assert document.description
+
+
+def test_skip_reasons_are_specific() -> None:
+    from app.engine.text import (
+        SKIP_BLOCKED_STATUS,
+        SKIP_NO_TITLE,
+        SKIP_NOT_INDEXABLE,
+        SKIP_TOO_SHORT,
+        extract_document_with_reason,
+    )
+
+    page = "<html><head><title>Portal</title></head><body><p>Some text here.</p></body></html>"
+    assert extract_document_with_reason("https://x.gov.in/", page, http_status=403)[1] == SKIP_BLOCKED_STATUS
+    assert extract_document_with_reason("https://x.gov.in/", "")[1] == SKIP_TOO_SHORT
+    assert extract_document_with_reason("https://x.gov.in/login", page)[1] == SKIP_NOT_INDEXABLE
+    assert extract_document_with_reason(
+        "https://x.gov.in/", "<html><body><div id='app'></div></body></html>"
+    )[1] == SKIP_NO_TITLE
+
+
+async def test_skip_reasons_are_logged_per_seed(temp_db, monkeypatch, caplog) -> None:
+    store = get_store()
+    seed = seed_crawler.CategorySeed("https://empty.gov.in", "Empty", "government")
+
+    async def _fetch(client, url, settings, **kwargs):
+        return "<html><body><div id='app'></div></body></html>", 200
+
+    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    with caplog.at_level("INFO"):
+        await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    assert any("skipped: no_title" in record.message for record in caplog.records)
+    assert any(
+        "produced no indexable pages" in record.message and "no_title" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_stats_endpoint_reads_live_counts(temp_db) -> None:
+    from app.main import app
+
+    store = get_store()
+    await store.ingest_documents(
+        [{"url": "https://live.gov.in/", "canonical_url": "https://live.gov.in/",
+          "title": "Live portal", "description": "Snippet.", "payload_bytes": 100}]
+    )
+    await store.enqueue_domain("queued.gov.in")
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", timeout=10) as client:
+            first = (await client.get("/v1/stats")).json()
+            assert first["sites"] >= 1
+            assert first["pages"] >= 1
+            assert first["source"] == "database"
+            assert first["discovered_backlog"] >= 1
+
+            # A write shows up on the very next call: no cached count.
+            await store.ingest_documents(
+                [{"url": "https://second.gov.in/", "canonical_url": "https://second.gov.in/",
+                  "title": "Second portal", "description": "Snippet.", "payload_bytes": 100}]
+            )
+            second = (await client.get("/v1/stats")).json()
+            assert second["sites"] == first["sites"] + 1
