@@ -375,6 +375,22 @@ sites …', 'INSERT INTO sites …']` — with a running tally every fifty state
 (`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
 a read loop from an ingestion loop.
 
+**Schema migrations run before the DDL batch, and are verified.** A production
+database whose `crawl_backlog` predated the `kind` column made every backlog
+insert fail (`table crawl_backlog has no column named kind`), and the index over
+that column inside the base batch aborted the whole schema initialisation. Now:
+existing tables are migrated *before* the batch, the index is created only once
+the column exists, every `ALTER` failure is logged at ERROR, and the result is
+verified afterwards (`migration applied: crawl_backlog.kind`). If a column still
+cannot be added, the backlog statements fall back to their legacy column set, so
+queries keep queueing instead of throwing.
+
+**Commits are isolated.** `sites` are written in their own pipeline request and
+logged (`SITES COMMITTED: N site rows written`) before pages are attempted, and
+page batches run non-strict: a failing step is logged and counted
+(`failed_statements`) without discarding the statements that did commit. A
+backlog write can never roll back a site or page commit.
+
 **Startup proves the database is writable.** Before any crawling,
 `verify_database()` logs the exact integers Turso returns
 (`SELECT count(*) FROM sites = 71, pages = 214, page_fts = 214`), then inserts a
@@ -806,6 +822,22 @@ pipeline logs its statements — `TURSO PIPELINE EXECUTE: ['SELECT domain FROM
 sites …', 'INSERT INTO sites …']` — with a running tally every fifty statements
 (`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
 a read loop from an ingestion loop.
+
+**Schema migrations run before the DDL batch, and are verified.** A production
+database whose `crawl_backlog` predated the `kind` column made every backlog
+insert fail (`table crawl_backlog has no column named kind`), and the index over
+that column inside the base batch aborted the whole schema initialisation. Now:
+existing tables are migrated *before* the batch, the index is created only once
+the column exists, every `ALTER` failure is logged at ERROR, and the result is
+verified afterwards (`migration applied: crawl_backlog.kind`). If a column still
+cannot be added, the backlog statements fall back to their legacy column set, so
+queries keep queueing instead of throwing.
+
+**Commits are isolated.** `sites` are written in their own pipeline request and
+logged (`SITES COMMITTED: N site rows written`) before pages are attempted, and
+page batches run non-strict: a failing step is logged and counted
+(`failed_statements`) without discarding the statements that did commit. A
+backlog write can never roll back a site or page commit.
 
 **Startup proves the database is writable.** Before any crawling,
 `verify_database()` logs the exact integers Turso returns
