@@ -324,11 +324,13 @@ async def test_skip_reasons_are_logged_per_seed(temp_db, monkeypatch, caplog) ->
     with caplog.at_level("INFO"):
         await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
+    # The page is still reported as skipped, with the rule that rejected it…
     assert any("skipped: no_title" in record.message for record in caplog.records)
-    assert any(
-        "produced no indexable pages" in record.message and "no_title" in record.message
-        for record in caplog.records
-    )
+    # …but the seed's own root is committed from fallback metadata, so the domain
+    # is never lost just because its entry page had nothing to extract.
+    assert any("using fallback metadata" in record.message for record in caplog.records)
+    assert any("DB COMMIT SUCCESS: Indexed empty.gov.in" in record.message for record in caplog.records)
+    assert await store.count_documents() == 1
 
 
 async def test_stats_endpoint_reads_live_counts(temp_db) -> None:
@@ -357,3 +359,107 @@ async def test_stats_endpoint_reads_live_counts(temp_db) -> None:
             )
             second = (await client.get("/v1/stats")).json()
             assert second["sites"] == first["sites"] + 1
+
+
+# --- the root domain must persist even when extraction fails ---------------
+
+async def test_a_fetched_seed_always_persists_a_root(temp_db, monkeypatch) -> None:
+    """The PSPCL case: HTTP 200, no extractable content, domain still indexed."""
+    store = get_store()
+    seed = seed_crawler.CategorySeed(
+        "https://www.pspcl.in", "PSPCL - Punjab State Power Corporation Limited", "utilities"
+    )
+
+    async def _fetch(client, url, settings, **kwargs):
+        return "<html><body><div id='app'></div></body></html>", 200
+
+    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    assert report["stored"] == 1
+    assert await store.count_documents() == 1
+    stored = await store.get_document("https://pspcl.in/")
+    assert stored is not None
+    assert "PSPCL" in stored["title"]
+    assert stored["category"] == "utilities"
+
+
+async def test_a_blocked_status_still_yields_no_root(temp_db, monkeypatch) -> None:
+    """A 403 is not evidence of a real page; it must not be indexed."""
+    store = get_store()
+    seed = seed_crawler.CategorySeed("https://blocked.gov.in", "Blocked", "government")
+
+    async def _fetch(client, url, settings, **kwargs):
+        return "<html><body>Forbidden</body></html>", 403
+
+    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    assert report["stored"] == 0
+    assert await store.count_documents() == 0
+
+
+# --- the write probe and step-level errors --------------------------------
+
+async def test_startup_write_probe_confirms_a_writable_database(temp_db) -> None:
+    from app import database
+
+    report = await database.verify_database()
+
+    assert report["writable"] is True
+    assert report["counts"]["sites"] == 0
+    # The probe row is cleaned up.
+    assert await get_store().count_documents() == 0
+
+
+async def test_startup_write_probe_fails_loudly_on_a_read_only_database(temp_db, monkeypatch, caplog) -> None:
+    from app import database
+
+    real_execute = database._execute
+
+    async def _read_only(sql, params=None, *, timeout_s=None):
+        if sql.strip().upper().startswith(("INSERT", "DELETE")):
+            raise database.DatabaseError("SQLITE_READONLY: attempt to write a readonly database")
+        return await real_execute(sql, params, timeout_s=timeout_s)
+
+    monkeypatch.setattr(database, "_execute", _read_only)
+
+    with caplog.at_level("ERROR"):
+        report = await database.verify_database()
+
+    assert report["writable"] is False
+    assert "READONLY" in report["error"] or "readonly" in report["error"].lower()
+    assert any("startup write check FAILED" in record.message for record in caplog.records)
+
+
+async def test_a_step_level_error_inside_a_200_response_is_raised() -> None:
+    """Turso answers 200 OK even when a statement failed inside the batch."""
+    import httpx
+
+    from app.errors import DatabaseError
+    from app.libsql_http import TursoHTTPClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"type": "ok", "response": {"type": "execute", "result": {"cols": [], "rows": []}}},
+                    {"type": "error", "error": {"message": "SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain"}},
+                ]
+            },
+        )
+
+    client = TursoHTTPClient("https://db.turso.io", transport=httpx.MockTransport(handler))
+    with pytest.raises(DatabaseError) as excinfo:
+        await client.batch([("INSERT INTO sites (domain) VALUES (?)", ["a.in"]), "SELECT 1"])
+
+    message = str(excinfo.value)
+    assert "step 1 failed" in message
+    assert "UNIQUE constraint" in message
+    assert "statement:" in message
+    await client.close()
