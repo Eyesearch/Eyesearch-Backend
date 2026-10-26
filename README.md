@@ -270,17 +270,61 @@ query can only ever read rows written for itself — the lookup is
 the old `url UNIQUE` constraint is dropped and recreated on startup (it is a
 cache, and dropping it also clears rows poisoned by the old matching bug).
 
-**Schema** (applied at startup with the rest of the DDL):
+**Schema — rebuilt automatically on startup.** Every table is
+`CREATE ... IF NOT EXISTS`, so a cold start against an empty Turso database
+recreates the whole thing with no manual step:
 
 ```sql
+CREATE TABLE IF NOT EXISTS documents (
+    url TEXT PRIMARY KEY, title TEXT, snippet TEXT, content TEXT,
+    domain TEXT, category TEXT, created_at TIMESTAMP, ...   -- + operational columns
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    url, title, snippet, content, language, updated_at UNINDEXED
+    title, snippet, content, url,
+    content='documents', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
 );
 ```
 
-backed by `documents` (one row per URL: canonical URL, domain, title, snippet,
-clean body, language, favicon, timestamps), `crawl_backlog` (queries the index
-could not answer) and `crawl_queue` (URLs to fetch).
+`documents_fts` is **external content**: the text is not stored twice, and three
+triggers (`documents_ai`, `documents_ad`, `documents_au`) keep the index in
+perfect sync — application code never writes to the FTS table directly, so a
+half-synced row is impossible. On startup the gateway logs what it found
+(`schema ready on remote: 18 documents, 18 indexed`), and an FTS table from an
+older release (no external content, no triggers) is detected, dropped and
+rebuilt from `documents` in one step. `crawl_backlog` and `crawl_queue` carry the
+crawler's work, the latter tagged with the category it belongs to.
+
+**Category-seed crawler** (`app/indexer/crawler.py`) — our own fleet, seeded by
+category, never a third-party snippet dump:
+
+| category | seeds |
+| --- | --- |
+| government | `india.gov.in`, `karnataka.gov.in`, `bengaluruurban.nic.in`, `ksrtc.in`, BMRC |
+| sports | `iplt20.com`, `bcci.tv`, `prokabaddi.com`, `espncricinfo.com` |
+| software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
+| knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
+
+A pass crawls each seed's entry page and follows same-host **level-1 links only**,
+storing up to `SEED_CRAWL_PAGES_PER_DOMAIN` pages per domain with
+`INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates. It runs once
+at startup when the index is empty (the "initial seed crawl pass"), then every
+`SEED_CRAWL_INTERVAL_SECONDS` (6 h default). By hand:
+
+```bash
+python -m app.indexer.crawler --list
+python -m app.indexer.crawler --category sports
+```
+
+**Depth and budget rules.** Root and level-1 pages only
+(`INDEX_MAX_PATH_DEPTH=1`), with main-namespace Wikipedia articles as the
+documented exception — `/wiki/<Article>` *is* their entry-point shape. Each
+document stores the clean canonical title, the normalised URL, the domain, the
+category and a **3–4 sentence factual summary** capped at 1.5 KB
+(`INDEX_SUMMARY_SENTENCES`, `INDEX_CONTENT_MAX_CHARS`), inside a row budget of
+2 KB. Scripts, styles, navigation, cookie notices, footers, ads and inline
+images never reach storage.
 
 **Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
 regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
@@ -490,17 +534,61 @@ query can only ever read rows written for itself — the lookup is
 the old `url UNIQUE` constraint is dropped and recreated on startup (it is a
 cache, and dropping it also clears rows poisoned by the old matching bug).
 
-**Schema** (applied at startup with the rest of the DDL):
+**Schema — rebuilt automatically on startup.** Every table is
+`CREATE ... IF NOT EXISTS`, so a cold start against an empty Turso database
+recreates the whole thing with no manual step:
 
 ```sql
+CREATE TABLE IF NOT EXISTS documents (
+    url TEXT PRIMARY KEY, title TEXT, snippet TEXT, content TEXT,
+    domain TEXT, category TEXT, created_at TIMESTAMP, ...   -- + operational columns
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    url, title, snippet, content, language, updated_at UNINDEXED
+    title, snippet, content, url,
+    content='documents', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
 );
 ```
 
-backed by `documents` (one row per URL: canonical URL, domain, title, snippet,
-clean body, language, favicon, timestamps), `crawl_backlog` (queries the index
-could not answer) and `crawl_queue` (URLs to fetch).
+`documents_fts` is **external content**: the text is not stored twice, and three
+triggers (`documents_ai`, `documents_ad`, `documents_au`) keep the index in
+perfect sync — application code never writes to the FTS table directly, so a
+half-synced row is impossible. On startup the gateway logs what it found
+(`schema ready on remote: 18 documents, 18 indexed`), and an FTS table from an
+older release (no external content, no triggers) is detected, dropped and
+rebuilt from `documents` in one step. `crawl_backlog` and `crawl_queue` carry the
+crawler's work, the latter tagged with the category it belongs to.
+
+**Category-seed crawler** (`app/indexer/crawler.py`) — our own fleet, seeded by
+category, never a third-party snippet dump:
+
+| category | seeds |
+| --- | --- |
+| government | `india.gov.in`, `karnataka.gov.in`, `bengaluruurban.nic.in`, `ksrtc.in`, BMRC |
+| sports | `iplt20.com`, `bcci.tv`, `prokabaddi.com`, `espncricinfo.com` |
+| software | `github.com`, `python.org`, `developer.mozilla.org`, `nodejs.org`, `kotlinlang.org` |
+| knowledge | main-namespace `en.wikipedia.org/wiki/<Article>` (Talk/Special/User/File/Category rejected) |
+
+A pass crawls each seed's entry page and follows same-host **level-1 links only**,
+storing up to `SEED_CRAWL_PAGES_PER_DOMAIN` pages per domain with
+`INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates. It runs once
+at startup when the index is empty (the "initial seed crawl pass"), then every
+`SEED_CRAWL_INTERVAL_SECONDS` (6 h default). By hand:
+
+```bash
+python -m app.indexer.crawler --list
+python -m app.indexer.crawler --category sports
+```
+
+**Depth and budget rules.** Root and level-1 pages only
+(`INDEX_MAX_PATH_DEPTH=1`), with main-namespace Wikipedia articles as the
+documented exception — `/wiki/<Article>` *is* their entry-point shape. Each
+document stores the clean canonical title, the normalised URL, the domain, the
+category and a **3–4 sentence factual summary** capped at 1.5 KB
+(`INDEX_SUMMARY_SENTENCES`, `INDEX_CONTENT_MAX_CHARS`), inside a row budget of
+2 KB. Scripts, styles, navigation, cookie notices, footers, ads and inline
+images never reach storage.
 
 **Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
 regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
@@ -592,7 +680,9 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (true),
 `RELEVANCE_MIN_TOKEN_COVERAGE` (0.6), `ON_DEMAND_MAX_CANDIDATES` (8),
 `ON_DEMAND_MAX_FETCHES` (5), `ON_DEMAND_CONCURRENCY` (3),
-`ON_DEMAND_BUDGET_SECONDS` (12), `PUBLIC_BASE_URL` ("")
+`ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
+`SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (21600),
+`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
 `BACKLOG_URLS_PER_QUERY` (5), `BACKLOG_DISCOVERY_ENABLED` (true),
