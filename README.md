@@ -270,31 +270,67 @@ query can only ever read rows written for itself — the lookup is
 the old `url UNIQUE` constraint is dropped and recreated on startup (it is a
 cache, and dropping it also clears rows poisoned by the old matching bug).
 
-**Schema — rebuilt automatically on startup.** Every table is
-`CREATE ... IF NOT EXISTS`, so a cold start against an empty Turso database
-recreates the whole thing with no manual step:
+**Schema — two tiers, rebuilt on startup.** `sites` holds one row per domain,
+`pages` holds a bounded set of rows per site (the root plus its sitelinks), and
+`page_fts` is external-content FTS5 over the pages:
 
 ```sql
-CREATE TABLE IF NOT EXISTS documents (
-    url TEXT PRIMARY KEY, title TEXT, snippet TEXT, content TEXT,
-    domain TEXT, category TEXT, created_at TIMESTAMP, ...   -- + operational columns
+CREATE TABLE IF NOT EXISTS sites (
+    site_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL UNIQUE,
+    canonical_url TEXT NOT NULL,
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    authority_score REAL NOT NULL DEFAULT 1.0,
+    last_crawled_at INTEGER
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-    title, snippet, content, url,
-    content='documents', content_rowid='rowid',
-    tokenize='unicode61 remove_diacritics 2'
+CREATE TABLE IF NOT EXISTS pages (
+    page_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+    url TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK (kind IN ('root', 'sitelink')),
+    title TEXT NOT NULL DEFAULT '', headings TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '', nav_terms TEXT NOT NULL DEFAULT '',
+    site_terms TEXT NOT NULL DEFAULT '', category_terms TEXT NOT NULL DEFAULT '',
+    url_terms TEXT NOT NULL DEFAULT '', http_status INTEGER NOT NULL DEFAULT 200,
+    noindex INTEGER NOT NULL DEFAULT 0, canonical_url TEXT, content_hash TEXT,
+    last_crawled_at INTEGER
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS page_fts USING fts5(
+    title, headings, description, nav_terms, site_terms, category_terms, url_terms,
+    content='pages', content_rowid='page_id',
+    tokenize='unicode61 remove_diacritics 2', detail=full
 );
 ```
 
-`documents_fts` is **external content**: the text is not stored twice, and three
-triggers (`documents_ai`, `documents_ad`, `documents_au`) keep the index in
-perfect sync — application code never writes to the FTS table directly, so a
-half-synced row is impossible. On startup the gateway logs what it found
-(`schema ready on remote: 18 documents, 18 indexed`), and an FTS table from an
-older release (no external content, no triggers) is detected, dropped and
-rebuilt from `documents` in one step. `crawl_backlog` and `crawl_queue` carry the
-crawler's work, the latter tagged with the category it belongs to.
+Three triggers (`pages_ai`, `pages_ad`, `pages_au`) keep the index in step with
+`pages`, so application code never writes to `page_fts`. On startup the legacy
+flat model is dropped (`documents`, `documents_fts`, `search_records`) and the
+gateway logs what it found: `schema ready on remote: 12 sites, 74 pages, 74 indexed`.
+`crawl_backlog` and `crawl_queue` carry the crawler's work.
+
+**Retrieval** — the weighted query from the brief, one card per site:
+
+```sql
+SELECT p.page_id, p.site_id, s.domain, s.name, p.url, p.title, p.description, p.kind,
+       bm25(page_fts, 10.0, 5.0, 2.5, 3.0, 4.0, 1.0, 2.0) AS lexical_score
+FROM page_fts
+JOIN pages p ON p.page_id = page_fts.rowid
+JOIN sites s ON s.site_id = p.site_id
+WHERE page_fts MATCH ? AND p.http_status = 200 AND p.noindex = 0
+ORDER BY lexical_score ASC LIMIT 50;
+```
+
+Matched pages are grouped by site: the root page becomes the card and the site's
+sitelink pages are attached as `sitelinks`. A query that matches a sitelink
+directly ("ztube pricing", "documentation") returns the parent site card with
+that sitelink promoted to the front and marked `"matched": true` — independent
+sitelink search without a separate result row per path.
+
+Measured on a local database: 4–5 ms warm for a grouped query, 19 ms on the
+first call after a write.
 
 **Category-seed crawler** (`app/indexer/crawler.py`) — our own fleet, seeded by
 category, never a third-party snippet dump:
@@ -432,12 +468,11 @@ whole row to the 2 KB budget. Ingestion uses `mode="upsert"`, so a re-verified
 page replaces its row in place rather than duplicating it; the crawler keeps its
 stricter insert-only rule.
 
-### Result cache
+### Result cache — removed
 
-`search_records` is no longer part of the serving path. It is emptied at startup
-(`purge_unverified_cache()`) so old provider dumps cannot resurface, and its
-schema is keyed by `UNIQUE (query_key, url)` with
-`query_key = sha256(" ".join(q.split()).lower())[:40]` for any future use.
+`search_records` no longer exists. The two-tier index answers every query, so a
+second cache keyed by query string had nothing left to do; it is dropped at
+startup along with the flat `documents` tables.
 
 ## Consumer protocols
 
@@ -711,6 +746,7 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `RELEVANCE_MIN_TOKEN_COVERAGE` (0.6), `ON_DEMAND_MAX_CANDIDATES` (8),
 `ON_DEMAND_MAX_FETCHES` (5), `ON_DEMAND_CONCURRENCY` (3),
 `ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
+`INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (21600),
 `SEED_CRAWL_PAGES_PER_DOMAIN` (5), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
