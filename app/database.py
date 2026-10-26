@@ -12,6 +12,7 @@ Local development works with no Turso account: ``TURSO_DB_URL`` defaults to
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
@@ -62,27 +63,27 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS search_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT,
+        query_key TEXT NOT NULL,
+        query TEXT NOT NULL,
         title TEXT,
-        url TEXT UNIQUE,
+        url TEXT NOT NULL,
         snippet TEXT,
         poster_url TEXT,
         source TEXT DEFAULT 'live_crawl',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (query_key, url)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_query ON search_records(query)",
-    "CREATE INDEX IF NOT EXISTS idx_query_created ON search_records(query, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_query_key_created ON search_records(query_key, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_created_at ON search_records(created_at)",
 )
 # ENGINE_SCHEMA (documents, documents_fts, crawl_backlog, crawl_queue) is applied
 # in the same batch, so a cold start always has a usable index.
 
 _UPSERT_SQL = """
-INSERT INTO search_records (query, title, url, snippet, poster_url, source, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(url) DO UPDATE SET
-    query = excluded.query,
+INSERT INTO search_records (query_key, query, title, url, snippet, poster_url, source, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(query_key, url) DO UPDATE SET
     title = excluded.title,
     snippet = excluded.snippet,
     poster_url = excluded.poster_url,
@@ -91,17 +92,33 @@ ON CONFLICT(url) DO UPDATE SET
 """
 
 _SELECT_CACHED_SQL = """
-SELECT id, query, title, url, snippet, poster_url, source, created_at
+SELECT id, query_key, query, title, url, snippet, poster_url, source, created_at
 FROM search_records
-WHERE query = ? AND created_at >= ?
+WHERE query_key = ? AND created_at >= ?
 ORDER BY id ASC
 LIMIT ?
 """
 
-_COUNT_SQL = "SELECT COUNT(*) AS n FROM search_records WHERE query = ? AND created_at >= ?"
+_COUNT_SQL = "SELECT COUNT(*) AS n FROM search_records WHERE query_key = ? AND created_at >= ?"
 _PURGE_SQL = "DELETE FROM search_records WHERE created_at < ?"
 
 _client: libsql_client.Client | None = None
+
+
+def normalise_query(query: str) -> str:
+    """The one normal form used for cache keys: lower-cased, whitespace-collapsed."""
+    return " ".join((query or "").split()).lower()
+
+
+def query_cache_key(query: str) -> str:
+    """Stable cache key for a query: a hash of its normal form.
+
+    Hashing (rather than storing the raw string) means two queries can never be
+    confused by case, spacing or trailing punctuation, and the key is a fixed
+    width regardless of what the user typed.
+    """
+    digest = hashlib.sha256(normalise_query(query).encode("utf-8")).hexdigest()
+    return digest[:40]
 
 
 def _timestamp(value: datetime | None = None) -> str:
@@ -269,10 +286,36 @@ async def _execute(
         raise DatabaseError(f"database query failed: {exc}") from exc
 
 
+async def _migrate_cache_table() -> None:
+    """Rebuild ``search_records`` if it predates the per-query cache key.
+
+    The old table had ``url UNIQUE``, which let one query steal another query's
+    rows. It is a cache, so the rebuild drops the rows rather than migrating
+    them — which also clears any results poisoned by the old relevance bug.
+    """
+    client = get_client()
+    try:
+        info = await client.execute("PRAGMA table_info(search_records)")
+        columns = {str(row[1]) for row in (getattr(info, "rows", ()) or ())}
+    except Exception as exc:
+        logger.debug("cache schema probe skipped: %s", exc)
+        return
+
+    if not columns or "query_key" in columns:
+        return
+
+    logger.warning("rebuilding search_records: the old schema had no per-query cache key")
+    try:
+        await client.execute("DROP TABLE IF EXISTS search_records")
+    except Exception as exc:
+        raise DatabaseError(f"cache table migration failed: {exc}") from exc
+
+
 async def initialize_schema() -> None:
     """Apply the schema. Idempotent, so it is safe on every cold start."""
     client = get_client()
     cfg = get_settings()
+    await _migrate_cache_table()
     try:
         async with asyncio.timeout(cfg.db_timeout_s * 3):
             await client.batch(list(SCHEMA_STATEMENTS) + list(ENGINE_SCHEMA))
@@ -299,17 +342,21 @@ async def fetch_cached(
     *,
     ttl_hours: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return cached records for ``query`` newer than the TTL, newest first."""
+    """Return cached records for exactly this query, newer than the TTL.
+
+    The lookup is by ``query_cache_key(query)`` — never by a shared or partial
+    key — so a query can only ever see rows written for itself.
+    """
     cfg = get_settings()
     ttl = cfg.cache_ttl_hours if ttl_hours is None else ttl_hours
-    result = await _execute(_SELECT_CACHED_SQL, [query, _cutoff(ttl), int(limit)])
+    result = await _execute(_SELECT_CACHED_SQL, [query_cache_key(query), _cutoff(ttl), int(limit)])
     return _rows_to_dicts(result)
 
 
 async def count_cached(query: str, *, ttl_hours: int | None = None) -> int:
     cfg = get_settings()
     ttl = cfg.cache_ttl_hours if ttl_hours is None else ttl_hours
-    result = await _execute(_COUNT_SQL, [query, _cutoff(ttl)])
+    result = await _execute(_COUNT_SQL, [query_cache_key(query), _cutoff(ttl)])
     rows = _rows_to_dicts(result)
     if not rows:
         return 0
@@ -322,11 +369,13 @@ async def count_cached(query: str, *, ttl_hours: int | None = None) -> int:
 async def upsert_records(query: str, records: Sequence[dict[str, Any]]) -> int:
     """Persist retrieval results in a single batched round trip.
 
-    ``url`` is UNIQUE, so a URL seen under a new query updates in place and
-    moves to the most recent query — one row per URL, no duplicates.
+    Rows are keyed by ``(query_cache_key(query), url)``: the same URL can be
+    cached under several queries without one query taking it away from another,
+    and a query can never be served rows that belong to a different one.
     """
     if not records:
         return 0
+    key = query_cache_key(query)
     now = _timestamp()
     statements: list[tuple[str, list[Any]]] = []
     for record in records:
@@ -337,7 +386,8 @@ async def upsert_records(query: str, records: Sequence[dict[str, Any]]) -> int:
             (
                 _UPSERT_SQL,
                 [
-                    query,
+                    key,
+                    normalise_query(query)[:200],
                     (record.get("title") or url)[:500],
                     url[:2000],
                     (record.get("snippet") or "")[:2000],
