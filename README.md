@@ -135,6 +135,16 @@ reads and no writes. That failure mode is now impossible to miss:
 Required environment on Render: `TURSO_DB_URL` (or `TURSO_DATABASE_URL`) =
 `libsql://<db>-<org>.turso.io`, and `TURSO_AUTH_TOKEN` = the database token.
 
+**Scheme handling.** Turso's cloud speaks Hrana over HTTPS, but `libsql_client`
+picks its backend from the URL scheme — `libsql://`, `wss://` and `ws://` all
+select the WebSocket client, which Turso rejects with `400, message='Invalid
+response status'`. Remote URLs are therefore rewritten on the way in
+(`libsql://` → `https://`, `wss://` → `https://`, `ws://` → `http://`), which
+selects `HttpClient`, and the token is passed as `Authorization: Bearer …`. The
+startup log names the client backend (`Connected to Remote Turso DB: … (HttpClient)`)
+and logs the rewrite, so a WebSocket connection can never go unnoticed again.
+`file:` URLs are left untouched.
+
 ## Consumer protocols
 
 One index, four ways in — each shaped for a different consumer:
