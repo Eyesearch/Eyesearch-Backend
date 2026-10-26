@@ -249,6 +249,11 @@ class IndexStore:
         try:
             await client.batch(site_statements)
         except Exception as exc:
+            logger.error(
+                "site write failed for %s: %s: %s (statement: %s)",
+                ", ".join(hosts)[:200], type(exc).__name__, exc,
+                _SITE_UPSERT.strip().splitlines()[0][:80],
+            )
             raise DatabaseError(f"site write failed: {exc}") from exc
 
         site_ids: dict[str, int] = {}
@@ -391,7 +396,27 @@ class IndexStore:
             try:
                 await client.batch(statements)
             except Exception as exc:
+                logger.error(
+                    "page write failed for %s: %s: %s (statement: %s)",
+                    ", ".join(sorted(site_payload))[:200], type(exc).__name__, exc,
+                    _PAGE_UPSERT.strip().splitlines()[0][:80],
+                )
                 raise DatabaseError(f"index write failed: {exc}") from exc
+
+        if outcome["pages"]:
+            logger.info(
+                "indexed %d pages across %d sites (%d sitelinks, %d rejected: %d not indexable, "
+                "%d over budget, %d duplicate)",
+                outcome["pages"], len(site_ids), outcome["sitelinks"], outcome["not_indexable"]
+                + outcome["over_budget"] + outcome["duplicate"] + outcome["domain_cap"],
+                outcome["not_indexable"], outcome["over_budget"], outcome["duplicate"],
+            )
+        elif prepared:
+            logger.warning(
+                "nothing stored from %d documents: not_indexable=%d over_budget=%d duplicate=%d domain_cap=%d",
+                len(prepared), outcome["not_indexable"], outcome["over_budget"],
+                outcome["duplicate"], outcome["domain_cap"],
+            )
         return outcome
 
     # -- reading --------------------------------------------------------
