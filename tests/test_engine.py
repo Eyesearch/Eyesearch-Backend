@@ -114,7 +114,7 @@ async def temp_db(tmp_path):
 async def _seed_index() -> None:
     from app.engine.store import get_store
 
-    await get_store().upsert_documents(
+    await get_store().ingest_documents(
         [
             {
                 "url": "https://english.bmrc.co.in/metro-timings",
@@ -161,8 +161,7 @@ async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
     await _seed_index()
     called = {"live": 0}
 
-    # Threshold is configuration, not a constant: two matching documents are
-    # enough to answer locally here.
+    # Threshold is configuration, not a constant.
     monkeypatch.setattr(
         search_service,
         "get_engine_settings",
@@ -183,39 +182,45 @@ async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
     assert called["live"] == 0
 
 
-async def test_search_service_falls_back_and_queues_backlog(temp_db, monkeypatch) -> None:
-    async def _live(query, limit, **kwargs):
-        return RetrievalOutcome(
-            results=[RawResult(title="External result", url="https://example.in/x", snippet="s", source="duckduckgo")],
-            providers={"duckduckgo": 1},
-        )
+async def test_search_service_queues_instead_of_calling_providers(temp_db, monkeypatch) -> None:
+    called = {"live": 0}
+
+    async def _live(*args, **kwargs):
+        called["live"] += 1
+        return RetrievalOutcome(results=[])
 
     monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    monkeypatch.setattr(
+        search_service, "get_engine_settings", lambda: EngineSettings(live_search_enabled=False)
+    )
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("something we have never crawled", limit=5)
 
-    assert response.source == "live"
-    assert response.index_hits == 0
-    assert response.results[0].source == "duckduckgo"
+    # No external HTTP on the request path, ever.
+    assert called["live"] == 0
+    assert response.source == "queued"
+    assert response.results == []
 
     await search_service.drain_background_writes()
     from app.engine.store import get_store
 
-    pending = await get_store().pending_backlog(10)
-    assert "something we have never crawled" in pending
+    assert "something we have never crawled" in await get_store().pending_backlog(10)
 
 
-async def test_sparse_index_queues_backlog_even_when_providers_return_nothing(temp_db, monkeypatch) -> None:
-    """The crawl backlog is about our index, not about the providers' luck."""
+async def test_sparse_index_queues_the_query(temp_db, monkeypatch) -> None:
+    """The crawl backlog is about our index: any local miss queues the query."""
 
-    async def _live_empty(query, limit, **kwargs):
-        return RetrievalOutcome(results=[], failed=[{"provider": "duckduckgo", "error": "timeout"}])
+    async def _no_live(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("the request path must not call external providers")
 
-    monkeypatch.setattr(live_retrieval, "retrieve", _live_empty)
+    monkeypatch.setattr(live_retrieval, "retrieve", _no_live)
+    monkeypatch.setattr(
+        search_service, "get_engine_settings", lambda: EngineSettings(live_search_enabled=False)
+    )
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("unindexed niche topic", limit=5)
 
-    assert response.source == "live"
+    assert response.source == "queued"
     assert response.results == []
 
     await search_service.drain_background_writes()
