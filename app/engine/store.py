@@ -8,10 +8,12 @@ reads. All access goes through the gateway's single shared libsql client.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
+from urllib.parse import urlparse
 
 from app.database import get_client
 from app.engine.config import EngineSettings, get_engine_settings
@@ -27,23 +29,24 @@ _SAFE_TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F\u0C80-\u0CFF]+")
 
 _INSERT_DOCUMENT = """
 INSERT INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
-    content, language, favicon_url, payload_bytes, content_hash,
+    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
+    title, snippet, content, language, favicon_url, payload_bytes, content_hash,
     last_checked_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPSERT_DOCUMENT = """
 INSERT INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
-    content, language, favicon_url, payload_bytes, content_hash, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
+    title, snippet, content, language, favicon_url, payload_bytes, content_hash, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
     canonical_url = excluded.canonical_url,
     domain = excluded.domain,
     root_domain = excluded.root_domain,
     domain_class = excluded.domain_class,
     category = excluded.category,
+    sections_json = excluded.sections_json,
     title = excluded.title,
     snippet = excluded.snippet,
     content = excluded.content,
@@ -56,9 +59,10 @@ ON CONFLICT(url) DO UPDATE SET
 
 _REPLACE_DOCUMENT = """
 INSERT OR REPLACE INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, title, snippet,
-    content, language, favicon_url, payload_bytes, content_hash, updated_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
+    title, snippet, content, language, favicon_url, payload_bytes, content_hash,
+    updated_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _UPDATE_DOCUMENT = """
@@ -77,7 +81,7 @@ _BM25_WEIGHTS = "10.0, 1.5, 0.5, 8.0"
 # The FTS table is external-content, so row data comes from `documents` via rowid.
 _SEARCH_FTS = f"""
 SELECT d.url, d.title, d.snippet, d.language, d.updated_at, d.favicon_url AS favicon,
-       d.category, bm25(documents_fts, {_BM25_WEIGHTS}) AS rank
+       d.category, d.sections_json, bm25(documents_fts, {_BM25_WEIGHTS}) AS rank
 FROM documents_fts
 JOIN documents d ON d.rowid = documents_fts.rowid
 WHERE documents_fts MATCH ?
@@ -100,6 +104,29 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _parse_sections(raw: Any) -> list[dict[str, str]]:
+    """Decode the stored sitelinks, tolerating anything malformed."""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    sections: list[dict[str, str]] = []
+    for item in parsed:
+        if isinstance(item, dict) and item.get("title") and item.get("url"):
+            sections.append(
+                {
+                    "title": str(item.get("title"))[:80],
+                    "url": str(item.get("url"))[:300],
+                    "snippet": str(item.get("snippet") or "")[:120],
+                }
+            )
+    return sections
+
+
 def _content_hash(title: str, snippet: str) -> str:
     digest = hashlib.sha256(f"{title}\n{snippet}".encode("utf-8")).hexdigest()
     return digest[:32]
@@ -116,11 +143,18 @@ def passes_relevance(query: str, document: RankedDocument, settings: EngineSetti
     Delegates to the universal gate in `app.engine.relevance`: the query's words
     must appear in the title, URL or snippet — not only somewhere in the body.
     """
+    # A document's sitelinks are part of what it describes: "github pricing"
+    # should match the Pricing section of github.com, not be rejected as a
+    # body-only match.
+    section_text = " ".join(
+        f"{section.get('title', '')} {section.get('url', '')}"
+        for section in (document.sections or [])
+    )
     return is_relevant(
         query,
         title=document.title or "",
         url=document.url or "",
-        snippet=document.snippet or "",
+        snippet=f"{document.snippet or ''} {section_text}".strip(),
         min_coverage=settings.relevance_min_token_coverage,
     )
 
@@ -138,6 +172,37 @@ def build_match_query(query: str) -> str:
     quoted = [f'"{token}"' for token in tokens[:-1]]
     quoted.append(f'"{tokens[-1]}"*')
     return " ".join(quoted)
+
+
+def domain_root_url(url: str) -> str:
+    """`https://example.com/any/path` → `https://example.com/`."""
+    parsed = urlparse(normalise_url(url))
+    return f"https://{parsed.netloc}/" if parsed.netloc else ""
+
+
+def merge_sections(
+    existing: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+    limit: int = 5,
+) -> list[dict[str, str]]:
+    """Union of two sitelink lists, de-duplicated by URL, capped."""
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in list(existing) + list(incoming):
+        url = str(item.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        merged.append(
+            {
+                "title": str(item.get("title") or "")[:80],
+                "url": url[:300],
+                "snippet": str(item.get("snippet") or "")[:120],
+            }
+        )
+        if len(merged) >= limit:
+            break
+    return merged
 
 
 class IndexStore:
@@ -180,7 +245,7 @@ class IndexStore:
         pipeline uses, so a verified page is refreshed rather than duplicated.
         """
         outcome = {"inserted": 0, "replaced": 0, "duplicate": 0, "domain_cap": 0,
-                   "not_indexable": 0, "over_budget": 0}
+                   "not_indexable": 0, "over_budget": 0, "collapsed": 0}
         upsert = mode == "upsert"
         if not documents:
             return outcome
@@ -198,6 +263,8 @@ class IndexStore:
 
         statements: list[tuple[str, list[Any]]] = []
         seen_urls: set[str] = set()
+        # Root rows seen in this batch, so sub-paths can be folded into them.
+        batch_roots: dict[str, list[dict[str, str]]] = {}
 
         for doc in documents:
             url = normalise_url(str(doc.get("url") or ""))
@@ -221,6 +288,24 @@ class IndexStore:
                 outcome["domain_cap"] += 1
                 continue
 
+            # --- domain compaction: one row per domain root ---------------
+            root = domain_root_url(url)
+            sections = _parse_sections(doc.get("sections_json"))
+            if root and url != root:
+                if root in batch_roots:
+                    batch_roots[root] = merge_sections(
+                        batch_roots[root], sections, self.settings.sections_max
+                    )
+                    outcome["collapsed"] += 1
+                    continue
+                merged_into_root = await self._fold_into_existing_root(client, root, sections)
+                if merged_into_root:
+                    outcome["collapsed"] += 1
+                    continue
+            elif root:
+                batch_roots[root] = merge_sections([], sections, self.settings.sections_max)
+                sections = batch_roots[root]
+
             already_present = False
             try:
                 probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [url])
@@ -242,6 +327,7 @@ class IndexStore:
                 domain,
                 doc.get("domain_class") or domain_class(url),
                 doc.get("category") or "web",
+                json.dumps(sections, ensure_ascii=False, separators=(",", ":")) if sections else None,
                 title,
                 doc.get("snippet") or "",
                 content,
@@ -321,9 +407,64 @@ class IndexStore:
             raise DatabaseError(f"index update failed: {exc}") from exc
         return True
 
+    async def _fold_into_existing_root(
+        self,
+        client: Any,
+        root_url: str,
+        sections: list[dict[str, str]],
+    ) -> bool:
+        """Merge a sub-page's sitelinks into its domain root, if that root exists.
+
+        Returns True when the sub-page was absorbed (and must not be stored as a
+        row of its own).
+        """
+        try:
+            probe = await client.execute(
+                "SELECT sections_json, payload_bytes FROM documents WHERE url = ? LIMIT 1", [root_url]
+            )
+            rows = getattr(probe, "rows", ()) or ()
+        except Exception as exc:
+            logger.debug("root probe failed for %s: %s", root_url, exc)
+            return False
+
+        if not rows:
+            return False
+
+        current = _parse_sections(rows[0][0])
+        merged = merge_sections(current, sections, self.settings.sections_max)
+        if merged == current:
+            return True  # nothing new to add; still do not store a second row
+
+        try:
+            await client.execute(
+                """
+                UPDATE documents
+                SET sections_json = ?,
+                    payload_bytes = (
+                        SELECT LENGTH(CAST(COALESCE(url,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(canonical_url,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(domain,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(root_domain,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(domain_class,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(category,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(title,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(snippet,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(content,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(language,'') AS BLOB))
+                             + LENGTH(CAST(COALESCE(favicon_url,'') AS BLOB))
+                             + LENGTH(CAST(? AS BLOB))
+                    )
+                WHERE url = ?
+                """,
+                [json.dumps(merged, ensure_ascii=False, separators=(",", ":")), root_url],
+            )
+        except Exception as exc:
+            logger.warning("sections merge failed for %s: %s", root_url, exc)
+        return True
+
     async def replace_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
         """`INSERT OR REPLACE` into `documents`; the triggers keep FTS in sync."""
-        outcome = {"stored": 0, "not_indexable": 0, "over_budget": 0}
+        outcome = {"stored": 0, "not_indexable": 0, "over_budget": 0, "collapsed": 0}
         if not documents:
             return outcome
 
@@ -352,6 +493,7 @@ class IndexStore:
                         root_domain(url),
                         doc.get("domain_class") or domain_class(url),
                         doc.get("category") or "web",
+                        doc.get("sections_json") or None,
                         title,
                         doc.get("snippet") or "",
                         doc.get("content") or "",
@@ -459,6 +601,7 @@ class IndexStore:
                     updated_at=str(record.get("updated_at") or "") or None,
                     bm25=float(record.get("rank") or 0.0),
                     favicon_url=str(record.get("favicon") or "") or None,
+                    sections=_parse_sections(record.get("sections_json")),
                 )
             )
 
