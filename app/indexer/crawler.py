@@ -199,18 +199,42 @@ async def run_seed_pass(
                     logger.warning("seed %s failed: %s", seed.url, exc)
                     return seed, SeedReport(category=seed.category), []
 
-        for seed, seed_report, documents in await asyncio.gather(*(run(seed) for seed in targets)):
+        tasks = [asyncio.create_task(run(seed)) for seed in targets]
+
+        # Persist each domain the moment it finishes. A long pass that waited for
+        # every seed before writing lost all of its work when the instance
+        # restarted mid-flight.
+        for finished in asyncio.as_completed(tasks):
+            seed, seed_report, documents = await finished
             if documents:
-                written = await index.replace_documents([document.as_row() for document in documents])
-                seed_report.stored = int(written.get("pages", 0))
-                report["documents"] = int(report["documents"]) + len(documents)
-                report["stored"] = int(report["stored"]) + seed_report.stored
-                report["sitelinks"] = int(report.get("sitelinks", 0)) + int(written.get("sitelinks", 0))
-                report["sites"] = int(report.get("sites", 0)) + int(written.get("sites", 0))
+                try:
+                    written = await index.replace_documents(
+                        [document.as_row() for document in documents]
+                    )
+                    seed_report.stored = int(written.get("pages", 0))
+                    report["documents"] = int(report["documents"]) + len(documents)
+                    report["stored"] = int(report["stored"]) + seed_report.stored
+                    report["sitelinks"] = int(report.get("sitelinks", 0)) + int(written.get("sitelinks", 0))
+                    report["sites"] = int(report.get("sites", 0)) + int(written.get("sites", 0))
+                    total = await index.count_documents()
+                    logger.info(
+                        "Successfully indexed site: %s (pages: %d, total sites: %d)",
+                        _seed_domain(seed), seed_report.stored, total,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "index write failed for %s: %s: %s",
+                        _seed_domain(seed), type(exc).__name__, exc,
+                    )
+            else:
+                logger.info(
+                    "seed %s produced no indexable pages (fetched %d, skipped %d)",
+                    _seed_domain(seed), seed_report.fetched, len(seed_report.skipped),
+                )
 
             report["fetched"] = int(report["fetched"]) + seed_report.fetched
             report["categories"][seed.label] = seed_report.as_dict()
-            logger.info("seed %s (%s): %s", seed.url, seed.category, seed_report.as_dict())
+            logger.debug("seed %s (%s): %s", seed.url, seed.category, seed_report.as_dict())
 
     logger.info(
         "seed pass complete: %d documents, %d stored, %d fetched",
