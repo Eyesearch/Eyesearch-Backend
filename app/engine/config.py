@@ -61,10 +61,16 @@ class EngineSettings:
     relevance_require_strong_field: bool = field(
         default_factory=lambda: _bool("RELEVANCE_REQUIRE_STRONG_FIELD", True)
     )
-    # Multi-word queries: fraction of the words that must appear in those fields.
+    # Fraction of a query's words that must appear in title/URL/snippet.
     relevance_min_token_coverage: float = field(
-        default_factory=lambda: _float("RELEVANCE_MIN_TOKEN_COVERAGE", 0.5)
+        default_factory=lambda: _float("RELEVANCE_MIN_TOKEN_COVERAGE", 0.6)
     )
+
+    # --- on-demand extraction pipeline ------------------------------------
+    on_demand_max_candidates: int = field(default_factory=lambda: _int("ON_DEMAND_MAX_CANDIDATES", 8))
+    on_demand_max_fetches: int = field(default_factory=lambda: _int("ON_DEMAND_MAX_FETCHES", 5))
+    on_demand_concurrency: int = field(default_factory=lambda: _int("ON_DEMAND_CONCURRENCY", 3))
+    on_demand_budget_seconds: float = field(default_factory=lambda: _float("ON_DEMAND_BUDGET_SECONDS", 12.0))
 
     # --- dedupe and domain policy ----------------------------------------
     max_urls_per_domain: int = field(default_factory=lambda: _int("INDEX_MAX_URLS_PER_DOMAIN", 12))
