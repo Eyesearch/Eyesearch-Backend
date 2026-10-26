@@ -353,6 +353,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**The crawl is an audit, not a download.** Each seed root is fetched with a
+browser-shaped agent
+(`Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0`), redirects
+followed and a 15 s timeout (`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). TLS
+follows `CRAWL_VERIFY_TLS`: `auto` (default) verifies and, when a host presents a
+broken chain — common on NIC portals — retries that one request unverified with a
+warning; `never` skips verification outright; `always` refuses the fallback.
+Title, description, H1/H2 headings and up to five authoritative child links are
+extracted, and the domain is committed straight to `sites`/`pages` — no
+intermediate holding pen.
+
 **Every stage is logged, so "no writes" is diagnosable from the log alone.**
 Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
 which build is live. Each seed logs `SEED START: processing domain …` and
@@ -774,6 +785,17 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**The crawl is an audit, not a download.** Each seed root is fetched with a
+browser-shaped agent
+(`Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0`), redirects
+followed and a 15 s timeout (`CRAWL_USER_AGENT`, `CRAWL_TIMEOUT_SECONDS`). TLS
+follows `CRAWL_VERIFY_TLS`: `auto` (default) verifies and, when a host presents a
+broken chain — common on NIC portals — retries that one request unverified with a
+warning; `never` skips verification outright; `always` refuses the fallback.
+Title, description, H1/H2 headings and up to five authoritative child links are
+extracted, and the domain is committed straight to `sites`/`pages` — no
+intermediate holding pen.
+
 **Every stage is logged, so "no writes" is diagnosable from the log alone.**
 Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
 which build is live. Each seed logs `SEED START: processing domain …` and
@@ -1006,7 +1028,7 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (86400),
 `SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
 `DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000),
-`CRAWL_TIMEOUT_SECONDS` (5), `INDEX_SECTIONS_MAX` (5),
+`CRAWL_TIMEOUT_SECONDS` (15), `CRAWL_VERIFY_TLS` (auto), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
