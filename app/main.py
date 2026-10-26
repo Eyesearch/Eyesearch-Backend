@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from app import database
 from app.config import Settings, get_settings
 from app.errors import AppError, DatabaseError, error_envelope
+from app.indexer import crawler as seed_crawler
 from app.indexer import scheduler as revalidate_scheduler
 from app.routes import health, opensearch, retrieve, search
 from app.services import live_retrieval, search_service
@@ -121,16 +122,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     revalidate_scheduler.start()
     revalidate_scheduler.start_backlog_worker()
 
-    # Populate an empty index on first boot, then keep the categories warm.
-    initial_pass = False
+    # Autonomous ingestion: the crawler decides for itself whether the index is
+    # covered, and runs in the background. Startup never waits for it, so the
+    # port is bound and /health answers immediately.
     if app.state.db_ready:
         try:
-            from app.engine.store import get_store
-
-            initial_pass = (await get_store().count_documents()) == 0
+            state = await seed_crawler.coverage()
+            app.state.seed_coverage = state
+            if state.get("sufficient"):
+                logger.info(
+                    "seed coverage sufficient: %s sites (threshold %s) — background crawl idle",
+                    state.get("sites"), state.get("threshold"),
+                )
+            else:
+                logger.info(
+                    "seed coverage low: %s sites, %s/%s seed domains — launching background crawl",
+                    state.get("sites"), state.get("covered"), state.get("seed_domains"),
+                )
         except Exception as exc:
-            logger.warning("could not check index size before the seed pass: %s", exc)
-    revalidate_scheduler.start_seed_crawler(initial_pass=initial_pass)
+            logger.warning("seed coverage check failed: %s", exc)
+    revalidate_scheduler.start_seed_crawler(initial_pass=app.state.db_ready)
 
     try:
         yield

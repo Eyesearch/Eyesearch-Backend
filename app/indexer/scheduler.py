@@ -15,7 +15,7 @@ import random
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.indexer.backlog_worker import run_backlog_once
-from app.indexer.crawler import run_seed_pass
+from app.indexer.crawler import run_autonomous_seed_crawl
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
@@ -84,10 +84,12 @@ async def _seed_loop(settings: EngineSettings) -> None:
     """Keep the foundational categories warm, one pass at a time."""
     while True:
         try:
-            await run_seed_pass()
+            # The same entry point as boot: it checks coverage, crawls when the
+            # index has drifted, and never raises out of the loop.
+            await run_autonomous_seed_crawl()
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover - defensive
             logger.warning("seed pass failed: %s", exc)
         await asyncio.sleep(max(600, settings.seed_crawl_interval_seconds) + random.uniform(0, 120))
 
@@ -102,10 +104,10 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
     async def runner() -> None:
         if initial_pass:
             try:
-                logger.info("initial seed crawl pass starting")
-                await run_seed_pass()
-            except Exception as exc:
-                logger.warning("initial seed pass failed: %s", exc)
+                logger.info("initial autonomous seed crawl starting")
+                await run_autonomous_seed_crawl()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("initial autonomous crawl failed: %s", exc)
         await _seed_loop(cfg)
 
     _seed_task = asyncio.create_task(runner(), name="eyesearch-seed-crawler")
