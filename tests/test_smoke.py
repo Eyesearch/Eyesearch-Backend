@@ -99,9 +99,14 @@ async def test_retrieve_markdown_and_json(client, live_stub) -> None:
     assert payload["results"][0]["title"]
     assert "poster_url" not in payload["results"][0]  # AI payload has no presentation fields
 
-    get_md = await client.get("/v1/retrieve", params={"q": "get form"})
+    get_md = await client.get("/v1/retrieve", params={"q": "get form", "format": "markdown"})
     assert get_md.status_code == 200
     assert get_md.headers["content-type"].startswith("text/markdown")
+
+    # The default GET shape is the RAG contract.
+    get_json = await client.get("/v1/retrieve", params={"q": "get form", "max_results": 2})
+    assert get_json.status_code == 200
+    assert "context" in get_json.json()
 
 
 async def test_degraded_response(client, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,7 +133,7 @@ async def test_degraded_response(client, monkeypatch: pytest.MonkeyPatch) -> Non
     assert body["degraded"] is True
     assert len(body["results"]) == 1
 
-    md = await client.get("/v1/retrieve", params={"q": "degraded path gamma"})
+    md = await client.get("/v1/retrieve", params={"q": "degraded path gamma", "format": "markdown"})
     assert "> Partial result: 2 providers unavailable." in md.text
 
 

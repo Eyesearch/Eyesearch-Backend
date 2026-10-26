@@ -6,6 +6,7 @@ import pytest
 
 from app import database
 from app.config import Settings
+from app.engine.config import EngineSettings
 from app.engine.store import get_store
 from app.engine.text import extract_document
 from app.engine.urls import is_indexable, normalise_url, root_domain
@@ -107,7 +108,7 @@ async def test_duplicate_normalised_urls_are_rejected(temp_db) -> None:
 
 
 async def test_domain_cap_is_enforced(temp_db) -> None:
-    from app.engine.config import EngineSettings, get_engine_settings
+    from app.engine.config import get_engine_settings
 
     cap = get_engine_settings().max_urls_per_domain
     rows = []
@@ -163,7 +164,7 @@ async def test_revalidation_updates_in_place(temp_db, monkeypatch) -> None:
         return CHANGED_HTML, 200
 
     monkeypatch.setattr(revalidate_module, "fetch_page", _changed)
-    report = await revalidate_batch(limit=5)
+    report = await revalidate_batch(limit=5, settings=EngineSettings(revalidate_enabled=True))
 
     assert report["updated"] == 1
     assert await get_store().count_documents() == 1  # no duplicate row
@@ -184,7 +185,7 @@ async def test_revalidation_unchanged_writes_nothing(temp_db, monkeypatch) -> No
         return None  # 304
 
     monkeypatch.setattr(revalidate_module, "fetch_page", _not_modified)
-    report = await revalidate_batch(limit=5)
+    report = await revalidate_batch(limit=5, settings=EngineSettings(revalidate_enabled=True))
 
     assert report["unchanged"] == 1
     assert report["updated"] == 0

@@ -18,6 +18,11 @@ os.environ.setdefault("CHAIN_BUDGET_S", "3.0")
 # default — no external fetch on the request path — is covered by test_engine.py
 # and test_budget.py.
 os.environ.setdefault("LIVE_SEARCH_ENABLED", "true")
+# Background workers and discovery stay off in tests: the suite calls the worker
+# functions directly, and a scheduled pass would reach the network.
+os.environ.setdefault("REVALIDATE_ENABLED", "false")
+os.environ.setdefault("BACKLOG_WORKER_ENABLED", "false")
+os.environ.setdefault("BACKLOG_DISCOVERY_ENABLED", "false")
 
 from app.main import app  # noqa: E402  (env must be set before settings load)
 
