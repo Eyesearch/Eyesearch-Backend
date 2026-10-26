@@ -61,10 +61,20 @@ def extract_sections(
     seen_urls: set[str] = set()
     seen_titles: set[str] = set()
 
-    for anchor in soup.find_all("a", href=True):
+    # Structural first: anchors inside <nav>/<header> are the page's own
+    # navigation. Only if the page marks none do we look at the whole document.
+    containers = soup.find_all(["nav", "header"])
+    anchors = [a for container in containers for a in container.find_all("a", href=True)]
+    if not anchors:
+        anchors = soup.find_all("a", href=True)
+
+    for anchor in anchors:
         text = normalise_whitespace(anchor.get_text(" ", strip=True)).lower()
         href = str(anchor.get("href") or "").strip()
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        # A link with no label, or an absurdly long one, is not navigation.
+        if not (3 <= len(text) <= 40):
             continue
 
         target = normalise_url(urljoin(base_url, href))
@@ -312,6 +322,23 @@ SKIP_NO_TITLE = "no_title"
 SKIP_LOW_TEXT = "low_text_density"
 SKIP_BLOCKED_STATUS = "blocked_status"
 SKIP_EMPTY = "empty_after_clean"
+SKIP_JUNK = "junk_page"
+SKIP_THIN = "low_text_density"
+SKIP_NO_DESCRIPTION = "no_description"
+
+# Titles and descriptions that mean "you were blocked", not "this is a page".
+JUNK_MARKERS = (
+    "403 forbidden", "access denied", "access forbidden", "not acceptable",
+    "just a moment", "attention required", "request blocked", "are you a robot",
+    "captcha", "enable javascript and cookies", "page not found", "404 not found",
+    "service unavailable", "site is temporarily unavailable", "under construction",
+)
+
+# The strict gate: a page earns a row only with a real title, a real
+# description and real server-rendered text.
+MIN_BODY_CHARS = 80
+MIN_TITLE_CHARS = 3
+MIN_DESCRIPTION_CHARS = 20
 
 
 def extract_document_with_reason(
@@ -358,15 +385,21 @@ def extract_document_with_reason(
     sections = extract_sections(html, url, limit=settings.sections_max)
     nav_terms = nav_terms_of(soup, sections)
 
-    # A page is worth indexing when it has an identity and something to match on.
-    if not title:
-        if not description:
-            return None, SKIP_NO_TITLE
-        title = truncate(description, settings.title_max_chars)
-    if not any((body, description, headings, nav_terms)) or (
-        len(body) < 40 and not (description or headings or nav_terms)
-    ):
-        return None, SKIP_LOW_TEXT
+    # --- strict quality gate (pre-debug specification) -------------------
+    # A page needs a semantic <title>, a meaningful meta description and real
+    # server-rendered text. A JavaScript shell, a WAF block page or a bare
+    # hostname is not a document.
+    if not title or len(title) < MIN_TITLE_CHARS:
+        return None, SKIP_NO_TITLE
+    if not description or len(description) < MIN_DESCRIPTION_CHARS:
+        return None, SKIP_NO_DESCRIPTION
+    if len(body) < MIN_BODY_CHARS:
+        return None, SKIP_THIN
+
+    # A WAF block page is not a document, however long its body is.
+    haystack = f"{title} {description}".lower()
+    if any(marker in haystack for marker in JUNK_MARKERS):
+        return None, SKIP_JUNK
 
     icon = ""
     icon_link = soup.find("link", attrs={"rel": re.compile("icon", re.I)})
@@ -516,6 +549,10 @@ __all__ = [
     "SKIP_LOW_TEXT",
     "SKIP_BLOCKED_STATUS",
     "SKIP_EMPTY",
+    "SKIP_JUNK",
+    "SKIP_THIN",
+    "SKIP_NO_DESCRIPTION",
+    "JUNK_MARKERS",
     "summarise",
     "url_terms",
     "headings_of",

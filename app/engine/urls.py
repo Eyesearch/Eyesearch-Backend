@@ -124,6 +124,24 @@ def is_wiki_article(url: str) -> bool:
     return not article.startswith(WIKI_NON_ARTICLE_PREFIXES)
 
 
+# Indian public-sector suffixes: these domains are allowed a fallback root card
+# when a server refuses us, because the institution exists regardless.
+AUTHORITATIVE_INDIAN_SUFFIXES = (
+    ".gov.in", ".nic.in", ".ac.in", ".res.in", ".edu.in", ".gov", ".nic",
+)
+
+
+def is_authoritative_indian(url_or_host: str) -> bool:
+    """True for an Indian government or academic host."""
+    host = url_or_host
+    if "//" in host or host.startswith(("http:", "https:")):
+        host = urlparse(normalise_url(host)).netloc
+    host = host.lower().split(":")[0].removeprefix("www.")
+    if not host:
+        return False
+    return any(host == suffix.lstrip(".") or host.endswith(suffix) for suffix in AUTHORITATIVE_INDIAN_SUFFIXES)
+
+
 def infer_category(url: str) -> str:
     """Best-effort category for a page that did not come from a category seed."""
     host = urlparse(normalise_url(url)).netloc
@@ -174,6 +192,8 @@ def is_indexable(url: str) -> bool:
 
 
 __all__ = [
+    "is_authoritative_indian",
+    "AUTHORITATIVE_INDIAN_SUFFIXES",
     "normalise_url",
     "is_wiki_article",
     "infer_category",
