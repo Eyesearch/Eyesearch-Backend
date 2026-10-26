@@ -76,7 +76,9 @@ async def test_search_then_cache(client, live_stub) -> None:
     await asyncio.sleep(0.4)  # let the background cache write land
     second = await client.get("/v1/search", params={"q": "unique query alpha", "limit": 5})
     assert second.status_code == 200
-    assert second.json()["cache_hit"] is True
+    # After the first query the results live in the index, so the repeat is
+    # served locally (index hit) rather than going back out to the providers.
+    assert second.json()["source"] in {"index", "cache"}
 
 
 async def test_retrieve_markdown_and_json(client, live_stub) -> None:

@@ -182,22 +182,19 @@ async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
     assert called["live"] == 0
 
 
-async def test_search_service_queues_instead_of_calling_providers(temp_db, monkeypatch) -> None:
-    called = {"live": 0}
+async def test_local_only_mode_queues_instead_of_calling_providers(temp_db, monkeypatch) -> None:
+    """LIVE_SEARCH_ENABLED=false is the strictly-local deployment."""
 
-    async def _live(*args, **kwargs):
-        called["live"] += 1
-        return RetrievalOutcome(results=[])
+    async def _never(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("local-only mode must not call providers")
 
-    monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    monkeypatch.setattr(live_retrieval, "retrieve", _never)
     monkeypatch.setattr(
         search_service, "get_engine_settings", lambda: EngineSettings(live_search_enabled=False)
     )
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("something we have never crawled", limit=5)
 
-    # No external HTTP on the request path, ever.
-    assert called["live"] == 0
     assert response.source == "queued"
     assert response.results == []
 
@@ -207,23 +204,78 @@ async def test_search_service_queues_instead_of_calling_providers(temp_db, monke
     assert "something we have never crawled" in await get_store().pending_backlog(10)
 
 
-async def test_sparse_index_queues_the_query(temp_db, monkeypatch) -> None:
-    """The crawl backlog is about our index: any local miss queues the query."""
+async def test_live_results_with_nothing_indexable_are_queued(temp_db, monkeypatch) -> None:
+    """When every live result breaks the crawl rules, the query goes to the backlog."""
 
-    async def _no_live(*args, **kwargs):  # pragma: no cover - must not be called
-        raise AssertionError("the request path must not call external providers")
+    calls = {"live": 0}
 
-    monkeypatch.setattr(live_retrieval, "retrieve", _no_live)
-    monkeypatch.setattr(
-        search_service, "get_engine_settings", lambda: EngineSettings(live_search_enabled=False)
-    )
+    async def _unusable(query, limit, **kwargs):
+        calls["live"] += 1
+        # A repository loop and a deep application path: both rejected by is_indexable.
+        return RetrievalOutcome(
+            results=[
+                RawResult(title="owner/repo", url="https://github.com/owner/repo", snippet="s", source="duckduckgo"),
+                RawResult(title="deep", url="https://example.in/a/b/c/d/e", snippet="s", source="duckduckgo"),
+            ],
+            providers={"duckduckgo": 2},
+        )
+
+    monkeypatch.setattr(live_retrieval, "retrieve", _unusable)
     service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
     response = await service.search("unindexed niche topic", limit=5)
 
-    assert response.source == "queued"
-    assert response.results == []
+    # The user still gets the live results, even though none could be indexed.
+    assert response.source == "live"
+    assert response.results
+    assert response.auto_ingested == 0
 
     await search_service.drain_background_writes()
     from app.engine.store import get_store
 
     assert "unindexed niche topic" in await get_store().pending_backlog(10)
+
+    # A hopeless query is not retried against the providers straight away: the
+    # repeat is served locally (result cache, or the backlog guard).
+    repeat = await service.search("unindexed niche topic", limit=5)
+    assert repeat.source in {"queued", "cache"}
+    assert calls["live"] == 1
+
+
+async def test_live_fetch_once_then_served_from_index(temp_db, monkeypatch) -> None:
+    """The headline behaviour: one live call per topic, ever."""
+    calls = {"live": 0}
+
+    async def _live(query, limit, **kwargs):
+        calls["live"] += 1
+        return RetrievalOutcome(
+            results=[
+                RawResult(
+                    title="Github — Wikipedia",
+                    url="https://en.wikipedia.org/wiki/GitHub",
+                    snippet="GitHub is a platform for version control and collaboration.",
+                    source="duckduckgo",
+                ),
+                RawResult(
+                    title="Github · GitHub",
+                    url="https://github.com",
+                    snippet="GitHub is where people build software.",
+                    source="duckduckgo",
+                ),
+            ],
+            providers={"duckduckgo": 2},
+        )
+
+    monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
+
+    first = await service.search("github", limit=5)
+    assert first.source == "live"
+    assert first.results, "the first query must return the live results"
+    assert first.auto_ingested >= 1, "the live results must be written into the index"
+    assert calls["live"] == 1
+
+    second = await service.search("github", limit=5)
+    assert second.source == "index", second.source
+    assert second.index_hits >= 1
+    assert calls["live"] == 1, "the second query must not touch the providers"
+    assert second.results and second.results[0].source == "eyesearch_index"
