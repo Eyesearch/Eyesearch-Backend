@@ -266,6 +266,8 @@ class IndexStore:
         statements: list[tuple[str, list[Any]]] = []
         site_payload: dict[str, int] = {}
         seen_pages: set[str] = set()
+        root_seen: set[str] = set()  # one root page per domain, never two
+        sitelinks_per_host: dict[str, int] = {}  # bounded at sections_max per domain
         page_statement = _PAGE_REPLACE if replace else _PAGE_UPSERT
 
         for item in prepared:
@@ -294,7 +296,31 @@ class IndexStore:
                 outcome["duplicate"] += 1
                 continue
 
+            is_root_path = urlparse(url).path in ("", "/")
+            if not is_root_path and sitelinks_per_host.get(host, 0) >= self.settings.sections_max:
+                # A domain carries at most `sections_max` sitelinks, whether they
+                # came from a level-1 page or from the root's navigation.
+                outcome["domain_cap"] += 1
+                continue
+
             is_root = urlparse(url).path in ("", "/")
+            if is_root:
+                # Exactly one root per site: a language variant of "/" is the same
+                # entry point, not a second root.
+                if host in root_seen:
+                    outcome["duplicate"] += 1
+                    continue
+                try:
+                    existing_root = await client.execute(
+                        "SELECT 1 FROM pages WHERE site_id = ? AND kind = 'root' LIMIT 1",
+                        [site_id],
+                    )
+                    if getattr(existing_root, "rows", ()) and not upsert:
+                        outcome["duplicate"] += 1
+                        continue
+                except Exception as exc:
+                    logger.debug("root probe failed for %s: %s", host, exc)
+                root_seen.add(host)
             statements.append(
                 (
                     page_statement,
@@ -318,10 +344,14 @@ class IndexStore:
                 )
             )
             seen_pages.add(url)
+            if not is_root_path:
+                sitelinks_per_host[host] = sitelinks_per_host.get(host, 0) + 1
             outcome["pages"] += 1
             outcome["replaced" if existed else "inserted"] += 1
 
             for section in (doc.get("sections") or [])[: self.settings.sections_max]:
+                if sitelinks_per_host.get(host, 0) >= self.settings.sections_max:
+                    break  # the domain already has its five
                 section_url = normalise_url(str(section.get("url") or ""))
                 section_title = str(section.get("title") or "").strip()
                 if not section_url or not section_title or section_url in seen_pages:
@@ -353,6 +383,7 @@ class IndexStore:
                     )
                 )
                 seen_pages.add(section_url)
+                sitelinks_per_host[host] = sitelinks_per_host.get(host, 0) + 1
                 outcome["pages"] += 1
                 outcome["sitelinks"] += 1
 
