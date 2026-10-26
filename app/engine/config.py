@@ -49,8 +49,9 @@ class EngineSettings:
     auto_ingest_max_results: int = field(default_factory=lambda: _int("AUTO_INGEST_MAX_RESULTS", 5))
 
     # --- storage budget (1-2 KB per page) --------------------------------
-    # One document per domain root, sitelinks included: strictly under 1.5 KB.
-    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 1536))
+    # Per page, and per domain across its root and sitelinks (the brief's 10 KB).
+    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 4096))
+    max_site_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_SITE_PAYLOAD_BYTES", 10240))
     title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))
     snippet_max_chars: int = field(default_factory=lambda: _int("INDEX_SNIPPET_MAX_CHARS", 200))
     # The FTS5 `content` column only needs enough text to match on.

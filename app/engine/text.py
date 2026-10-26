@@ -108,16 +108,26 @@ class ExtractedDocument:
     favicon_url: str | None
     category: str = "web"
     sections: list[dict[str, str]] = field(default_factory=list)
+    # The term fields the two-tier schema indexes (see app/engine/schema.py).
+    headings: str = ""
+    nav_terms: str = ""
+    site_terms: str = ""
+    category_terms: str = ""
+    url_terms: str = ""
 
     def payload_bytes(self) -> int:
         """UTF-8 size of what will actually be stored for this page."""
         fields = (
-            self.url, self.canonical_url, self.domain, self.root_domain,
-            self.domain_class, self.category, self.title, self.snippet, self.content,
-            self.language, self.favicon_url or "",
+            self.url, self.title, self.headings, self.description,
+            self.nav_terms, self.site_terms, self.category_terms, self.url_terms,
         )
         fields = fields + (self.sections_json(),)
         return sum(len(field.encode("utf-8")) for field in fields)
+
+    @property
+    def description(self) -> str:
+        """What the card shows: the meta description, else the summary."""
+        return self.snippet or truncate(self.content, 200)
 
     def sections_json(self) -> str:
         """The compact JSON array stored alongside the document."""
@@ -148,11 +158,19 @@ class ExtractedDocument:
             "root_domain": self.root_domain,
             "domain_class": self.domain_class,
             "title": self.title,
+            "headings": self.headings,
+            "description": self.description,
+            "nav_terms": self.nav_terms,
+            "site_terms": self.site_terms,
+            "category_terms": self.category_terms,
+            "url_terms": self.url_terms,
+            # kept for callers that still read the old shape
             "snippet": self.snippet,
             "content": self.content,
             "language": self.language,
             "favicon_url": self.favicon_url,
             "category": self.category,
+            "sections": list(self.sections),
             "sections_json": self.sections_json(),
             "payload_bytes": self.payload_bytes(),
         }
@@ -243,6 +261,33 @@ def canonicalise(url: str, base: str | None = None) -> str:
     return normalise_url(absolute)
 
 
+def url_terms(url: str) -> str:
+    """Words from the URL path and host, for the url_terms column."""
+    parsed = urlparse(normalise_url(url))
+    host_words = [part for part in parsed.netloc.split(".") if part and part not in {"www", "com", "in", "org", "net"}]
+    path_words = [part.replace("-", " ").replace("_", " ") for part in parsed.path.split("/") if part]
+    return normalise_whitespace(" ".join(host_words + path_words))
+
+
+def headings_of(soup: BeautifulSoup, limit: int = 200) -> str:
+    """The page's own headings — the strongest signal after the title."""
+    parts = [
+        normalise_whitespace(node.get_text(" ", strip=True))
+        for node in soup.find_all(["h1", "h2", "h3"])
+    ]
+    return truncate(" ".join(part for part in parts if part), limit)
+
+
+def nav_terms_of(soup: BeautifulSoup, sections: list[dict[str, str]], limit: int = 300) -> str:
+    """Navigation vocabulary: the sitelinks we kept plus the page's nav anchors."""
+    parts = [section.get("title", "") for section in sections]
+    for anchor in soup.find_all("a", href=True)[:40]:
+        text = normalise_whitespace(anchor.get_text(" ", strip=True))
+        if 2 <= len(text) <= 40:
+            parts.append(text)
+    return truncate(" ".join(dict.fromkeys(part for part in parts if part)), limit)
+
+
 def _body_text(soup: BeautifulSoup) -> str:
     for tag in soup(_BOILERPLATE_TAGS):
         tag.decompose()
@@ -319,6 +364,8 @@ def extract_document(
     document = ExtractedDocument(
         category=category or infer_category(url),
         sections=sections,
+        headings=headings_of(soup),
+        nav_terms=nav_terms_of(soup, sections),
         url=normalise_url(url),
         canonical_url=canonical_url,
         domain=urlparse(canonical_url).netloc,
@@ -338,6 +385,11 @@ def extract_document(
         language=detect_language(f"{title} {body}"),
         favicon_url=favicon,
     )
+    document.site_terms = truncate(
+        f"{document.root_domain.replace('.', ' ')} {title}", 120
+    )
+    document.category_terms = document.category
+    document.url_terms = url_terms(canonical_url)
     return document.fit_to_budget(settings.max_payload_bytes)
 
 
@@ -363,6 +415,9 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 __all__ = [
     "summarise",
+    "url_terms",
+    "headings_of",
+    "nav_terms_of",
     "extract_sections",
     "ExtractedDocument",
     "extract_document",

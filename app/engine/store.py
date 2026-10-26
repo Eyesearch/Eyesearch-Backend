@@ -1,8 +1,12 @@
-"""Storage for the proprietary index: bounded documents, FTS5, backlog, queue.
+"""Storage for the two-tier index: `sites`, `pages`, `page_fts`.
 
-Policy lives here, not in the crawler: ingestion rejects duplicates and
-over-cap domains, revalidation updates in place, and the request path only ever
-reads. All access goes through the gateway's single shared libsql client.
+One `sites` row per domain, a bounded set of `pages` rows per site (the root plus
+its sitelinks), and an external-content FTS5 index over the pages' term fields.
+The triggers own the FTS writes, so this module never touches `page_fts` except
+to read it.
+
+The public API is unchanged from the flat model: callers hand over extracted
+documents and get ranked site cards back.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ from app.database import get_client
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
 from app.engine.relevance import is_relevant
-from app.engine.schema import ENGINE_MIGRATIONS, ENGINE_SCHEMA
+from app.engine.schema import BM25_WEIGHTS
+from app.engine.text import detect_language
 from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 from app.errors import DatabaseError
 
@@ -27,125 +32,95 @@ logger = logging.getLogger(__name__)
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F\u0C80-\u0CFF]+")
 
-_INSERT_DOCUMENT = """
-INSERT INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
-    title, snippet, content, language, favicon_url, payload_bytes, content_hash,
-    last_checked_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+_BM25_LIST = ", ".join(f"{weight:.1f}" for weight in BM25_WEIGHTS)
+
+# The retrieval query from the brief: weighted bm25, live pages only, best first.
+_SEARCH_SQL = f"""
+SELECT p.page_id, p.site_id, s.domain, s.name, s.category, p.url, p.title,
+       p.description, p.kind, p.last_crawled_at,
+       bm25(page_fts, {_BM25_LIST}) AS lexical_score
+FROM page_fts
+JOIN pages p ON p.page_id = page_fts.rowid
+JOIN sites s ON s.site_id = p.site_id
+WHERE page_fts MATCH ? AND p.http_status = 200 AND p.noindex = 0
+ORDER BY lexical_score ASC
+LIMIT ?
 """
 
-_UPSERT_DOCUMENT = """
-INSERT INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
-    title, snippet, content, language, favicon_url, payload_bytes, content_hash, updated_at
+_SUGGEST_SQL = f"""
+SELECT p.title
+FROM page_fts
+JOIN pages p ON p.page_id = page_fts.rowid
+WHERE page_fts MATCH ? AND p.http_status = 200 AND p.noindex = 0
+ORDER BY bm25(page_fts, {_BM25_LIST}) ASC
+LIMIT ?
+"""
+
+_SITE_UPSERT = """
+INSERT INTO sites (domain, canonical_url, name, category, authority_score, last_crawled_at)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(domain) DO UPDATE SET
+    canonical_url = excluded.canonical_url,
+    name = excluded.name,
+    category = excluded.category,
+    authority_score = excluded.authority_score,
+    last_crawled_at = excluded.last_crawled_at
+"""
+
+_PAGE_UPSERT = """
+INSERT INTO pages (
+    site_id, url, kind, title, headings, description, nav_terms, site_terms,
+    category_terms, url_terms, http_status, noindex, canonical_url, content_hash, last_crawled_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
-    canonical_url = excluded.canonical_url,
-    domain = excluded.domain,
-    root_domain = excluded.root_domain,
-    domain_class = excluded.domain_class,
-    category = excluded.category,
-    sections_json = excluded.sections_json,
+    site_id = excluded.site_id,
+    kind = excluded.kind,
     title = excluded.title,
-    snippet = excluded.snippet,
-    content = excluded.content,
-    language = excluded.language,
-    favicon_url = excluded.favicon_url,
-    payload_bytes = excluded.payload_bytes,
+    headings = excluded.headings,
+    description = excluded.description,
+    nav_terms = excluded.nav_terms,
+    site_terms = excluded.site_terms,
+    category_terms = excluded.category_terms,
+    url_terms = excluded.url_terms,
+    http_status = excluded.http_status,
+    noindex = excluded.noindex,
+    canonical_url = excluded.canonical_url,
     content_hash = excluded.content_hash,
-    updated_at = excluded.updated_at
+    last_crawled_at = excluded.last_crawled_at
 """
 
-_REPLACE_DOCUMENT = """
-INSERT OR REPLACE INTO documents (
-    url, canonical_url, domain, root_domain, domain_class, category, sections_json,
-    title, snippet, content, language, favicon_url, payload_bytes, content_hash,
-    updated_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-"""
-
-_UPDATE_DOCUMENT = """
-UPDATE documents SET
-    canonical_url = ?, domain = ?, root_domain = ?, domain_class = ?, title = ?,
-    snippet = ?, content = ?, language = ?, favicon_url = ?, payload_bytes = ?,
-    content_hash = ?, etag = ?, last_modified = ?, last_checked_at = ?, updated_at = ?
-WHERE url = ?
-"""
-
-# bm25 weights, in documents_fts column order: title, snippet, content, url.
-# A title hit is worth ten times a body hit, so a footer mention can never
-# outrank a page that is actually about the term.
-_BM25_WEIGHTS = "10.0, 1.5, 0.5, 8.0"
-
-# The FTS table is external-content, so row data comes from `documents` via rowid.
-_SEARCH_FTS = f"""
-SELECT d.url, d.title, d.snippet, d.language, d.updated_at, d.favicon_url AS favicon,
-       d.category, d.sections_json, bm25(documents_fts, {_BM25_WEIGHTS}) AS rank
-FROM documents_fts
-JOIN documents d ON d.rowid = documents_fts.rowid
-WHERE documents_fts MATCH ?
-ORDER BY rank
-LIMIT ?
-"""
-
-# Autocomplete: the document titles that match, most relevant first.
-_SUGGEST_FTS = f"""
-SELECT d.title
-FROM documents_fts
-JOIN documents d ON d.rowid = documents_fts.rowid
-WHERE documents_fts MATCH ?
-ORDER BY bm25(documents_fts, {_BM25_WEIGHTS})
-LIMIT ?
+_PAGE_REPLACE = """
+INSERT OR REPLACE INTO pages (
+    site_id, url, kind, title, headings, description, nav_terms, site_terms,
+    category_terms, url_terms, http_status, noindex, canonical_url, content_hash, last_crawled_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+def _now_epoch() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
 
 
-def _parse_sections(raw: Any) -> list[dict[str, str]]:
-    """Decode the stored sitelinks, tolerating anything malformed."""
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(str(raw))
-    except (TypeError, ValueError):
-        return []
-    if not isinstance(parsed, list):
-        return []
-    sections: list[dict[str, str]] = []
-    for item in parsed:
-        if isinstance(item, dict) and item.get("title") and item.get("url"):
-            sections.append(
-                {
-                    "title": str(item.get("title"))[:80],
-                    "url": str(item.get("url"))[:300],
-                    "snippet": str(item.get("snippet") or "")[:120],
-                }
-            )
-    return sections
+def _content_hash(*parts: str) -> str:
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
-def _content_hash(title: str, snippet: str) -> str:
-    digest = hashlib.sha256(f"{title}\n{snippet}".encode("utf-8")).hexdigest()
-    return digest[:32]
+def build_match_query(query: str) -> str:
+    """Turn free text into a safe FTS5 MATCH expression."""
+    tokens = _SAFE_TOKEN.findall(query or "")
+    if not tokens:
+        return ""
+    quoted = [f'"{token}"' for token in tokens[:-1]]
+    quoted.append(f'"{tokens[-1]}"*')
+    return " ".join(quoted)
 
 
 def query_tokens(query: str) -> list[str]:
-    """The words a query is judged on — same tokenisation as the MATCH builder."""
     return [token.lower() for token in _SAFE_TOKEN.findall(query or "") if len(token) >= 2]
 
 
 def passes_relevance(query: str, document: RankedDocument, settings: EngineSettings) -> bool:
-    """Reject a hit that only matched a passing mention.
-
-    Delegates to the universal gate in `app.engine.relevance`: the query's words
-    must appear in the title, URL or snippet — not only somewhere in the body.
-    """
-    # A document's sitelinks are part of what it describes: "github pricing"
-    # should match the Pricing section of github.com, not be rejected as a
-    # body-only match.
+    """Reject a hit that only matched a passing mention (see engine/relevance)."""
     section_text = " ".join(
         f"{section.get('title', '')} {section.get('url', '')}"
         for section in (document.sections or [])
@@ -159,23 +134,591 @@ def passes_relevance(query: str, document: RankedDocument, settings: EngineSetti
     )
 
 
-def build_match_query(query: str) -> str:
-    """Turn free text into a safe FTS5 MATCH expression.
+def _parse_sections(raw: Any) -> list[dict[str, str]]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [
+        {
+            "title": str(item.get("title"))[:80],
+            "url": str(item.get("url"))[:300],
+            "snippet": str(item.get("snippet") or "")[:120],
+        }
+        for item in parsed
+        if isinstance(item, dict) and item.get("title") and item.get("url")
+    ]
 
-    Tokens are quoted (so punctuation cannot become syntax) and joined with an
-    implicit AND; the last token gets a prefix wildcard so "bengal" finds
-    "bengaluru" while the user is still typing.
-    """
-    tokens = _SAFE_TOKEN.findall(query or "")
-    if not tokens:
-        return ""
-    quoted = [f'"{token}"' for token in tokens[:-1]]
-    quoted.append(f'"{tokens[-1]}"*')
-    return " ".join(quoted)
+
+def _authority(url: str) -> float:
+    return {"government": 1.0, "news": 0.8, "knowledge": 0.9}.get(domain_class(url), 0.6)
+
+
+class IndexStore:
+    """Typed access to the two-tier index."""
+
+    def __init__(self, settings: EngineSettings | None = None) -> None:
+        self.settings = settings or get_engine_settings()
+
+    async def ensure_schema(self) -> None:
+        from app import database
+
+        await database.initialize_schema()
+
+    # -- ingestion ------------------------------------------------------
+    async def ingest_documents(
+        self,
+        documents: Sequence[dict[str, Any]],
+        *,
+        mode: str = "insert",
+    ) -> dict[str, int]:
+        """Write sites and pages. `mode="upsert"` refreshes, `"insert"` adds."""
+        return await self._write(documents, mode=mode, replace=False)
+
+    async def replace_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
+        """`INSERT OR REPLACE` per page — the crawler's path."""
+        return await self._write(documents, mode="replace", replace=True)
+
+    async def _write(
+        self,
+        documents: Sequence[dict[str, Any]],
+        *,
+        mode: str,
+        replace: bool,
+    ) -> dict[str, int]:
+        outcome = {
+            "inserted": 0, "replaced": 0, "duplicate": 0, "domain_cap": 0,
+            "not_indexable": 0, "over_budget": 0, "collapsed": 0,
+            "sites": 0, "pages": 0, "sitelinks": 0,
+        }
+        if not documents:
+            return outcome
+
+        client = get_client()
+        stamp = _now_epoch()
+        upsert = mode in {"upsert", "replace"}
+
+        # --- 1. normalise and validate --------------------------------
+        prepared: list[dict[str, Any]] = []
+        for doc in documents:
+            url = normalise_url(str(doc.get("url") or ""))
+            title = str(doc.get("title") or "").strip()
+            if not url or not title:
+                outcome["not_indexable"] += 1
+                continue
+            if not is_indexable(url):
+                outcome["not_indexable"] += 1
+                continue
+            payload = int(doc.get("payload_bytes") or 0)
+            if payload > self.settings.max_payload_bytes:
+                outcome["over_budget"] += 1
+                continue
+            prepared.append({"doc": doc, "url": url, "title": title, "payload": payload})
+
+        if not prepared:
+            return outcome
+
+        # --- 2. ensure a site row per host ----------------------------
+        hosts: dict[str, dict[str, Any]] = {}
+        for item in prepared:
+            host = urlparse(item["url"]).netloc
+            if not host:
+                outcome["not_indexable"] += 1
+                continue
+            hosts.setdefault(host, item)
+
+        site_statements: list[tuple[str, list[Any]]] = []
+        for host, item in hosts.items():
+            site_statements.append(
+                (
+                    _SITE_UPSERT,
+                    [
+                        host,
+                        f"https://{host}/",
+                        str(item["doc"].get("site_name") or item["title"])[:200],
+                        str(item["doc"].get("category") or domain_class(item["url"]))[:40],
+                        _authority(item["url"]),
+                        stamp,
+                    ],
+                )
+            )
+        try:
+            await client.batch(site_statements)
+        except Exception as exc:
+            raise DatabaseError(f"site write failed: {exc}") from exc
+
+        site_ids: dict[str, int] = {}
+        for host in hosts:
+            try:
+                row = await client.execute("SELECT site_id FROM sites WHERE domain = ? LIMIT 1", [host])
+                rows = getattr(row, "rows", ()) or ()
+                if rows:
+                    site_ids[host] = int(rows[0][0])
+            except Exception as exc:
+                logger.warning("site lookup failed for %s: %s", host, exc)
+        outcome["sites"] = len(site_ids)
+
+        # --- 3. pages: the root plus its bounded sitelinks ------------
+        statements: list[tuple[str, list[Any]]] = []
+        site_payload: dict[str, int] = {}
+        seen_pages: set[str] = set()
+        page_statement = _PAGE_REPLACE if replace else _PAGE_UPSERT
+
+        for item in prepared:
+            doc, url, title, payload = item["doc"], item["url"], item["title"], item["payload"]
+            host = urlparse(url).netloc
+            site_id = site_ids.get(host)
+            if not site_id:
+                outcome["not_indexable"] += 1
+                continue
+
+            site_payload.setdefault(host, 0)
+            if site_payload[host] + payload > self.settings.max_site_payload_bytes:
+                outcome["over_budget"] += 1
+                continue
+            site_payload[host] += payload
+
+            existed = False
+            try:
+                probe = await client.execute("SELECT 1 FROM pages WHERE url = ? LIMIT 1", [url])
+                existed = bool(getattr(probe, "rows", ()))
+            except Exception as exc:
+                logger.debug("page probe failed for %s: %s", url, exc)
+
+            if existed and not upsert:
+                # The crawler's rule: a URL is indexed once, then revalidated.
+                outcome["duplicate"] += 1
+                continue
+
+            is_root = urlparse(url).path in ("", "/")
+            statements.append(
+                (
+                    page_statement,
+                    [
+                        site_id,
+                        url,
+                        "root" if is_root else "sitelink",
+                        title,
+                        str(doc.get("headings") or "")[:500],
+                        str(doc.get("description") or doc.get("snippet") or "")[:500],
+                        str(doc.get("nav_terms") or "")[:500],
+                        str(doc.get("site_terms") or host.replace(".", " "))[:300],
+                        str(doc.get("category_terms") or doc.get("category") or "")[:80],
+                        str(doc.get("url_terms") or "")[:300],
+                        200,
+                        0,
+                        doc.get("canonical_url") or url,
+                        _content_hash(title, str(doc.get("description") or "")),
+                        stamp,
+                    ],
+                )
+            )
+            seen_pages.add(url)
+            outcome["pages"] += 1
+            outcome["replaced" if existed else "inserted"] += 1
+
+            for section in (doc.get("sections") or [])[: self.settings.sections_max]:
+                section_url = normalise_url(str(section.get("url") or ""))
+                section_title = str(section.get("title") or "").strip()
+                if not section_url or not section_title or section_url in seen_pages:
+                    continue
+                if urlparse(section_url).netloc != host:
+                    continue
+                statements.append(
+                    (
+                        page_statement,
+                        [
+                            site_id,
+                            section_url,
+                            "sitelink",
+                            section_title[:120],
+                            "",
+                            str(section.get("snippet") or "")[:200],
+                            section_title[:200],
+                            str(doc.get("site_terms") or host.replace(".", " "))[:300],
+                            str(doc.get("category_terms") or doc.get("category") or "")[:80],
+                            " ".join(
+                                part for part in urlparse(section_url).path.split("/") if part
+                            )[:200],
+                            200,
+                            0,
+                            section_url,
+                            _content_hash(section_title, str(section.get("snippet") or "")),
+                            stamp,
+                        ],
+                    )
+                )
+                seen_pages.add(section_url)
+                outcome["pages"] += 1
+                outcome["sitelinks"] += 1
+
+        if statements:
+            try:
+                await client.batch(statements)
+            except Exception as exc:
+                raise DatabaseError(f"index write failed: {exc}") from exc
+        return outcome
+
+    # -- reading --------------------------------------------------------
+    async def search_local(self, query: str, limit: int | None = None) -> list[RankedDocument]:
+        """Weighted bm25 over `page_fts`, grouped into one card per site."""
+        match = build_match_query(query)
+        if not match:
+            return []
+
+        client = get_client()
+        capped = max(limit or self.settings.index_limit, 1)
+        try:
+            result = await client.execute(_SEARCH_SQL, [match, min(capped * 5, 50)])
+        except Exception as exc:
+            logger.warning("index query failed for %r: %s", query, exc)
+            return []
+
+        columns = tuple(getattr(result, "columns", ()) or ())
+        rows = [dict(zip(columns, row)) for row in (getattr(result, "rows", ()) or ())]
+        if not rows:
+            return []
+
+        grouped = await self._group_by_site(rows)
+        relevant = [doc for doc in grouped if passes_relevance(query, doc, self.settings)]
+        if len(relevant) != len(grouped):
+            logger.debug(
+                "index: %d of %d sites for %r rejected as weak matches",
+                len(grouped) - len(relevant), len(grouped), query,
+            )
+        return rank_documents(relevant, freshness_weight=self.settings.freshness_weight)[:capped]
+
+    async def _group_by_site(self, rows: list[dict[str, Any]]) -> list[RankedDocument]:
+        """Collapse matched pages into one document per site, with its sitelinks."""
+        client = get_client()
+        best: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            site_id = int(row.get("site_id") or 0)
+            if not site_id:
+                continue
+            score = float(row.get("lexical_score") or 0.0)
+            current = best.get(site_id)
+            if current is None or score < float(current.get("lexical_score") or 0.0):
+                best[site_id] = row
+
+        documents: list[RankedDocument] = []
+        for site_id, matched in best.items():
+            try:
+                pages = await client.execute(
+                    "SELECT url, kind, title, description, last_crawled_at FROM pages "
+                    "WHERE site_id = ? AND http_status = 200 AND noindex = 0 "
+                    "ORDER BY CASE kind WHEN 'root' THEN 0 ELSE 1 END, page_id LIMIT 12",
+                    [site_id],
+                )
+                page_rows = getattr(pages, "rows", ()) or ()
+            except Exception as exc:
+                logger.warning("page fetch failed for site %s: %s", site_id, exc)
+                page_rows = ()
+
+            root = None
+            sitelinks: list[dict[str, str]] = []
+            for url, kind, title, description, crawled in page_rows:
+                if kind == "root" and root is None:
+                    root = {"url": url, "title": title, "description": description, "crawled": crawled}
+                elif kind == "sitelink":
+                    sitelinks.append(
+                        {"title": str(title), "url": str(url), "snippet": str(description or "")}
+                    )
+
+            domain = str(matched.get("domain") or root_domain(str(matched.get("url") or "")))
+            primary = root or {
+                "url": matched.get("url"),
+                "title": matched.get("title"),
+                "description": matched.get("description"),
+                "crawled": matched.get("last_crawled_at"),
+            }
+            documents.append(
+                RankedDocument(
+                    url=str(primary["url"]),
+                    title=str(primary["title"] or ""),
+                    snippet=str(primary["description"] or ""),
+                    language=detect_language(f"{primary['title']} {primary['description'] or ''}"),
+                    updated_at=str(primary["crawled"] or "") or None,
+                    bm25=float(matched.get("lexical_score") or 0.0),
+                    # The schema stores no icon; the conventional location is a
+                    # fine fallback and the UI degrades to a letter tile anyway.
+                    favicon_url=f"https://{domain}/favicon.ico" if domain else None,
+                    sections=sitelinks[: self.settings.sections_max],
+                )
+            )
+        return documents
+
+    async def suggest(self, query: str, limit: int = 8) -> list[str]:
+        tokens = _SAFE_TOKEN.findall(query or "")
+        if not tokens:
+            return []
+        client = get_client()
+        seen: set[str] = set()
+        suggestions: list[str] = []
+        for match in (build_match_query(query), f'"{tokens[-1]}"*'):
+            if not match:
+                continue
+            try:
+                result = await client.execute(_SUGGEST_SQL, [match, max(limit * 2, 12)])
+            except Exception as exc:
+                logger.warning("suggest query failed for %r: %s", query, exc)
+                continue
+            for row in getattr(result, "rows", ()) or ():
+                title = str(row[0] or "").strip()
+                if not title or title.lower() in seen:
+                    continue
+                seen.add(title.lower())
+                suggestions.append(title[:80])
+                if len(suggestions) >= limit:
+                    return suggestions
+        return suggestions
+
+    async def get_document(self, url: str) -> dict[str, Any] | None:
+        """A page in the shape callers used before the two-tier split."""
+        client = get_client()
+        key = normalise_url(url)
+        try:
+            result = await client.execute(
+                "SELECT page_id, site_id, url, kind, title, description, canonical_url, "
+                "content_hash, last_crawled_at FROM pages WHERE url = ? LIMIT 1",
+                [key],
+            )
+        except Exception as exc:
+            raise DatabaseError(f"page read failed: {exc}") from exc
+        rows = getattr(result, "rows", ()) or ()
+        if not rows:
+            return None
+
+        page_id, site_id, page_url, kind, title, description, canonical, content_hash, crawled = rows[0]
+        site = None
+        try:
+            site_row = await client.execute(
+                "SELECT domain, name, category FROM sites WHERE site_id = ? LIMIT 1", [int(site_id)]
+            )
+            site_rows = getattr(site_row, "rows", ()) or ()
+            site = site_rows[0] if site_rows else None
+        except Exception as exc:
+            logger.debug("site read failed for %s: %s", site_id, exc)
+
+        return {
+            "url": str(page_url),
+            "kind": str(kind),
+            "title": str(title),
+            "snippet": str(description or ""),
+            "description": str(description or ""),
+            "content": str(description or ""),
+            "canonical_url": str(canonical or page_url),
+            "content_hash": str(content_hash or ""),
+            "domain": str(site[0]) if site else root_domain(page_url),
+            "category": str(site[2]) if site else "",
+            "site_name": str(site[1]) if site else "",
+            "last_crawled_at": crawled,
+            "page_id": int(page_id),
+            "site_id": int(site_id),
+        }
+
+    async def count_documents(self) -> int:
+        """Sites in the index (one card per site)."""
+        client = get_client()
+        result = await client.execute("SELECT COUNT(*) FROM sites")
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def count_pages(self) -> int:
+        client = get_client()
+        result = await client.execute("SELECT COUNT(*) FROM pages")
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def max_payload_bytes(self) -> int:
+        client = get_client()
+        result = await client.execute(
+            "SELECT COALESCE(MAX(LENGTH(title) + LENGTH(headings) + LENGTH(description) "
+            "+ LENGTH(nav_terms) + LENGTH(site_terms) + LENGTH(category_terms) + LENGTH(url_terms)), 0) "
+            "FROM pages"
+        )
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def domain_counts(self) -> dict[str, int]:
+        client = get_client()
+        result = await client.execute("SELECT domain, COUNT(*) FROM sites GROUP BY domain")
+        return {str(row[0] or ""): int(row[1]) for row in getattr(result, "rows", ()) or ()}
+
+    async def stats(self) -> dict[str, int]:
+        try:
+            sites = await self.count_documents()
+            pages = await self.count_pages()
+            client = get_client()
+            backlog = await client.execute("SELECT COUNT(*) FROM crawl_backlog WHERE status = 'pending'")
+            rows = getattr(backlog, "rows", ()) or ()
+            pending = int(rows[0][0]) if rows else 0
+            return {
+                "documents": sites,
+                "sites": sites,
+                "pages": pages,
+                "backlog": pending,
+                "max_payload_bytes": await self.max_payload_bytes(),
+            }
+        except Exception as exc:
+            logger.warning("index stats unavailable: %s", exc)
+            return {"documents": 0, "sites": 0, "pages": 0, "backlog": 0, "max_payload_bytes": 0}
+
+    # -- revalidation ---------------------------------------------------
+    async def stale_documents(self, limit: int = 10) -> list[dict[str, Any]]:
+        client = get_client()
+        result = await client.execute(
+            "SELECT p.url, s.domain, s.category, p.last_crawled_at FROM pages p "
+            "JOIN sites s ON s.site_id = p.site_id "
+            "ORDER BY COALESCE(p.last_crawled_at, 0) ASC LIMIT ?",
+            [max(limit * 5, 25)],
+        )
+        columns = tuple(getattr(result, "columns", ()) or ())
+        rows = [dict(zip(columns, row)) for row in (getattr(result, "rows", ()) or ())]
+
+        now = datetime.now(timezone.utc)
+        ttls = {
+            "news": timedelta(days=self.settings.news_ttl_days),
+            "government": timedelta(days=self.settings.government_ttl_days),
+            "static": timedelta(days=self.settings.static_ttl_days),
+        }
+        stale: list[dict[str, Any]] = []
+        for record in rows:
+            crawled = record.get("last_crawled_at")
+            ttl = ttls.get(str(record.get("category") or "static"), ttls["static"])
+            if not crawled:
+                stale.append(record)
+            else:
+                when = datetime.fromtimestamp(int(crawled), tz=timezone.utc)
+                if now - when >= ttl:
+                    stale.append(record)
+            if len(stale) >= limit:
+                break
+        return stale
+
+    async def update_document(
+        self,
+        url: str,
+        document: dict[str, Any],
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> bool:
+        """Refresh one page in place (revalidation)."""
+        key = normalise_url(url)
+        client = get_client()
+        probe = await client.execute("SELECT page_id FROM pages WHERE url = ? LIMIT 1", [key])
+        rows = getattr(probe, "rows", ()) or ()
+        if not rows:
+            return False
+
+        try:
+            await client.execute(
+                "UPDATE pages SET title = ?, description = ?, headings = ?, nav_terms = ?, "
+                "content_hash = ?, last_crawled_at = ? WHERE url = ?",
+                [
+                    str(document.get("title") or "")[:300],
+                    str(document.get("description") or document.get("snippet") or "")[:500],
+                    str(document.get("headings") or "")[:500],
+                    str(document.get("nav_terms") or "")[:500],
+                    _content_hash(str(document.get("title") or ""), str(document.get("description") or "")),
+                    _now_epoch(),
+                    key,
+                ],
+            )
+        except Exception as exc:
+            raise DatabaseError(f"page update failed: {exc}") from exc
+        return True
+
+    # -- crawler backlog ------------------------------------------------
+    async def enqueue_backlog(self, query: str, hits: int) -> None:
+        cleaned = (query or "").strip().lower()
+        if not cleaned:
+            return
+        client = get_client()
+        try:
+            await client.execute(
+                """
+                INSERT INTO crawl_backlog (query, hits, status, created_at)
+                VALUES (?, ?, 'pending', CURRENT_TIMESTAMP)
+                ON CONFLICT(query) DO UPDATE SET hits = crawl_backlog.hits + 1, status = 'pending'
+                """,
+                [cleaned, max(0, hits)],
+            )
+        except Exception as exc:
+            logger.warning("backlog enqueue failed for %r: %s", query, exc)
+
+    async def recently_queued(self, query: str, within_minutes: int = 10) -> bool:
+        cleaned = (query or "").strip().lower()
+        if not cleaned:
+            return False
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=max(1, within_minutes))
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        client = get_client()
+        try:
+            result = await client.execute(
+                "SELECT 1 FROM crawl_backlog WHERE query = ? AND status = 'pending' "
+                "AND created_at >= ? LIMIT 1",
+                [cleaned, cutoff],
+            )
+            return bool(getattr(result, "rows", ()))
+        except Exception as exc:
+            logger.debug("backlog probe failed for %r: %s", query, exc)
+            return False
+
+    async def pending_backlog(self, limit: int = 20) -> list[str]:
+        client = get_client()
+        result = await client.execute(
+            "SELECT query FROM crawl_backlog WHERE status = 'pending' "
+            "ORDER BY hits DESC, created_at ASC LIMIT ?",
+            [limit],
+        )
+        return [str(row[0]) for row in getattr(result, "rows", ()) or ()]
+
+    async def mark_backlog_processed(self, query: str) -> None:
+        client = get_client()
+        await client.execute(
+            "UPDATE crawl_backlog SET status = 'processed', processed_at = CURRENT_TIMESTAMP "
+            "WHERE query = ?",
+            [query.strip().lower()],
+        )
+
+    async def enqueue_urls(self, urls: Iterable[str], reason: str) -> int:
+        client = get_client()
+        statements: list[tuple[str, list[Any]]] = []
+        for url in urls:
+            normalised = normalise_url(url)
+            if not normalised or not is_indexable(normalised):
+                continue
+            statements.append(
+                (
+                    "INSERT INTO crawl_queue (url, domain, depth, reason, status, created_at) "
+                    "VALUES (?, ?, 0, ?, 'pending', CURRENT_TIMESTAMP) ON CONFLICT(url) DO NOTHING",
+                    [normalised, root_domain(normalised), reason],
+                )
+            )
+        if not statements:
+            return 0
+        await client.batch(statements)
+        return len(statements)
+
+
+_store: IndexStore | None = None
+
+
+def get_store(settings: EngineSettings | None = None) -> IndexStore:
+    global _store
+    if _store is None:
+        _store = IndexStore(settings)
+    return _store
 
 
 def domain_root_url(url: str) -> str:
-    """`https://example.com/any/path` → `https://example.com/`."""
     parsed = urlparse(normalise_url(url))
     return f"https://{parsed.netloc}/" if parsed.netloc else ""
 
@@ -185,7 +728,6 @@ def merge_sections(
     incoming: list[dict[str, str]],
     limit: int = 5,
 ) -> list[dict[str, str]]:
-    """Union of two sitelink lists, de-duplicated by URL, capped."""
     merged: list[dict[str, str]] = []
     seen: set[str] = set()
     for item in list(existing) + list(incoming):
@@ -205,580 +747,12 @@ def merge_sections(
     return merged
 
 
-class IndexStore:
-    """Typed access to the index tables, with the storage policy enforced."""
-
-    def __init__(self, settings: EngineSettings | None = None) -> None:
-        self.settings = settings or get_engine_settings()
-
-    async def ensure_schema(self) -> None:
-        """Create or migrate every index table. Delegates to the gateway schema.
-
-        One place owns DDL so a cold start and a migration cannot disagree.
-        """
-        from app import database
-
-        await database.initialize_schema()
-
-    async def _apply_migrations(self) -> None:
-        """Add columns introduced after the first release (idempotent)."""
-        client = get_client()
-        for table, column_definition in ENGINE_MIGRATIONS:
-            try:
-                await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_definition}")
-                logger.info("index migration applied: %s.%s", table, column_definition.split()[0])
-            except Exception:
-                # Already present — the only expected failure.
-                continue
-
-    # -- ingestion ------------------------------------------------------
-    async def ingest_documents(
-        self,
-        documents: Sequence[dict[str, Any]],
-        *,
-        mode: str = "insert",
-    ) -> dict[str, int]:
-        """Write documents into `documents` and `documents_fts`.
-
-        ``mode="insert"`` (the crawler's rule) rejects a URL that already exists.
-        ``mode="upsert"`` replaces it in place — what the on-demand extraction
-        pipeline uses, so a verified page is refreshed rather than duplicated.
-        """
-        outcome = {"inserted": 0, "replaced": 0, "duplicate": 0, "domain_cap": 0,
-                   "not_indexable": 0, "over_budget": 0, "collapsed": 0}
-        upsert = mode == "upsert"
-        if not documents:
-            return outcome
-
-        client = get_client()
-        stamp = _now()
-
-        counts: dict[str, int] = {}
-        try:
-            existing = await client.execute("SELECT root_domain, COUNT(*) FROM documents GROUP BY root_domain")
-            for row in getattr(existing, "rows", ()) or ():
-                counts[str(row[0] or "")] = int(row[1])
-        except Exception as exc:
-            logger.warning("domain counts unavailable: %s", exc)
-
-        statements: list[tuple[str, list[Any]]] = []
-        seen_urls: set[str] = set()
-        # Root rows seen in this batch, so sub-paths can be folded into them.
-        batch_roots: dict[str, list[dict[str, str]]] = {}
-
-        for doc in documents:
-            url = normalise_url(str(doc.get("url") or ""))
-            title = str(doc.get("title") or "").strip()
-            if not url or not title:
-                outcome["not_indexable"] += 1
-                continue
-            if url in seen_urls:
-                continue  # the same URL twice in one batch: last write wins below
-            if not is_indexable(url):
-                outcome["not_indexable"] += 1
-                continue
-
-            payload = int(doc.get("payload_bytes") or 0)
-            if payload > self.settings.max_payload_bytes:
-                outcome["over_budget"] += 1
-                continue
-
-            domain = root_domain(url)
-            if counts.get(domain, 0) >= self.settings.max_urls_per_domain:
-                outcome["domain_cap"] += 1
-                continue
-
-            # --- domain compaction: one row per domain root ---------------
-            root = domain_root_url(url)
-            sections = _parse_sections(doc.get("sections_json"))
-            if root and url != root:
-                if root in batch_roots:
-                    batch_roots[root] = merge_sections(
-                        batch_roots[root], sections, self.settings.sections_max
-                    )
-                    outcome["collapsed"] += 1
-                    continue
-                merged_into_root = await self._fold_into_existing_root(client, root, sections)
-                if merged_into_root:
-                    outcome["collapsed"] += 1
-                    continue
-            elif root:
-                batch_roots[root] = merge_sections([], sections, self.settings.sections_max)
-                sections = batch_roots[root]
-
-            already_present = False
-            try:
-                probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [url])
-                already_present = bool(getattr(probe, "rows", ()))
-            except Exception as exc:
-                logger.warning("duplicate probe failed for %s: %s", url, exc)
-
-            if already_present and not upsert:
-                # The crawler's rule: a URL is indexed once, then revalidated.
-                outcome["duplicate"] += 1
-                continue
-
-            seen_urls.add(url)
-            content = str(doc.get("content") or "")
-            common = [
-                url,
-                doc.get("canonical_url") or url,
-                doc.get("domain") or "",
-                domain,
-                doc.get("domain_class") or domain_class(url),
-                doc.get("category") or "web",
-                json.dumps(sections, ensure_ascii=False, separators=(",", ":")) if sections else None,
-                title,
-                doc.get("snippet") or "",
-                content,
-                doc.get("language") or "en",
-                doc.get("favicon_url"),
-                payload,
-                _content_hash(title, str(doc.get("snippet") or "")),
-                stamp,
-            ]
-
-            if upsert:
-                statements.append((_UPSERT_DOCUMENT, common))
-                outcome["replaced" if already_present else "inserted"] += 1
-            else:
-                # `common` ends with updated_at (an upsert column); a plain insert
-                # carries last_checked_at and created_at instead.
-                statements.append((_INSERT_DOCUMENT, common[:-1] + [None, stamp]))
-                outcome["inserted"] += 1
-
-            if not already_present:
-                counts[domain] = counts.get(domain, 0) + 1
-
-        if statements:
-            try:
-                await client.batch(statements)
-            except Exception as exc:
-                raise DatabaseError(f"index write failed: {exc}") from exc
-        return outcome
-
-    async def update_document(
-        self,
-        url: str,
-        document: dict[str, Any],
-        *,
-        etag: str | None = None,
-        last_modified: str | None = None,
-    ) -> bool:
-        """Update an existing row in place. Returns False when there is no such row."""
-        key = normalise_url(url)
-        client = get_client()
-        stamp = _now()
-        title = str(document.get("title") or "").strip()
-        snippet = str(document.get("snippet") or "")
-        content = str(document.get("content") or "")
-
-        probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [key])
-        if not getattr(probe, "rows", ()):
-            return False
-
-        try:
-            await client.batch(
-                [
-                    (
-                        _UPDATE_DOCUMENT,
-                        [
-                            document.get("canonical_url") or key,
-                            document.get("domain") or "",
-                            root_domain(key),
-                            document.get("domain_class") or domain_class(key),
-                            title,
-                            snippet,
-                            content,
-                            document.get("language") or "en",
-                            document.get("favicon_url"),
-                            int(document.get("payload_bytes") or 0),
-                            _content_hash(title, snippet),
-                            etag,
-                            last_modified,
-                            stamp,
-                            stamp,
-                            key,
-                        ],
-                    ),
-                ]
-            )
-        except Exception as exc:
-            raise DatabaseError(f"index update failed: {exc}") from exc
-        return True
-
-    async def _fold_into_existing_root(
-        self,
-        client: Any,
-        root_url: str,
-        sections: list[dict[str, str]],
-    ) -> bool:
-        """Merge a sub-page's sitelinks into its domain root, if that root exists.
-
-        Returns True when the sub-page was absorbed (and must not be stored as a
-        row of its own).
-        """
-        try:
-            probe = await client.execute(
-                "SELECT sections_json, payload_bytes FROM documents WHERE url = ? LIMIT 1", [root_url]
-            )
-            rows = getattr(probe, "rows", ()) or ()
-        except Exception as exc:
-            logger.debug("root probe failed for %s: %s", root_url, exc)
-            return False
-
-        if not rows:
-            return False
-
-        current = _parse_sections(rows[0][0])
-        merged = merge_sections(current, sections, self.settings.sections_max)
-        if merged == current:
-            return True  # nothing new to add; still do not store a second row
-
-        try:
-            await client.execute(
-                """
-                UPDATE documents
-                SET sections_json = ?,
-                    payload_bytes = (
-                        SELECT LENGTH(CAST(COALESCE(url,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(canonical_url,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(domain,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(root_domain,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(domain_class,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(category,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(title,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(snippet,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(content,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(language,'') AS BLOB))
-                             + LENGTH(CAST(COALESCE(favicon_url,'') AS BLOB))
-                             + LENGTH(CAST(? AS BLOB))
-                    )
-                WHERE url = ?
-                """,
-                [json.dumps(merged, ensure_ascii=False, separators=(",", ":")), root_url],
-            )
-        except Exception as exc:
-            logger.warning("sections merge failed for %s: %s", root_url, exc)
-        return True
-
-    async def replace_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
-        """`INSERT OR REPLACE` into `documents`; the triggers keep FTS in sync."""
-        outcome = {"stored": 0, "not_indexable": 0, "over_budget": 0, "collapsed": 0}
-        if not documents:
-            return outcome
-
-        client = get_client()
-        stamp = _now()
-        statements: list[tuple[str, list[Any]]] = []
-
-        for doc in documents:
-            url = normalise_url(str(doc.get("url") or ""))
-            title = str(doc.get("title") or "").strip()
-            if not url or not title or not is_indexable(url):
-                outcome["not_indexable"] += 1
-                continue
-            payload = int(doc.get("payload_bytes") or 0)
-            if payload > self.settings.max_payload_bytes:
-                outcome["over_budget"] += 1
-                continue
-
-            statements.append(
-                (
-                    _REPLACE_DOCUMENT,
-                    [
-                        url,
-                        doc.get("canonical_url") or url,
-                        doc.get("domain") or "",
-                        root_domain(url),
-                        doc.get("domain_class") or domain_class(url),
-                        doc.get("category") or "web",
-                        doc.get("sections_json") or None,
-                        title,
-                        doc.get("snippet") or "",
-                        doc.get("content") or "",
-                        doc.get("language") or "en",
-                        doc.get("favicon_url"),
-                        payload,
-                        _content_hash(title, str(doc.get("snippet") or "")),
-                        stamp,
-                        stamp,
-                    ],
-                )
-            )
-            outcome["stored"] += 1
-
-        if statements:
-            try:
-                await client.batch(statements)
-            except Exception as exc:
-                raise DatabaseError(f"index replace failed: {exc}") from exc
-        return outcome
-
-    async def get_document(self, url: str) -> dict[str, Any] | None:
-        client = get_client()
-        result = await client.execute("SELECT * FROM documents WHERE url = ? LIMIT 1", [normalise_url(url)])
-        columns = tuple(getattr(result, "columns", ()) or ())
-        rows = getattr(result, "rows", ()) or ()
-        if not rows:
-            return None
-        return {name: rows[0][idx] for idx, name in enumerate(columns)}
-
-    # -- revalidation ---------------------------------------------------
-    async def stale_documents(self, limit: int = 10) -> list[dict[str, Any]]:
-        """Documents whose class TTL has expired, stalest first."""
-        client = get_client()
-        fetch_limit = max(limit * 5, 25)
-        result = await client.execute(
-            """
-            SELECT url, etag, last_modified, domain_class, last_checked_at, updated_at
-            FROM documents
-            ORDER BY COALESCE(last_checked_at, '1970-01-01') ASC
-            LIMIT ?
-            """,
-            [fetch_limit],
-        )
-        columns = tuple(getattr(result, "columns", ()) or ())
-        rows = getattr(result, "rows", ()) or ()
-
-        now = datetime.now(timezone.utc)
-        ttls = {
-            "news": timedelta(days=self.settings.news_ttl_days),
-            "government": timedelta(days=self.settings.government_ttl_days),
-            "static": timedelta(days=self.settings.static_ttl_days),
-        }
-        stale: list[dict[str, Any]] = []
-        for row in rows:
-            record = {name: row[idx] for idx, name in enumerate(columns)}
-            # Never revalidated ⇒ stale by definition; otherwise compare against
-            # the TTL for the document's domain class.
-            checked = self._parse(record.get("last_checked_at"))
-            ttl = ttls.get(str(record.get("domain_class") or "static"), ttls["static"])
-            if checked is None or now - checked >= ttl:
-                stale.append(record)
-            if len(stale) >= limit:
-                break
-        return stale
-
-    @staticmethod
-    def _parse(value: Any) -> datetime | None:
-        if not value:
-            return None
-        text = str(value)[:19]
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(text[: len(fmt) + 2].strip(), fmt).replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-        return None
-
-    # -- search ---------------------------------------------------------
-    async def search_local(self, query: str, limit: int | None = None) -> list[RankedDocument]:
-        """Query the FTS5 index. The only read the request path performs."""
-        match = build_match_query(query)
-        if not match:
-            return []
-
-        client = get_client()
-        capped = limit or self.settings.index_limit
-        try:
-            result = await client.execute(_SEARCH_FTS, [match, capped])
-        except Exception as exc:
-            logger.warning("index query failed for %r: %s", query, exc)
-            return []
-
-        columns = tuple(getattr(result, "columns", ()) or ())
-        rows: Iterable[Any] = getattr(result, "rows", ()) or ()
-        documents: list[RankedDocument] = []
-        for row in rows:
-            record = {name: row[idx] for idx, name in enumerate(columns)} if columns else {}
-            documents.append(
-                RankedDocument(
-                    url=str(record.get("url") or ""),
-                    title=str(record.get("title") or ""),
-                    snippet=str(record.get("snippet") or ""),
-                    language=str(record.get("language") or "en"),
-                    updated_at=str(record.get("updated_at") or "") or None,
-                    bm25=float(record.get("rank") or 0.0),
-                    favicon_url=str(record.get("favicon") or "") or None,
-                    sections=_parse_sections(record.get("sections_json")),
-                )
-            )
-
-        # bm25 ranks; this filter decides whether the hit is about the query at
-        # all. A rejected hit is not an error — it means the index cannot answer
-        # and the caller falls back.
-        relevant = [doc for doc in documents if passes_relevance(query, doc, self.settings)]
-        if len(relevant) != len(documents):
-            logger.debug(
-                "index: %d of %d hits for %r rejected as weak matches",
-                len(documents) - len(relevant),
-                len(documents),
-                query,
-            )
-        return rank_documents(relevant, freshness_weight=self.settings.freshness_weight)
-
-    async def suggest(self, query: str, limit: int = 8) -> list[str]:
-        """OpenSearch autocomplete: matching document titles, deduplicated.
-
-        Falls back to a prefix match when the strict MATCH finds nothing, so a
-        half-typed word still returns something useful.
-        """
-        tokens = _SAFE_TOKEN.findall(query or "")
-        if not tokens:
-            return []
-
-        client = get_client()
-        attempts = [build_match_query(query), f'"{tokens[-1]}"*' if tokens else ""]
-        seen: set[str] = set()
-        suggestions: list[str] = []
-
-        for match in attempts:
-            if not match:
-                continue
-            try:
-                result = await client.execute(_SUGGEST_FTS, [match, max(limit * 2, 12)])
-            except Exception as exc:
-                logger.warning("suggest query failed for %r: %s", query, exc)
-                continue
-            for row in getattr(result, "rows", ()) or ():
-                title = str(row[0] or "").strip()
-                key = title.lower()
-                if not title or key in seen:
-                    continue
-                seen.add(key)
-                suggestions.append(title[:80])
-                if len(suggestions) >= limit:
-                    return suggestions
-        return suggestions
-
-    async def count_documents(self) -> int:
-        client = get_client()
-        result = await client.execute("SELECT COUNT(*) AS n FROM documents")
-        rows = getattr(result, "rows", ()) or ()
-        return int(rows[0][0]) if rows else 0
-
-    async def max_payload_bytes(self) -> int:
-        client = get_client()
-        result = await client.execute("SELECT COALESCE(MAX(payload_bytes), 0) FROM documents")
-        rows = getattr(result, "rows", ()) or ()
-        return int(rows[0][0]) if rows else 0
-
-    async def domain_counts(self) -> dict[str, int]:
-        client = get_client()
-        result = await client.execute("SELECT root_domain, COUNT(*) FROM documents GROUP BY root_domain")
-        return {str(row[0] or ""): int(row[1]) for row in getattr(result, "rows", ()) or ()}
-
-    # -- crawler backlog ------------------------------------------------
-    async def enqueue_backlog(self, query: str, hits: int) -> None:
-        cleaned = (query or "").strip().lower()
-        if not cleaned:
-            return
-        client = get_client()
-        try:
-            await client.execute(
-                """
-                INSERT INTO crawl_backlog (query, hits, status, created_at)
-                VALUES (?, ?, 'pending', ?)
-                ON CONFLICT(query) DO UPDATE SET
-                    hits = crawl_backlog.hits + 1,
-                    status = 'pending'
-                """,
-                [cleaned, max(0, hits), _now()],
-            )
-        except Exception as exc:
-            logger.warning("backlog enqueue failed for %r: %s", query, exc)
-
-    async def pending_backlog(self, limit: int = 20) -> list[str]:
-        client = get_client()
-        result = await client.execute(
-            "SELECT query FROM crawl_backlog WHERE status = 'pending' ORDER BY hits DESC, created_at ASC LIMIT ?",
-            [limit],
-        )
-        return [str(row[0]) for row in getattr(result, "rows", ()) or ()]
-
-    async def recently_queued(self, query: str, within_minutes: int = 10) -> bool:
-        """True when we already tried live for this query and queued it recently.
-
-        Stops a hopeless query from hammering the providers on every retry; the
-        crawler owns it from here.
-        """
-        cleaned = (query or "").strip().lower()
-        if not cleaned:
-            return False
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max(1, within_minutes))).strftime("%Y-%m-%d %H:%M:%S")
-        client = get_client()
-        try:
-            result = await client.execute(
-                "SELECT 1 FROM crawl_backlog WHERE query = ? AND status = 'pending' AND created_at >= ? LIMIT 1",
-                [cleaned, cutoff],
-            )
-            return bool(getattr(result, "rows", ()))
-        except Exception as exc:
-            logger.debug("backlog probe failed for %r: %s", query, exc)
-            return False
-
-    async def mark_backlog_processed(self, query: str) -> None:
-        client = get_client()
-        await client.execute(
-            "UPDATE crawl_backlog SET status = 'processed', processed_at = ? WHERE query = ?",
-            [_now(), query.strip().lower()],
-        )
-
-    async def enqueue_urls(self, urls: Iterable[str], reason: str) -> int:
-        client = get_client()
-        statements: list[tuple[str, list[Any]]] = []
-        for url in urls:
-            normalised = normalise_url(url)
-            if not normalised or not is_indexable(normalised):
-                continue
-            statements.append(
-                (
-                    """
-                    INSERT INTO crawl_queue (url, domain, depth, reason, status, created_at)
-                    VALUES (?, ?, 0, ?, 'pending', ?)
-                    ON CONFLICT(url) DO NOTHING
-                    """,
-                    [normalised, root_domain(normalised), reason, _now()],
-                )
-            )
-        if not statements:
-            return 0
-        await client.batch(statements)
-        return len(statements)
-
-    async def stats(self) -> dict[str, int]:
-        """Index health, surfaced on /health."""
-        try:
-            documents = await self.count_documents()
-            client = get_client()
-            backlog = await client.execute("SELECT COUNT(*) FROM crawl_backlog WHERE status = 'pending'")
-            rows = getattr(backlog, "rows", ()) or ()
-            pending = int(rows[0][0]) if rows else 0
-            return {
-                "documents": documents,
-                "backlog": pending,
-                "max_payload_bytes": await self.max_payload_bytes(),
-            }
-        except Exception as exc:
-            logger.warning("index stats unavailable: %s", exc)
-            return {"documents": 0, "backlog": 0, "max_payload_bytes": 0}
-
-
-_store: IndexStore | None = None
-
-
-def get_store(settings: EngineSettings | None = None) -> IndexStore:
-    global _store
-    if _store is None:
-        _store = IndexStore(settings)
-    return _store
-
-
 __all__ = [
     "IndexStore",
     "get_store",
     "build_match_query",
     "passes_relevance",
     "query_tokens",
+    "domain_root_url",
+    "merge_sections",
 ]
