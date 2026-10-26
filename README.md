@@ -353,6 +353,13 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Driver responses are never trusted.** Every statement goes through
+`execute_safe()` (`app/database.py`), which normalises whatever the LibSQL driver
+returns — `{"result": {...}}`, a bare `{"rows": ...}`, or an object with
+`.rows` — and retries once when a response arrives without its `result` key,
+because that used to surface as `KeyError: 'result'` inside the backlog worker
+and lose the query.
+
 ### Continuous discovery
 
 Every page the crawler reads is also mined for outbound links. A host joins the
@@ -374,10 +381,11 @@ storing one root page plus at most five sitelinks per domain with
 `INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates.
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
-the index is under `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
 `DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
-`run_autonomous_seed_crawl()` with `asyncio.create_task` — the port binds and
-`/health` answers in milliseconds while the crawl runs behind it. The same
+`run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
+missing seeds** so repeated boots make progress instead of repeating work. The
+port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
 function wakes every `SEED_CRAWL_INTERVAL_SECONDS` (24 h) to re-verify the seeds
 and pick up new authoritative links, and it never raises out of the loop: a dead
 domain is logged and skipped, and the pass carries on.
@@ -690,6 +698,13 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Driver responses are never trusted.** Every statement goes through
+`execute_safe()` (`app/database.py`), which normalises whatever the LibSQL driver
+returns — `{"result": {...}}`, a bare `{"rows": ...}`, or an object with
+`.rows` — and retries once when a response arrives without its `result` key,
+because that used to surface as `KeyError: 'result'` inside the backlog worker
+and lose the query.
+
 ### Continuous discovery
 
 Every page the crawler reads is also mined for outbound links. A host joins the
@@ -711,10 +726,11 @@ storing one root page plus at most five sitelinks per domain with
 `INSERT OR REPLACE` so a re-crawl refreshes rather than duplicates.
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
-the index is under `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
 `DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
-`run_autonomous_seed_crawl()` with `asyncio.create_task` — the port binds and
-`/health` answers in milliseconds while the crawl runs behind it. The same
+`run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
+missing seeds** so repeated boots make progress instead of repeating work. The
+port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
 function wakes every `SEED_CRAWL_INTERVAL_SECONDS` (24 h) to re-verify the seeds
 and pick up new authoritative links, and it never raises out of the loop: a dead
 domain is logged and skipped, and the pass carries on.
@@ -836,7 +852,7 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
 `INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (86400),
-`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `DISCOVERY_BATCH_SIZE` (10),
+`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
 `DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000),
 `CRAWL_TIMEOUT_SECONDS` (5), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
