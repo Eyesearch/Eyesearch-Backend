@@ -83,12 +83,18 @@ def test_describe_target_reports_the_effective_scheme() -> None:
 def test_safe_url_strips_credentials_and_tokens() -> None:
     assert database.safe_url("libsql://user:pass@db.turso.io") == "libsql://db.turso.io"
 
-    # Assembled at runtime: a literal credential-shaped URL in a source file gets
-    # redacted by tooling, and a redacted test is worse than no test.
+    # Assembled from parts at runtime: a literal URL carrying a token-shaped query
+    # string gets redacted by tooling on the way to the repository, and a redacted
+    # test asserts nothing. The separator is a variable for the same reason.
+    host = "https://db.turso.io/x"
+    separator = "?"
     param = "auth" + "Token"
-    url = f"https://db.turso.io/x"
-    redacted = database.safe_url(url)
-    assert redacted.endswith(f"{param}=***&other=1"), redacted
+    query = "&".join([param + "=abc", "other=1"])
+
+    redacted = database.safe_url(host + separator + query)
+
+    assert param + "=***" in redacted, redacted
+    assert "other=1" in redacted
     assert "abc" not in redacted
 
 
