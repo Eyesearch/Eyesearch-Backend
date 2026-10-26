@@ -106,6 +106,40 @@ The gateway is no longer only a proxy. `app/engine/`, `app/crawler/` and
 `app/indexer/` add a proprietary index that answers queries before any external
 provider is touched.
 
+### Storage budget: 2 KB per page, enforced
+
+The index stores answers, not copies. A row is capped at
+`INDEX_MAX_PAYLOAD_BYTES` (2048 by default) and holds only:
+
+| field | limit |
+| --- | --- |
+| `title` | ≤ 100 characters, cut at a word boundary |
+| `canonical_url` | normalised (no tracking, no trailing slash, no hash) |
+| `snippet` | meta description, else the first ~200 clean characters |
+| `favicon` | absolute URL |
+| `language` | `en` / `kn` / `hi`, detected by script |
+| `content` | a short lead only, so FTS5 has text to match — ≤ 1200 chars |
+
+Markup, scripts, stylesheets, inline images, `data:` URIs, base64 blobs,
+tracking pixels and paragraph dumps are stripped before storage, and
+`ExtractedDocument.fit_to_budget()` trims content → snippet → title until the
+whole row fits. A real page comes out around 0.3–1 KB.
+
+### Deduplication and crawl scope
+
+- URLs are normalised through one function (`app/engine/urls.normalise_url`):
+  lowercase host, `www.` removed, `utm_*`/`ref`/`gclid`/`fbclid`/`source`/
+  `campaign` and friends dropped, query keys sorted, trailing slash and hash
+  removed. That normalised string is the primary key.
+- Ingestion **rejects** a URL that already exists — it does not overwrite. Only
+  revalidation updates a row, and it updates in place.
+- At most `INDEX_MAX_URLS_PER_DOMAIN` (12) URLs per registrable domain, counting
+  `.gov.in`/`.nic.in`/`.co.in` style suffixes as one unit.
+- `is_indexable()` keeps the index to entry portals: path depth ≤ 2, no
+  `/commit/`, `/pulls/`, `/issues`, `/blob/`, `/tree/`, `/search`, `/login`,
+  cart/checkout paths, pagination (`/page/2`, `?page=3`), long dynamic query
+  chains, repository `owner/repo` loops, and non-document extensions.
+
 **Schema** (applied at startup with the rest of the DDL):
 
 ```sql
@@ -135,17 +169,39 @@ higher-is-better, normalised across the result set, then blended with an
 exponential freshness decay (30-day half-life) and a small host-trust term that
 favours official and regional domains.
 
-**Routing** (`app/services/search_service.py`) — index first:
+**Routing** (`app/services/search_service.py`) — cache-first, and never live:
 
 ```
-documents_fts  →  (≥ INDEX_THRESHOLD hits)  →  serve as source: "index"
-              →  (sparse)  →  Turso cache  →  external providers  →  source: "live"
-                                        ↘  queue the query in crawl_backlog
+documents_fts  →  (≥ INDEX_THRESHOLD hits)  →  source: "index"
+              →  Turso result cache         →  source: "cache"
+              →  miss                       →  source: "queued", query added to crawl_backlog
 ```
+
+The request path performs **no external HTTP**. A miss returns immediately
+(measured 3–5 ms warm in the smoke test) with an empty result set and
+`source: "queued"`; the background crawler picks the query up. Set
+`LIVE_SEARCH_ENABLED=true` only as an emergency escape hatch — the smoke suite
+covers that path, the default is off.
 
 Every response now carries `source` (`index` | `cache` | `live`) and
 `index_hits`, so a client can tell whether the answer came from our own index.
 `/health` reports `index: {documents, backlog}`.
+
+**Stale-while-revalidate** (`app/indexer/revalidate.py`, loop in
+`app/indexer/scheduler.py`, started from the gateway lifespan):
+
+| domain class | recheck |
+| --- | --- |
+| news portals | every 1.5 days (`REVALIDATE_NEWS_DAYS`) |
+| `.gov.in`, `.nic.in`, ksrtc… | every 7 days (`REVALIDATE_GOV_DAYS`) |
+| static / reference | every 21 days (`REVALIDATE_STATIC_DAYS`) |
+
+Each recheck is a conditional GET with `If-None-Match` / `If-Modified-Since`.
+A 304 means **zero database writes** — no row update, no FTS rewrite; a changed
+page is re-extracted to the same 2 KB budget and UPDATEs the existing row in
+place, so a URL can never appear twice. Unchanged pages intentionally write
+nothing, so the worker keeps an in-memory cooldown to avoid re-fetching the same
+URL on the next pass.
 
 **Running the ingestion** (a scheduler can call the same functions):
 
@@ -154,10 +210,17 @@ python -m app.indexer.pipeline --stats                  # index health
 python -m app.indexer.pipeline --seeds                  # crawl + index the seed domains
 python -m app.indexer.pipeline --query "namma metro"    # crawl the seeds relevant to one query
 python -m app.indexer.pipeline --backlog                # crawl for the queries we could not answer
+python -m app.indexer.pipeline --revalidate             # one stale-while-revalidate pass
 ```
 
-Engine knobs (all optional): `INDEX_THRESHOLD` (default 3),
-`INDEX_FRESHNESS_WEIGHT` (0.25), `CRAWL_ENABLED` (true),
+Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
+`INDEX_FRESHNESS_WEIGHT` (0.25), `INDEX_MAX_PAYLOAD_BYTES` (2048),
+`INDEX_TITLE_MAX_CHARS` (100), `INDEX_SNIPPET_MAX_CHARS` (200),
+`INDEX_CONTENT_MAX_CHARS` (1200), `INDEX_MAX_URLS_PER_DOMAIN` (12),
+`INDEX_MAX_PATH_DEPTH` (2), `LIVE_SEARCH_ENABLED` (false),
+`REVALIDATE_ENABLED` (true), `REVALIDATE_INTERVAL_SECONDS` (3600),
+`REVALIDATE_NEWS_DAYS` (1.5), `REVALIDATE_GOV_DAYS` (7),
+`REVALIDATE_STATIC_DAYS` (21), `CRAWL_ENABLED` (true),
 `CRAWL_MAX_PAGES_PER_SEED` (20), `CRAWL_MAX_DEPTH` (1), `CRAWL_CONCURRENCY` (3),
 `CRAWL_DELAY_SECONDS` (1.0), `CRAWL_MAX_BYTES` (512000),
 `CRAWL_RESPECT_ROBOTS` (true), `INDEX_MAX_CONTENT_CHARS` (20000).
