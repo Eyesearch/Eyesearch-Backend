@@ -14,11 +14,13 @@ import logging
 import random
 
 from app.engine.config import EngineSettings, get_engine_settings
+from app.indexer.backlog_worker import run_backlog_once
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
 
 _task: asyncio.Task[None] | None = None
+_backlog_task: asyncio.Task[None] | None = None
 _cooldown: dict[str, int] = {}
 
 
@@ -54,6 +56,41 @@ def start(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
     return _task
 
 
+async def _backlog_loop(settings: EngineSettings) -> None:
+    """Resolve missed queries into indexed documents, off the request path."""
+    while True:
+        try:
+            await run_backlog_once(settings.backlog_batch_queries)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # a bad pass must not kill the worker
+            logger.warning("backlog pass failed: %s", exc)
+        await asyncio.sleep(max(60, settings.backlog_interval_seconds) + random.uniform(0, 30))
+
+
+def start_backlog_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
+    global _backlog_task
+    cfg = settings or get_engine_settings()
+    if not cfg.backlog_worker_enabled or _backlog_task is not None:
+        return _backlog_task
+    _backlog_task = asyncio.create_task(_backlog_loop(cfg), name="eyesearch-backlog")
+    logger.info("backlog worker started (every ~%ss)", cfg.backlog_interval_seconds)
+    return _backlog_task
+
+
+async def stop_backlog_worker() -> None:
+    global _backlog_task
+    if _backlog_task is None:
+        return
+    _backlog_task.cancel()
+    try:
+        await _backlog_task
+    except asyncio.CancelledError:
+        pass
+    _backlog_task = None
+    logger.info("backlog worker stopped")
+
+
 async def stop() -> None:
     global _task
     if _task is None:
@@ -67,4 +104,4 @@ async def stop() -> None:
     logger.info("revalidation worker stopped")
 
 
-__all__ = ["start", "stop", "run_once"]
+__all__ = ["start", "stop", "run_once", "start_backlog_worker", "stop_backlog_worker"]
