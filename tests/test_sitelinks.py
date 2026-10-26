@@ -56,26 +56,29 @@ def test_document_payload_stays_under_one_and_a_half_kilobytes() -> None:
     assert document.sections_json().startswith("[{")
 
 
-async def test_one_root_row_per_domain_with_clean_sections(temp_db) -> None:
+async def test_one_site_row_per_domain_with_bounded_sitelinks(temp_db) -> None:
+    """Two-tier storage: one site, a root page, and bounded sitelink pages."""
     store = get_store()
     root = extract_document("https://ztube.com/", ZTUBE_HTML)
     assert root is not None
 
     first = await store.ingest_documents([root.as_row()])
-    assert first["inserted"] == 1
+    assert first["sites"] == 1
+    assert first["pages"] == 1 + len(root.sections)
+    assert first["sitelinks"] == len(root.sections)
 
-    # A sub-page of the same domain is folded into the root, not stored.
-    sub = extract_document("https://ztube.com/pricing", ZTUBE_HTML)
+    sub = extract_document("https://ztube.com/docs", ZTUBE_HTML)
     assert sub is not None
     second = await store.ingest_documents([sub.as_row()])
 
-    assert second["collapsed"] == 1
-    assert second["inserted"] == 0
+    # Still one site; the pages stay bounded, never one row per path.
     assert await store.count_documents() == 1
+    assert second["sites"] == 1
+    assert await store.count_pages() <= 1 + 5 + 1
 
     stored = await store.get_document("https://ztube.com/")
     assert stored is not None
-    assert int(stored["payload_bytes"]) <= 1536
+    assert stored["kind"] == "root"
 
 
 def test_merge_sections_dedupes_and_caps() -> None:

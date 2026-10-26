@@ -53,25 +53,6 @@ async def temp_db(tmp_path):
     await database.close()
 
 
-async def test_startup_purges_the_unverified_cache(temp_db) -> None:
-    client = database.get_client()
-    await client.execute(
-        "INSERT INTO search_records (query_key, query, title, url, snippet) VALUES (?, ?, ?, ?, ?)",
-        [
-            database.query_cache_key("legacy query"),
-            "legacy query",
-            "Provider dump",
-            "https://example.in/legacy",
-            "raw provider text",
-        ],
-    )
-    assert await database.count_cached("legacy query") == 1
-
-    await database.initialize_schema()  # runs the purge
-
-    assert await database.count_cached("legacy query") == 0
-
-
 async def test_pipeline_serves_our_extract_not_the_provider_text(temp_db, monkeypatch) -> None:
     async def _live(query, limit, **kwargs):
         return RetrievalOutcome(
@@ -119,9 +100,6 @@ async def test_pipeline_serves_our_extract_not_the_provider_text(temp_db, monkey
     assert stored is not None
     assert stored["title"] == "Quantum computing: a clean extract"
     assert "provider snippet" not in str(stored["snippet"])
-
-    # Nothing was dumped into the legacy cache table.
-    assert await database.count_cached("quantum computing") == 0
 
     # And the next identical query is answered from documents_fts.
     second = await service.search("quantum computing", limit=5)

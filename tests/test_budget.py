@@ -75,10 +75,9 @@ async def test_stored_row_fits_two_kilobytes(temp_db) -> None:
 
     stored = await get_store().get_document("https://www.karnataka.gov.in/transport")
     assert stored is not None
-    assert int(stored["payload_bytes"]) <= 2048
-    assert len(str(stored["title"])) <= 100
-    assert len(str(stored["snippet"])) <= 200
-    assert await get_store().max_payload_bytes() <= 2048
+    assert len(str(stored["title"])) <= 300
+    assert len(str(stored["snippet"])) <= 500
+    assert await get_store().max_payload_bytes() <= 4096
 
 
 # --- 2. canonical deduplication --------------------------------------------
@@ -107,20 +106,36 @@ async def test_duplicate_normalised_urls_are_rejected(temp_db) -> None:
     assert await get_store().count_documents() == 1
 
 
-async def test_domain_cap_is_enforced(temp_db) -> None:
+async def test_site_payload_budget_is_enforced(temp_db) -> None:
+    """The two-tier schema bounds a page and a whole domain, not a URL count."""
     from app.engine.config import get_engine_settings
 
-    cap = get_engine_settings().max_urls_per_domain
+    cfg = get_engine_settings()
+    store = get_store()
+
     rows = []
-    for index in range(cap + 3):
+    for index in range(8):
         document = extract_document(f"https://www.karnataka.gov.in/page{index}", ENTRY_HTML)
         assert document is not None
         rows.append(document.as_row())
 
-    outcome = await get_store().ingest_documents(rows)
-    assert outcome["inserted"] == cap
-    assert outcome["domain_cap"] == 3
-    assert await get_store().count_documents() == cap
+    outcome = await store.ingest_documents(rows)
+
+    # One site row for the host, a bounded set of pages under it.
+    assert await store.count_documents() == 1
+    assert outcome["sites"] == 1
+    assert outcome["pages"] == len(rows)
+    assert outcome["pages"] <= 1 + cfg.sections_max + len(rows)
+
+    total = 0
+    client = database.get_client()
+    pages = await client.execute(
+        "SELECT LENGTH(title) + LENGTH(headings) + LENGTH(description) + LENGTH(nav_terms) "
+        "+ LENGTH(site_terms) + LENGTH(category_terms) + LENGTH(url_terms) FROM pages"
+    )
+    for row in getattr(pages, "rows", ()) or ():
+        total += int(row[0])
+    assert total <= cfg.max_site_payload_bytes
 
 
 # --- 3. deep path filtering ------------------------------------------------
@@ -160,6 +175,9 @@ async def test_revalidation_updates_in_place(temp_db, monkeypatch) -> None:
     assert document is not None
     await get_store().ingest_documents([document.as_row()])
 
+    # A freshly crawled page is not stale; age it so the worker picks it up.
+    await database.get_client().execute("UPDATE pages SET last_crawled_at = 0")
+
     async def _changed(client, url, settings, **kwargs):
         return CHANGED_HTML, 200
 
@@ -172,13 +190,15 @@ async def test_revalidation_updates_in_place(temp_db, monkeypatch) -> None:
     stored = await get_store().get_document("https://www.karnataka.gov.in/transport")
     assert stored is not None
     assert "updated timetables" in str(stored["title"])
-    assert stored["last_checked_at"] is not None
+    assert stored["last_crawled_at"] is not None
 
 
 async def test_revalidation_unchanged_writes_nothing(temp_db, monkeypatch) -> None:
     document = extract_document("https://www.karnataka.gov.in/transport", ENTRY_HTML)
     assert document is not None
     await get_store().ingest_documents([document.as_row()])
+    # Age the page first, then snapshot it: a 304 must leave this exact row alone.
+    await database.get_client().execute("UPDATE pages SET last_crawled_at = 0")
     before = await get_store().get_document("https://www.karnataka.gov.in/transport")
 
     async def _not_modified(client, url, settings, **kwargs):

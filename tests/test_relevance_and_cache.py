@@ -1,8 +1,8 @@
-"""Regression tests for the two bugs reported from production.
+"""Regression tests for the relevance bug reported from production.
 
-1. A query served another query's cached rows ("RCB" returning a Microsoft page
-   with `source: cache`).
-2. FTS5 matching a passing footer mention ("google" returning a cricket page).
+FTS5 matched a passing footer mention: "google" returned a cricket page. The
+result cache that once amplified the damage is gone with the two-tier schema,
+so only the matching behaviour is covered here.
 """
 
 from __future__ import annotations
@@ -52,74 +52,6 @@ async def temp_db(tmp_path):
 
 
 # --- 1. cache isolation ----------------------------------------------------
-
-def test_cache_key_is_a_hash_of_the_normalised_query() -> None:
-    key = database.query_cache_key
-    assert key("RCB") == key("  rcb  ") == key("rcb")
-    assert key("rcb") != key("google")
-    assert len(key("anything")) == 40
-    assert all(character in "0123456789abcdef" for character in key("anything"))
-
-
-async def test_a_query_never_sees_another_querys_cached_rows(temp_db) -> None:
-    await database.upsert_records(
-        "phone link pairing", [{"title": MS_TITLE, "url": MS_URL, "snippet": "Pair your phone."}]
-    )
-    await database.upsert_records(
-        "rcb", [{"title": RCB_TITLE, "url": RCB_URL, "snippet": "RCB squad news."}]
-    )
-
-    rcb_rows = await database.fetch_cached("RCB", 10)
-    assert [row["title"] for row in rcb_rows] == [RCB_TITLE]
-    assert all("microsoft" not in (row["url"] or "") for row in rcb_rows)
-
-    microsoft_rows = await database.fetch_cached("phone link pairing", 10)
-    assert [row["title"] for row in microsoft_rows] == [MS_TITLE]
-
-
-async def test_the_same_url_can_be_cached_under_two_queries(temp_db) -> None:
-    shared = {"title": "Shared page", "url": "https://example.in/shared", "snippet": "s"}
-    await database.upsert_records("alpha", [shared])
-    await database.upsert_records("beta", [shared])
-
-    assert await database.count_cached("alpha") == 1
-    assert await database.count_cached("beta") == 1
-    # Writing under "beta" must not move the row away from "alpha".
-    assert [row["url"] for row in await database.fetch_cached("alpha", 10)] == ["https://example.in/shared"]
-
-
-async def test_legacy_url_unique_table_is_rebuilt(temp_db) -> None:
-    client = database.get_client()
-    await client.execute("DROP TABLE IF EXISTS search_records")
-    await client.execute(
-        """
-        CREATE TABLE search_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query TEXT,
-            title TEXT,
-            url TEXT UNIQUE,
-            snippet TEXT,
-            poster_url TEXT,
-            source TEXT DEFAULT 'live_crawl',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    await client.execute(
-        "INSERT INTO search_records (query, title, url, snippet) VALUES (?, ?, ?, ?)",
-        ["rcb", MS_TITLE, MS_URL, "poisoned row"],
-    )
-
-    await database.initialize_schema()
-
-    info = await client.execute("PRAGMA table_info(search_records)")
-    columns = {str(row[1]) for row in (getattr(info, "rows", ()) or ())}
-    assert "query_key" in columns
-    # The poisoned row is gone with the old table, so the bad cache cannot serve it.
-    assert await database.fetch_cached("rcb", 10) == []
-
-
-# --- 2. FTS relevance ------------------------------------------------------
 
 def test_relevance_rejects_a_body_only_match() -> None:
     settings = EngineSettings()
