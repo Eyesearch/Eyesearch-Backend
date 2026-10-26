@@ -25,6 +25,7 @@ import httpx
 
 from app.crawler.crawler import RobotsCache, fetch_page, fetch_page_status
 from app.indexer.discovery import discover_domains, is_indian_authoritative
+from app.indexer.guard import storage_paused
 from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
 from app.database import execute_safe, get_client
@@ -222,6 +223,10 @@ async def run_seed_pass(
         logger.info("seed crawl disabled")
         return report
 
+    if await storage_paused(index, cfg):
+        report["paused"] = True
+        return report
+
     targets = seeds if seeds is not None else seeds_for(categories)
     if not targets:
         return report
@@ -328,6 +333,10 @@ async def run_discovery_pass(
     batch = max(1, batch_size or cfg.discovery_batch_size)
     report: dict[str, object] = {"batches": 0, "attempted": 0, "stored": 0, "skipped": 0, "ceiling": False}
 
+    if await storage_paused(index, cfg):
+        report["paused"] = True
+        return report
+
     sites = await index.count_documents()
     if sites >= cfg.max_indexed_sites:
         logger.info("discovery pass idle: %d sites at the ceiling of %d", sites, cfg.max_indexed_sites)
@@ -421,6 +430,10 @@ async def run_autonomous_seed_crawl(store: object | None = None) -> dict[str, ob
     its port and answers /health while this runs.
     """
     index = store or get_store()
+    if await storage_paused(index, get_engine_settings()):
+        logger.warning("autonomous crawl paused: storage safety threshold reached")
+        return {"skipped": True, "paused": True}
+
     try:
         state = await coverage(index)
     except Exception as exc:

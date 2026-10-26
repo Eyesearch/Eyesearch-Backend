@@ -92,6 +92,12 @@ async def _seed_loop(settings: EngineSettings) -> None:
             raise
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("seed pass failed: %s", exc)
+        from app.indexer.guard import storage_paused
+
+        if await storage_paused():
+            # Paused for storage: wake on the pause interval, not the crawl one.
+            await asyncio.sleep(max(600, settings.storage_pause_seconds))
+            continue
         await asyncio.sleep(max(600, settings.seed_crawl_interval_seconds) + random.uniform(0, 120))
 
 
@@ -131,6 +137,11 @@ async def _discovery_loop(settings: EngineSettings) -> None:
             raise
         except Exception as exc:
             logger.warning("discovery worker failed: %s", exc)
+        from app.indexer.guard import storage_paused
+
+        if await storage_paused():
+            await asyncio.sleep(max(300, settings.storage_pause_seconds))
+            continue
         await asyncio.sleep(max(30, settings.discovery_interval_seconds))
 
 
