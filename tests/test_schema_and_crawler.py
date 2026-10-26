@@ -181,15 +181,17 @@ def test_category_seeds_cover_every_category() -> None:
     for seed in seed_crawler.CATEGORY_SEEDS:
         by_category.setdefault(seed.category, []).append(seed.url)
 
-    # The five India-first categories from the brief, plus the two earlier ones.
-    assert {"government", "banking", "sports", "ecommerce", "education"} <= set(by_category)
-    assert set(seed_crawler.DEFAULT_CATEGORIES) == {
-        "government", "banking", "sports", "ecommerce", "education"
-    }
+    # The registry covers every Indian category the brief names.
+    assert {"government", "utilities", "education", "regulators", "services",
+            "banking", "sports", "ecommerce"} <= set(by_category)
+    assert len(seed_crawler.CATEGORY_SEEDS) >= 150
     assert all(len(urls) >= 3 for urls in by_category.values())
     assert any("rbi.org.in" in url for url in by_category["banking"])
     assert any("flipkart.com" in url for url in by_category["ecommerce"])
     assert any("iitb.ac.in" in url for url in by_category["education"])
+    assert any("sci.gov.in" in url for url in by_category["regulators"])
+    assert any("digilocker.gov.in" in url for url in by_category["services"])
+    assert any("bescom.co.in" in url for url in by_category["utilities"])
 
     assert any("iplt20.com" in url for url in by_category["sports"])
     assert any("bcci.tv" in url for url in by_category["sports"])
@@ -213,6 +215,10 @@ async def test_seed_pass_stores_documents_with_their_category(temp_db, monkeypat
         return html, 200
 
     monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    # Three seeds are enough to prove the pass; the registry has 200+.
+    monkeypatch.setattr(
+        seed_crawler, "seeds_for", lambda categories=None: seed_crawler.CATEGORY_SEEDS[:3]
+    )
 
     settings = EngineSettings(
         seed_crawl_enabled=True,
