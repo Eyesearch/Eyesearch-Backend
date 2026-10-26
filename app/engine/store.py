@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
-from app.database import get_client
+from app.database import execute_safe, get_client
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
 from app.engine.relevance import is_relevant
@@ -254,7 +254,7 @@ class IndexStore:
         site_ids: dict[str, int] = {}
         for host in hosts:
             try:
-                row = await client.execute("SELECT site_id FROM sites WHERE domain = ? LIMIT 1", [host])
+                row = await execute_safe("SELECT site_id FROM sites WHERE domain = ? LIMIT 1", [host])
                 rows = getattr(row, "rows", ()) or ()
                 if rows:
                     site_ids[host] = int(rows[0][0])
@@ -286,7 +286,7 @@ class IndexStore:
 
             existed = False
             try:
-                probe = await client.execute("SELECT 1 FROM pages WHERE url = ? LIMIT 1", [url])
+                probe = await execute_safe("SELECT 1 FROM pages WHERE url = ? LIMIT 1", [url])
                 existed = bool(getattr(probe, "rows", ()))
             except Exception as exc:
                 logger.debug("page probe failed for %s: %s", url, exc)
@@ -311,7 +311,7 @@ class IndexStore:
                     outcome["duplicate"] += 1
                     continue
                 try:
-                    existing_root = await client.execute(
+                    existing_root = await execute_safe(
                         "SELECT 1 FROM pages WHERE site_id = ? AND kind = 'root' LIMIT 1",
                         [site_id],
                     )
@@ -401,10 +401,9 @@ class IndexStore:
         if not match:
             return []
 
-        client = get_client()
         capped = max(limit or self.settings.index_limit, 1)
         try:
-            result = await client.execute(_SEARCH_SQL, [match, min(capped * 5, 50)])
+            result = await execute_safe(_SEARCH_SQL, [match, min(capped * 5, 50)])
         except Exception as exc:
             logger.warning("index query failed for %r: %s", query, exc)
             return []
@@ -439,7 +438,7 @@ class IndexStore:
         documents: list[RankedDocument] = []
         for site_id, matched in best.items():
             try:
-                pages = await client.execute(
+                pages = await execute_safe(
                     "SELECT url, kind, title, description, last_crawled_at FROM pages "
                     "WHERE site_id = ? AND http_status = 200 AND noindex = 0 "
                     "ORDER BY CASE kind WHEN 'root' THEN 0 ELSE 1 END, page_id LIMIT 12",
@@ -494,7 +493,7 @@ class IndexStore:
             if not match:
                 continue
             try:
-                result = await client.execute(_SUGGEST_SQL, [match, max(limit * 2, 12)])
+                result = await execute_safe(_SUGGEST_SQL, [match, max(limit * 2, 12)])
             except Exception as exc:
                 logger.warning("suggest query failed for %r: %s", query, exc)
                 continue
@@ -513,7 +512,7 @@ class IndexStore:
         client = get_client()
         key = normalise_url(url)
         try:
-            result = await client.execute(
+            result = await execute_safe(
                 "SELECT page_id, site_id, url, kind, title, description, canonical_url, "
                 "content_hash, last_crawled_at FROM pages WHERE url = ? LIMIT 1",
                 [key],
@@ -527,7 +526,7 @@ class IndexStore:
         page_id, site_id, page_url, kind, title, description, canonical, content_hash, crawled = rows[0]
         site = None
         try:
-            site_row = await client.execute(
+            site_row = await execute_safe(
                 "SELECT domain, name, category FROM sites WHERE site_id = ? LIMIT 1", [int(site_id)]
             )
             site_rows = getattr(site_row, "rows", ()) or ()
@@ -555,19 +554,19 @@ class IndexStore:
     async def count_documents(self) -> int:
         """Sites in the index (one card per site)."""
         client = get_client()
-        result = await client.execute("SELECT COUNT(*) FROM sites")
+        result = await execute_safe("SELECT COUNT(*) FROM sites")
         rows = getattr(result, "rows", ()) or ()
         return int(rows[0][0]) if rows else 0
 
     async def count_pages(self) -> int:
         client = get_client()
-        result = await client.execute("SELECT COUNT(*) FROM pages")
+        result = await execute_safe("SELECT COUNT(*) FROM pages")
         rows = getattr(result, "rows", ()) or ()
         return int(rows[0][0]) if rows else 0
 
     async def max_payload_bytes(self) -> int:
         client = get_client()
-        result = await client.execute(
+        result = await execute_safe(
             "SELECT COALESCE(MAX(LENGTH(title) + LENGTH(headings) + LENGTH(description) "
             "+ LENGTH(nav_terms) + LENGTH(site_terms) + LENGTH(category_terms) + LENGTH(url_terms)), 0) "
             "FROM pages"
@@ -577,7 +576,7 @@ class IndexStore:
 
     async def domain_counts(self) -> dict[str, int]:
         client = get_client()
-        result = await client.execute("SELECT domain, COUNT(*) FROM sites GROUP BY domain")
+        result = await execute_safe("SELECT domain, COUNT(*) FROM sites GROUP BY domain")
         return {str(row[0] or ""): int(row[1]) for row in getattr(result, "rows", ()) or ()}
 
     async def stats(self) -> dict[str, int]:
@@ -585,7 +584,7 @@ class IndexStore:
             sites = await self.count_documents()
             pages = await self.count_pages()
             client = get_client()
-            backlog = await client.execute("SELECT COUNT(*) FROM crawl_backlog WHERE status = 'pending'")
+            backlog = await execute_safe("SELECT COUNT(*) FROM crawl_backlog WHERE status = 'pending'")
             rows = getattr(backlog, "rows", ()) or ()
             pending = int(rows[0][0]) if rows else 0
             return {
@@ -602,7 +601,7 @@ class IndexStore:
     # -- revalidation ---------------------------------------------------
     async def stale_documents(self, limit: int = 10) -> list[dict[str, Any]]:
         client = get_client()
-        result = await client.execute(
+        result = await execute_safe(
             "SELECT p.url, s.domain, s.category, p.last_crawled_at FROM pages p "
             "JOIN sites s ON s.site_id = p.site_id "
             "ORDER BY COALESCE(p.last_crawled_at, 0) ASC LIMIT ?",
@@ -642,13 +641,13 @@ class IndexStore:
         """Refresh one page in place (revalidation)."""
         key = normalise_url(url)
         client = get_client()
-        probe = await client.execute("SELECT page_id FROM pages WHERE url = ? LIMIT 1", [key])
+        probe = await execute_safe("SELECT page_id FROM pages WHERE url = ? LIMIT 1", [key])
         rows = getattr(probe, "rows", ()) or ()
         if not rows:
             return False
 
         try:
-            await client.execute(
+            await execute_safe(
                 "UPDATE pages SET title = ?, description = ?, headings = ?, nav_terms = ?, "
                 "content_hash = ?, last_crawled_at = ? WHERE url = ?",
                 [
@@ -672,7 +671,7 @@ class IndexStore:
             return
         client = get_client()
         try:
-            await client.execute(
+            await execute_safe(
                 """
                 INSERT INTO crawl_backlog (query, kind, hits, status, created_at)
                 VALUES (?, 'query', ?, 'pending', CURRENT_TIMESTAMP)
@@ -692,7 +691,7 @@ class IndexStore:
         ).strftime("%Y-%m-%d %H:%M:%S")
         client = get_client()
         try:
-            result = await client.execute(
+            result = await execute_safe(
                 "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'query' "
                 "AND status = 'pending' AND created_at >= ? LIMIT 1",
                 [cleaned, cutoff],
@@ -704,7 +703,7 @@ class IndexStore:
 
     async def pending_backlog(self, limit: int = 20) -> list[str]:
         client = get_client()
-        result = await client.execute(
+        result = await execute_safe(
             "SELECT query FROM crawl_backlog WHERE status = 'pending' AND kind = 'query' "
             "ORDER BY hits DESC, created_at ASC LIMIT ?",
             [limit],
@@ -713,7 +712,7 @@ class IndexStore:
 
     async def mark_backlog_processed(self, query: str) -> None:
         client = get_client()
-        await client.execute(
+        await execute_safe(
             "UPDATE crawl_backlog SET status = 'processed', processed_at = CURRENT_TIMESTAMP "
             "WHERE query = ? AND kind = 'query'",
             [query.strip().lower()],
@@ -726,7 +725,7 @@ class IndexStore:
             return False
         client = get_client()
         try:
-            row = await client.execute("SELECT 1 FROM sites WHERE domain = ? LIMIT 1", [cleaned])
+            row = await execute_safe("SELECT 1 FROM sites WHERE domain = ? LIMIT 1", [cleaned])
             return bool(getattr(row, "rows", ()))
         except Exception as exc:
             logger.debug("site probe failed for %s: %s", cleaned, exc)
@@ -739,12 +738,12 @@ class IndexStore:
             return False
         client = get_client()
         try:
-            existing = await client.execute(
+            existing = await execute_safe(
                 "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'domain' LIMIT 1", [cleaned]
             )
             if getattr(existing, "rows", ()):
                 return False
-            await client.execute(
+            await execute_safe(
                 "INSERT INTO crawl_backlog (query, kind, reason, hits, status, created_at) "
                 "VALUES (?, 'domain', ?, 0, 'pending', CURRENT_TIMESTAMP)",
                 [cleaned, reason],
@@ -756,7 +755,7 @@ class IndexStore:
 
     async def pending_domains(self, limit: int = 10) -> list[str]:
         client = get_client()
-        result = await client.execute(
+        result = await execute_safe(
             "SELECT query FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending' "
             "ORDER BY created_at ASC LIMIT ?",
             [max(1, limit)],
@@ -765,7 +764,7 @@ class IndexStore:
 
     async def mark_domain_processed(self, host: str, *, status: str = "processed") -> None:
         client = get_client()
-        await client.execute(
+        await execute_safe(
             "UPDATE crawl_backlog SET status = ?, processed_at = CURRENT_TIMESTAMP "
             "WHERE query = ? AND kind = 'domain'",
             [status, (host or "").strip().lower().removeprefix("www.")],
@@ -773,7 +772,7 @@ class IndexStore:
 
     async def pending_domain_count(self) -> int:
         client = get_client()
-        result = await client.execute(
+        result = await execute_safe(
             "SELECT COUNT(*) FROM crawl_backlog WHERE kind = 'domain' AND status = 'pending'"
         )
         rows = getattr(result, "rows", ()) or ()

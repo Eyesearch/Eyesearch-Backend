@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
@@ -211,6 +212,72 @@ async def _execute(
         raise DatabaseError(f"database query timed out after {budget}s") from exc
     except Exception as exc:
         raise DatabaseError(f"database query failed: {exc}") from exc
+
+
+@dataclass(slots=True)
+class SimpleResult:
+    """The shape callers rely on when a driver returns something unexpected."""
+
+    rows: tuple[Any, ...] = ()
+    columns: tuple[str, ...] = ()
+
+
+def _normalise_result(result: Any) -> Any:
+    """Coerce a raw driver payload into an object with `.rows`/`.columns`.
+
+    LibSQL has returned `{"result": {...}}` in some builds and bare
+    `{"rows": ...}` in others; a response with neither key used to raise
+    `KeyError: 'result'` deep inside the driver. Anything unrecognised becomes
+    an empty result rather than an exception.
+    """
+    if result is None:
+        return SimpleResult()
+    if hasattr(result, "rows"):
+        return result
+    if isinstance(result, dict):
+        payload = result.get("result", result)
+        if isinstance(payload, dict):
+            rows = payload.get("rows") or payload.get("results") or ()
+            columns = payload.get("columns") or ()
+            return SimpleResult(rows=tuple(rows), columns=tuple(columns))
+        if isinstance(payload, (list, tuple)):
+            return SimpleResult(rows=tuple(payload))
+    return SimpleResult()
+
+
+async def execute_safe(
+    sql: str,
+    params: Sequence[Any] | None = None,
+    *,
+    timeout_s: float | None = None,
+    default: Any | None = None,
+) -> Any:
+    """Execute a statement and never surface a driver parsing KeyError.
+
+    A response missing its `result` key means "no rows" for our purposes: every
+    caller here either reads rows or ignores the return value. Real failures
+    (timeouts, network) still raise `DatabaseError`.
+    """
+    for attempt in (1, 2):
+        try:
+            return _normalise_result(await _execute(sql, params, timeout_s=timeout_s))
+        except DatabaseError as exc:
+            cause = exc.__cause__
+            parse_hiccup = isinstance(cause, KeyError) or "'result'" in str(exc)
+            if not parse_hiccup:
+                raise
+            if attempt == 1:
+                # A malformed response is usually transient: try once more before
+                # deciding the statement simply produced no rows.
+                await asyncio.sleep(0.05)
+                continue
+            logger.warning(
+                "libsql response without 'result' for %r — treating as no rows (%s)",
+                sql.strip().split("\n")[0][:70],
+                exc,
+            )
+            return default if default is not None else SimpleResult()
+    return default if default is not None else SimpleResult()
 
 
 async def _drop_legacy_index() -> None:
