@@ -102,6 +102,39 @@ Codes: `bad_request` (400), `not_found` (404), `rate_limited` (429),
 `provider_unavailable` (503), `database_error` (503), `internal` (500).
 `retryable` is a real judgement — it is `false` for `bad_request`.
 
+## Which database is this process actually using?
+
+A gateway that silently falls back to a local SQLite file looks healthy — search
+still answers from the live providers — while the cloud database records no
+reads and no writes. That failure mode is now impossible to miss:
+
+- **On startup** the gateway logs the target and proves it with a real query:
+
+  ```
+  Connected to Remote Turso DB: libsql://eyesearch-<org>.turso.io
+  database ready (remote): libsql://eyesearch-<org>.turso.io
+  index: 12 documents, 0 queued queries (libsql://eyesearch-<org>.turso.io)
+  ```
+
+  A local file logs a warning instead: `Connected to LOCAL SQLite: file:./local.db
+  — this is not the Turso cloud database`.
+
+- **`/health`** reports `db_target` (`remote:<url>` or `local:<path>`) next to
+  `db: up|down` and the index counters, so the deployment can be checked from
+  outside without opening the Turso dashboard.
+
+- **A remote URL without a token is refused**, with the fix in the message:
+  `TURSO_AUTH_TOKEN is required for the remote database libsql://…`.
+
+- **Production refuses to boot on a local file.** With `ENVIRONMENT=production`
+  and a `file:` URL the process exits with `refusing to start: … set
+  TURSO_DB_URL/TURSO_DATABASE_URL and TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true
+  if that is genuinely intended`. A database that is unreachable in production is
+  fatal for the same reason: booting anyway means every write is lost.
+
+Required environment on Render: `TURSO_DB_URL` (or `TURSO_DATABASE_URL`) =
+`libsql://<db>-<org>.turso.io`, and `TURSO_AUTH_TOKEN` = the database token.
+
 ## Consumer protocols
 
 One index, four ways in — each shaped for a different consumer:
@@ -259,7 +292,13 @@ documents_fts  →  any hit          →  source: "index"   (no outbound call, e
 ```
 
 The first query for a topic pays for one live fetch and its results are written
-straight into the index — title, URL and snippet, fitted to the same 2 KB budget,
+straight into the index **in the same request**, with an explicit log line:
+
+```
+Auto-ingested 3 documents for query: Github into Turso ({'duplicate': 0, ...})
+```
+
+ — title, URL and snippet, fitted to the same 2 KB budget,
 through the same dedupe and domain caps. Every later query for that topic is a
 `documents_fts` hit: no provider call, single-digit milliseconds.
 
