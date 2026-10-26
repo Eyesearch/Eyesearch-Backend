@@ -112,13 +112,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("index stats unavailable at startup: %s", exc)
 
-    if app.state.db_ready:
-        try:
-            purged = await database.purge_expired()
-            if purged:
-                logger.info("purged %d expired cache rows", purged)
-        except DatabaseError as exc:
-            logger.warning("cache purge skipped: %s", exc)
 
     search_service.configure(http_client, settings)
 

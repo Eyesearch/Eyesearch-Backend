@@ -175,7 +175,7 @@ async def run_seed_pass(
 
             if documents:
                 written = await index.replace_documents([document.as_row() for document in documents])
-                seed_report.stored = int(written.get("stored", 0))
+                seed_report.stored = int(written.get("pages", 0))
                 report["documents"] = int(report["documents"]) + len(documents)
                 report["stored"] = int(report["stored"]) + seed_report.stored
 
