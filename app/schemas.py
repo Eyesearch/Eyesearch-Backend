@@ -38,8 +38,10 @@ class SearchResponse(BaseModel):
     took_ms: int
     degraded: bool = Field(description="True when at least one provider failed.")
     cache_hit: bool = False
-    source: Literal["index", "cache", "live"] = Field(
-        default="live", description="Where these results came from."
+    source: Literal["index", "cache", "queued", "live"] = Field(
+        default="index",
+        description="index = our own FTS5 index, cache = result cache, "
+        "queued = nothing local yet and the query is queued for the crawler.",
     )
     index_hits: int = Field(default=0, description="Documents matched in the EyeSearch index.")
     providers: dict[str, int] = Field(default_factory=dict)
@@ -76,7 +78,7 @@ class RetrieveResponse(BaseModel):
     query: str
     format: Literal["json", "markdown"] = "json"
     degraded: bool = False
-    source: Literal["index", "cache", "live"] = "live"
+    source: Literal["index", "cache", "queued", "live"] = "index"
     index_hits: int = 0
     providers: dict[str, int] = Field(default_factory=dict)
     failed_providers: list[str] = Field(default_factory=list)

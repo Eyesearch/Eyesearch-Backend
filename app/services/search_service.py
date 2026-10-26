@@ -191,7 +191,16 @@ class SearchService:
             acquisition.source = "cache"
             return acquisition
 
-        # 2. live chain
+        # 2. The request path never calls an external provider. A local miss is
+        # queued for the crawler and answered immediately, which is what keeps
+        # the fast path at single-digit milliseconds.
+        if not engine.live_search_enabled:
+            _schedule_write(get_store().enqueue_backlog(normalized, local_hits))
+            acquisition.source = "queued"
+            acquisition.total_estimate = 0
+            return acquisition
+
+        # 2b. Emergency escape hatch only (LIVE_SEARCH_ENABLED=true).
         outcome: RetrievalOutcome = await live_retrieval.retrieve(
             normalized,
             limit,

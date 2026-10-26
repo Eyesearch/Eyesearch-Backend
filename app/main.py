@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from app import database
 from app.config import Settings, get_settings
 from app.errors import AppError, DatabaseError, error_envelope
+from app.indexer import scheduler as revalidate_scheduler
 from app.routes import health, retrieve, search
 from app.services import live_retrieval, search_service
 
@@ -86,9 +87,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     search_service.configure(http_client, settings)
 
+    # Stale-while-revalidate runs off the request path, one pass at a time.
+    revalidate_scheduler.start()
+
     try:
         yield
     finally:
+        await revalidate_scheduler.stop()
         await search_service.drain_background_writes()
         await http_client.aclose()
         await database.close()
