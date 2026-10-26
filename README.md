@@ -353,6 +353,30 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Startup proves the database is writable.** Before any crawling,
+`verify_database()` logs the exact integers Turso returns
+(`SELECT count(*) FROM sites = 71, pages = 214, page_fts = 214`), then inserts a
+sentinel row, reads it back and removes it. A read-only token, the wrong branch
+or a staging database fails here, loudly, instead of silently during a crawl —
+`GET /v1/stats` reports the same verdict as `"writable": true|false`. To run the
+check on its own:
+
+```bash
+python -m app.indexer.crawler --probe   # exits non-zero when the DB rejects writes
+```
+
+**Turso answers 200 OK even when a statement failed.** The pipeline client
+inspects every step in `results` and raises with the statement text
+(`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
+(statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
+write.
+
+**A fetched seed always persists a root.** When a seed's entry page answers 200
+but yields nothing extractable, the root record is built from the seed label or
+the hostname (`PSPCL - Punjab State Power Corporation Limited`) and committed —
+sitelinks are optional, the root domain is not. A 4xx/5xx response still yields
+nothing, because a blocked page is not evidence of a real one.
+
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
 `skipped: not_indexable`, `skipped: low_text_density`, `skipped: fetch_failed`,
@@ -735,6 +759,30 @@ national digital services — plus banking, sports, e-commerce and software.
 Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
+
+**Startup proves the database is writable.** Before any crawling,
+`verify_database()` logs the exact integers Turso returns
+(`SELECT count(*) FROM sites = 71, pages = 214, page_fts = 214`), then inserts a
+sentinel row, reads it back and removes it. A read-only token, the wrong branch
+or a staging database fails here, loudly, instead of silently during a crawl —
+`GET /v1/stats` reports the same verdict as `"writable": true|false`. To run the
+check on its own:
+
+```bash
+python -m app.indexer.crawler --probe   # exits non-zero when the DB rejects writes
+```
+
+**Turso answers 200 OK even when a statement failed.** The pipeline client
+inspects every step in `results` and raises with the statement text
+(`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
+(statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
+write.
+
+**A fetched seed always persists a root.** When a seed's entry page answers 200
+but yields nothing extractable, the root record is built from the seed label or
+the hostname (`PSPCL - Punjab State Power Corporation Limited`) and committed —
+sitelinks are optional, the root domain is not. A 4xx/5xx response still yields
+nothing, because a blocked page is not evidence of a real one.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
