@@ -181,8 +181,15 @@ def test_category_seeds_cover_every_category() -> None:
     for seed in seed_crawler.CATEGORY_SEEDS:
         by_category.setdefault(seed.category, []).append(seed.url)
 
-    assert set(by_category) == {"government", "sports", "software", "knowledge"}
+    # The five India-first categories from the brief, plus the two earlier ones.
+    assert {"government", "banking", "sports", "ecommerce", "education"} <= set(by_category)
+    assert set(seed_crawler.DEFAULT_CATEGORIES) == {
+        "government", "banking", "sports", "ecommerce", "education"
+    }
     assert all(len(urls) >= 3 for urls in by_category.values())
+    assert any("rbi.org.in" in url for url in by_category["banking"])
+    assert any("flipkart.com" in url for url in by_category["ecommerce"])
+    assert any("iitb.ac.in" in url for url in by_category["education"])
 
     assert any("iplt20.com" in url for url in by_category["sports"])
     assert any("bcci.tv" in url for url in by_category["sports"])

@@ -121,11 +121,11 @@ async def test_site_payload_budget_is_enforced(temp_db) -> None:
 
     outcome = await store.ingest_documents(rows)
 
-    # One site row for the host, a bounded set of pages under it.
+    # One site row for the host, one root, and at most `sections_max` sitelinks.
     assert await store.count_documents() == 1
     assert outcome["sites"] == 1
-    assert outcome["pages"] == len(rows)
-    assert outcome["pages"] <= 1 + cfg.sections_max + len(rows)
+    assert outcome["pages"] <= 1 + cfg.sections_max
+    assert outcome["domain_cap"] >= 1
 
     total = 0
     client = database.get_client()
