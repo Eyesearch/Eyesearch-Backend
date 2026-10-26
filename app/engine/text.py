@@ -1,9 +1,17 @@
-"""HTML → indexable document.
+"""HTML → a strictly bounded indexable document.
 
-Everything here is defensive: a page that is not HTML, has no title, or is
-nothing but navigation must degrade to a skipped document rather than an
-exception. The extractor is deliberately dependency-light — BeautifulSoup is
-already a gateway dependency.
+The index stores *answers*, not copies of pages. A row is capped at
+`INDEX_MAX_PAYLOAD_BYTES` (2 KB by default) and holds only:
+
+    title        ≤ 100 characters
+    canonical_url
+    snippet      meta description, or the first ~200 clean characters
+    favicon
+    language     detected from the script
+    content      a short lead, capped, only so FTS5 has something to match
+
+Everything else — markup, scripts, stylesheets, inline images, base64 data,
+tracking pixels and paragraph dumps — is stripped before it reaches storage.
 """
 
 from __future__ import annotations
@@ -16,11 +24,14 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from app.engine.config import get_engine_settings
+from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 
 _WS = re.compile(r"\s+")
 _KANNADA = re.compile(r"[\u0C80-\u0CFF]")
 _DEVANAGARI = re.compile(r"[\u0900-\u097F]")
-_BOILERPLATE_TAGS = ("script", "style", "noscript", "nav", "footer", "header", "form", "aside", "svg")
+_DATA_URI = re.compile(r"data:[^\s\"')]+", re.I)
+_BASE64_BLOB = re.compile(r"[A-Za-z0-9+/]{120,}={0,2}")
+_BOILERPLATE_TAGS = ("script", "style", "noscript", "nav", "footer", "header", "form", "aside", "svg", "iframe", "img", "picture", "video", "audio", "canvas")
 
 # Elements that usually carry the article body, in preference order.
 _CONTENT_SELECTORS = ("article", "main", '[role="main"]', "#content", ".content", "#main", ".post")
@@ -31,27 +42,65 @@ class ExtractedDocument:
     url: str
     canonical_url: str
     domain: str
+    root_domain: str
+    domain_class: str
     title: str
     snippet: str
     content: str
     language: str
     favicon_url: str | None
 
+    def payload_bytes(self) -> int:
+        """UTF-8 size of what will actually be stored for this page."""
+        fields = (
+            self.url, self.canonical_url, self.domain, self.root_domain,
+            self.domain_class, self.title, self.snippet, self.content,
+            self.language, self.favicon_url or "",
+        )
+        return sum(len(field.encode("utf-8")) for field in fields)
+
+    def fit_to_budget(self, max_bytes: int | None = None) -> "ExtractedDocument":
+        """Trim content, then snippet, then title until the row fits the budget."""
+        budget = max_bytes or get_engine_settings().max_payload_bytes
+
+        while self.payload_bytes() > budget and self.content:
+            overflow = self.payload_bytes() - budget
+            keep = max(0, len(self.content.encode("utf-8")) - max(overflow + 64, 128))
+            self.content = self.content.encode("utf-8")[:keep].decode("utf-8", "ignore").rstrip()
+
+        while self.payload_bytes() > budget and self.snippet:
+            self.snippet = self.snippet[:-32].rstrip()
+
+        while self.payload_bytes() > budget and self.title:
+            self.title = self.title[:-8].rstrip()
+
+        return self
+
     def as_row(self) -> dict[str, object]:
         return {
             "url": self.url,
             "canonical_url": self.canonical_url,
             "domain": self.domain,
+            "root_domain": self.root_domain,
+            "domain_class": self.domain_class,
             "title": self.title,
             "snippet": self.snippet,
             "content": self.content,
             "language": self.language,
             "favicon_url": self.favicon_url,
+            "payload_bytes": self.payload_bytes(),
         }
 
 
 def normalise_whitespace(text: str) -> str:
     return _WS.sub(" ", (text or "")).strip()
+
+
+def strip_artefacts(text: str) -> str:
+    """Remove data URIs, base64 blobs and tracking-pixel leftovers from text."""
+    cleaned = _DATA_URI.sub(" ", text or "")
+    cleaned = _BASE64_BLOB.sub(" ", cleaned)
+    return normalise_whitespace(cleaned)
 
 
 def detect_language(text: str) -> str:
@@ -66,51 +115,57 @@ def detect_language(text: str) -> str:
     return "en"
 
 
+def truncate(text: str, limit: int) -> str:
+    """Cut at a word boundary, never mid-word, and never over `limit` characters."""
+    value = normalise_whitespace(text)
+    if len(value) <= limit:
+        return value
+    window = value[:limit]
+    cut = window.rfind(" ")
+    if cut >= limit // 2:
+        window = window[:cut]
+    return window.rstrip(" ,;:-–—") + "…"
+
+
 def canonicalise(url: str, base: str | None = None) -> str:
-    """Resolve relative links and strip fragments/tracking parameters."""
+    """Resolve relative links, then apply the strict normalisation rules."""
     absolute = urljoin(base, url) if base else url
-    parsed = urlparse(absolute)
-    host = parsed.netloc.lower().removeprefix("www.")
-    query_parts = [
-        part
-        for part in parsed.query.split("&")
-        if part and not part.lower().startswith(("utm_", "fbclid", "gclid", "ref="))
-    ]
-    path = parsed.path.rstrip("/") or "/"
-    query = f"?{'&'.join(query_parts)}" if query_parts else ""
-    return f"{parsed.scheme or 'https'}://{host}{path}{query}"
+    return normalise_url(absolute)
 
 
 def _body_text(soup: BeautifulSoup) -> str:
     for tag in soup(_BOILERPLATE_TAGS):
         tag.decompose()
 
-    best: str = ""
+    best = ""
     for selector in _CONTENT_SELECTORS:
         node = soup.select_one(selector)
         if node is not None:
-            candidate = normalise_whitespace(node.get_text(" ", strip=True))
+            candidate = strip_artefacts(node.get_text(" ", strip=True))
             if len(candidate) > len(best):
                 best = candidate
-    if len(best) < 200:
-        # Fall back to the whole document when the page has no semantic wrapper.
+    if len(best) < 120:
         body = soup.body or soup
-        best = normalise_whitespace(body.get_text(" ", strip=True))
+        best = strip_artefacts(body.get_text(" ", strip=True))
     return best
 
 
 def extract_document(url: str, html: str, *, http_status: int = 200) -> ExtractedDocument | None:
-    """Extract one document, or return None when the page is not worth indexing."""
+    """Extract one bounded document, or None when the page should not be indexed."""
     if not html or len(html.strip()) < 80:
+        return None
+    if not is_indexable(url):
         return None
 
     settings = get_engine_settings()
     soup = BeautifulSoup(html, "html.parser")
 
     title = normalise_whitespace(soup.title.get_text()) if soup.title else ""
-    h1 = soup.find("h1")
-    if not title and h1 is not None:
-        title = normalise_whitespace(h1.get_text(" ", strip=True))
+    if not title:
+        h1 = soup.find("h1")
+        if h1 is not None:
+            title = normalise_whitespace(h1.get_text(" ", strip=True))
+    title = truncate(strip_artefacts(title), settings.title_max_chars)
     if not title:
         return None
 
@@ -119,56 +174,58 @@ def extract_document(url: str, html: str, *, http_status: int = 200) -> Extracte
     if meta is None:
         meta = soup.find("meta", attrs={"property": re.compile("^og:description$", re.I)})
     if meta is not None:
-        description = normalise_whitespace(meta.get("content") or "")
-
-    canonical = ""
-    link = soup.find("link", attrs={"rel": re.compile("canonical", re.I)})
-    if link is not None:
-        canonical = normalise_whitespace(link.get("href") or "")
+        description = strip_artefacts(meta.get("content") or "")
 
     icon = ""
     icon_link = soup.find("link", attrs={"rel": re.compile("icon", re.I)})
     if icon_link is not None:
         icon = normalise_whitespace(icon_link.get("href") or "")
 
+    canonical = ""
+    canonical_link = soup.find("link", attrs={"rel": re.compile("canonical", re.I)})
+    if canonical_link is not None:
+        canonical = normalise_whitespace(canonical_link.get("href") or "")
+
     body = _body_text(soup)
-    if len(body) < 120:
+    if len(body) < 80 and not description:
         return None
 
-    canonical_url = canonicalise(canonical, url) if canonical else canonicalise(url)
+    canonical_url = canonicalise(canonical, url) if canonical else normalise_url(url)
     favicon = urljoin(url, icon) if icon else f"https://{urlparse(canonical_url).netloc}/favicon.ico"
 
-    snippet = description or body[: settings.max_snippet_chars]
-    if len(snippet) > settings.max_snippet_chars:
-        snippet = snippet[: settings.max_snippet_chars].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    snippet = description or truncate(body, settings.snippet_max_chars)
+    snippet = truncate(snippet, settings.snippet_max_chars)
 
-    return ExtractedDocument(
-        url=canonicalise(url),
+    document = ExtractedDocument(
+        url=normalise_url(url),
         canonical_url=canonical_url,
         domain=urlparse(canonical_url).netloc,
-        title=title[:300],
+        root_domain=root_domain(canonical_url),
+        domain_class=domain_class(canonical_url),
+        title=title,
         snippet=snippet,
-        content=body[: settings.max_content_chars],
+        content=truncate(body, settings.content_max_chars),
         language=detect_language(f"{title} {body}"),
         favicon_url=favicon,
     )
+    return document.fit_to_budget(settings.max_payload_bytes)
 
 
 def extract_links(html: str, base_url: str) -> Iterable[str]:
-    """Same-host http(s) links, canonicalised and de-duplicated, in page order."""
+    """Same-host, indexable links only — the crawl stays on entry portals."""
     soup = BeautifulSoup(html, "html.parser")
-    host = urlparse(base_url).netloc.removeprefix("www.")
+    host = urlparse(normalise_url(base_url)).netloc
     seen: set[str] = set()
     for anchor in soup.find_all("a", href=True):
         href = anchor["href"].strip()
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
-        absolute = canonicalise(urljoin(base_url, href))
-        if not absolute.startswith(("http://", "https://")):
+        absolute = canonicalise(href, base_url)
+        if not absolute.startswith("https://"):
             continue
-        if urlparse(absolute).netloc.removeprefix("www.") != host:
+        if urlparse(absolute).netloc != host:
             continue
-        if absolute in seen:
+        if absolute in seen or not is_indexable(absolute):
             continue
         seen.add(absolute)
         yield absolute
@@ -181,4 +238,6 @@ __all__ = [
     "canonicalise",
     "detect_language",
     "normalise_whitespace",
+    "strip_artefacts",
+    "truncate",
 ]

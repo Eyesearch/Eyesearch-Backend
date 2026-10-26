@@ -1,40 +1,43 @@
-"""Storage for the proprietary index: documents, FTS5 search, backlog, queue.
+"""Storage for the proprietary index: bounded documents, FTS5, backlog, queue.
 
-All access goes through the gateway's single shared libsql client, so the engine
-adds no connections and no new failure modes. Queries are parameterised; FTS
-input is sanitised because MATCH treats punctuation as syntax.
+Policy lives here, not in the crawler: ingestion rejects duplicates and
+over-cap domains, revalidation updates in place, and the request path only ever
+reads. All access goes through the gateway's single shared libsql client.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
 from app.database import get_client
 from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
-from app.engine.schema import ENGINE_SCHEMA
+from app.engine.schema import ENGINE_MIGRATIONS, ENGINE_SCHEMA
+from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 from app.errors import DatabaseError
 
 logger = logging.getLogger(__name__)
 
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9\u0900-\u097F\u0C80-\u0CFF]+")
 
-_UPSERT_DOCUMENT = """
+_INSERT_DOCUMENT = """
 INSERT INTO documents (
-    url, canonical_url, domain, title, snippet, content, language, favicon_url, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(url) DO UPDATE SET
-    canonical_url = excluded.canonical_url,
-    domain = excluded.domain,
-    title = excluded.title,
-    snippet = excluded.snippet,
-    content = excluded.content,
-    language = excluded.language,
-    favicon_url = excluded.favicon_url,
-    updated_at = excluded.updated_at
+    url, canonical_url, domain, root_domain, domain_class, title, snippet, content,
+    language, favicon_url, payload_bytes, content_hash, etag, last_modified,
+    last_checked_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_UPDATE_DOCUMENT = """
+UPDATE documents SET
+    canonical_url = ?, domain = ?, root_domain = ?, domain_class = ?, title = ?,
+    snippet = ?, content = ?, language = ?, favicon_url = ?, payload_bytes = ?,
+    content_hash = ?, etag = ?, last_modified = ?, last_checked_at = ?, updated_at = ?
+WHERE url = ?
 """
 
 _DELETE_FTS = "DELETE FROM documents_fts WHERE url = ?"
@@ -56,6 +59,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _content_hash(title: str, snippet: str) -> str:
+    digest = hashlib.sha256(f"{title}\n{snippet}".encode("utf-8")).hexdigest()
+    return digest[:32]
+
+
 def build_match_query(query: str) -> str:
     """Turn free text into a safe FTS5 MATCH expression.
 
@@ -72,7 +80,7 @@ def build_match_query(query: str) -> str:
 
 
 class IndexStore:
-    """Typed access to the index tables."""
+    """Typed access to the index tables, with the storage policy enforced."""
 
     def __init__(self, settings: EngineSettings | None = None) -> None:
         self.settings = settings or get_engine_settings()
@@ -83,55 +91,217 @@ class IndexStore:
             await client.batch(list(ENGINE_SCHEMA))
         except Exception as exc:
             raise DatabaseError(f"index schema initialisation failed: {exc}") from exc
+        await self._apply_migrations()
 
-    # -- documents ------------------------------------------------------
-    async def upsert_documents(self, documents: Sequence[dict[str, Any]]) -> int:
+    async def _apply_migrations(self) -> None:
+        """Add columns introduced after the first release (idempotent)."""
+        client = get_client()
+        for table, column_definition in ENGINE_MIGRATIONS:
+            try:
+                await client.execute(f"ALTER TABLE {table} ADD COLUMN {column_definition}")
+                logger.info("index migration applied: %s.%s", table, column_definition.split()[0])
+            except Exception:
+                # Already present — the only expected failure.
+                continue
+
+    # -- ingestion ------------------------------------------------------
+    async def ingest_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
+        """Insert new documents; reject duplicates, over-cap domains and oversize rows."""
+        outcome = {"inserted": 0, "duplicate": 0, "domain_cap": 0, "not_indexable": 0, "over_budget": 0}
         if not documents:
-            return 0
+            return outcome
+
         client = get_client()
         stamp = _now()
+
+        counts: dict[str, int] = {}
+        try:
+            existing = await client.execute("SELECT root_domain, COUNT(*) FROM documents GROUP BY root_domain")
+            for row in getattr(existing, "rows", ()) or ():
+                counts[str(row[0] or "")] = int(row[1])
+        except Exception as exc:
+            logger.warning("domain counts unavailable: %s", exc)
+
         statements: list[tuple[str, list[Any]]] = []
         for doc in documents:
-            url = str(doc.get("url") or "").strip()
+            url = normalise_url(str(doc.get("url") or ""))
             title = str(doc.get("title") or "").strip()
             if not url or not title:
+                outcome["not_indexable"] += 1
                 continue
+            if not is_indexable(url):
+                outcome["not_indexable"] += 1
+                continue
+
+            payload = int(doc.get("payload_bytes") or 0)
+            if payload > self.settings.max_payload_bytes:
+                outcome["over_budget"] += 1
+                continue
+
+            domain = root_domain(url)
+            if counts.get(domain, 0) >= self.settings.max_urls_per_domain:
+                outcome["domain_cap"] += 1
+                continue
+
+            # Reject, do not overwrite: revalidation is the only path that updates.
+            try:
+                probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [url])
+                if getattr(probe, "rows", ()):
+                    outcome["duplicate"] += 1
+                    continue
+            except Exception as exc:
+                logger.warning("duplicate probe failed for %s: %s", url, exc)
+
             content = str(doc.get("content") or "")
             statements.append(
                 (
-                    _UPSERT_DOCUMENT,
+                    _INSERT_DOCUMENT,
                     [
                         url,
                         doc.get("canonical_url") or url,
                         doc.get("domain") or "",
+                        domain,
+                        doc.get("domain_class") or domain_class(url),
                         title,
                         doc.get("snippet") or "",
                         content,
                         doc.get("language") or "en",
                         doc.get("favicon_url"),
+                        payload,
+                        _content_hash(title, str(doc.get("snippet") or "")),
+                        None,
+                        None,
+                        None,   # last_checked_at: a crawl is not a revalidation
                         stamp,
                     ],
                 )
             )
             statements.append((_DELETE_FTS, [url]))
             statements.append(
-                (
-                    _INSERT_FTS,
-                    [url, title, doc.get("snippet") or "", content, doc.get("language") or "en", stamp],
-                )
+                (_INSERT_FTS, [url, title, doc.get("snippet") or "", content, doc.get("language") or "en", stamp])
             )
+            counts[domain] = counts.get(domain, 0) + 1
+            outcome["inserted"] += 1
 
-        if not statements:
-            return 0
+        if statements:
+            try:
+                await client.batch(statements)
+            except Exception as exc:
+                raise DatabaseError(f"index write failed: {exc}") from exc
+        return outcome
+
+    async def update_document(
+        self,
+        url: str,
+        document: dict[str, Any],
+        *,
+        etag: str | None = None,
+        last_modified: str | None = None,
+    ) -> bool:
+        """Update an existing row in place. Returns False when there is no such row."""
+        key = normalise_url(url)
+        client = get_client()
+        stamp = _now()
+        title = str(document.get("title") or "").strip()
+        snippet = str(document.get("snippet") or "")
+        content = str(document.get("content") or "")
+
+        probe = await client.execute("SELECT 1 FROM documents WHERE url = ? LIMIT 1", [key])
+        if not getattr(probe, "rows", ()):
+            return False
+
         try:
-            await client.batch(statements)
+            await client.batch(
+                [
+                    (
+                        _UPDATE_DOCUMENT,
+                        [
+                            document.get("canonical_url") or key,
+                            document.get("domain") or "",
+                            root_domain(key),
+                            document.get("domain_class") or domain_class(key),
+                            title,
+                            snippet,
+                            content,
+                            document.get("language") or "en",
+                            document.get("favicon_url"),
+                            int(document.get("payload_bytes") or 0),
+                            _content_hash(title, snippet),
+                            etag,
+                            last_modified,
+                            stamp,
+                            stamp,
+                            key,
+                        ],
+                    ),
+                    (_DELETE_FTS, [key]),
+                    (_INSERT_FTS, [key, title, snippet, content, document.get("language") or "en", stamp]),
+                ]
+            )
         except Exception as exc:
-            raise DatabaseError(f"index write failed: {exc}") from exc
-        return len(documents)
+            raise DatabaseError(f"index update failed: {exc}") from exc
+        return True
+
+    async def get_document(self, url: str) -> dict[str, Any] | None:
+        client = get_client()
+        result = await client.execute("SELECT * FROM documents WHERE url = ? LIMIT 1", [normalise_url(url)])
+        columns = tuple(getattr(result, "columns", ()) or ())
+        rows = getattr(result, "rows", ()) or ()
+        if not rows:
+            return None
+        return {name: rows[0][idx] for idx, name in enumerate(columns)}
+
+    # -- revalidation ---------------------------------------------------
+    async def stale_documents(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Documents whose class TTL has expired, stalest first."""
+        client = get_client()
+        fetch_limit = max(limit * 5, 25)
+        result = await client.execute(
+            """
+            SELECT url, etag, last_modified, domain_class, last_checked_at, updated_at
+            FROM documents
+            ORDER BY COALESCE(last_checked_at, '1970-01-01') ASC
+            LIMIT ?
+            """,
+            [fetch_limit],
+        )
+        columns = tuple(getattr(result, "columns", ()) or ())
+        rows = getattr(result, "rows", ()) or ()
+
+        now = datetime.now(timezone.utc)
+        ttls = {
+            "news": timedelta(days=self.settings.news_ttl_days),
+            "government": timedelta(days=self.settings.government_ttl_days),
+            "static": timedelta(days=self.settings.static_ttl_days),
+        }
+        stale: list[dict[str, Any]] = []
+        for row in rows:
+            record = {name: row[idx] for idx, name in enumerate(columns)}
+            # Never revalidated ⇒ stale by definition; otherwise compare against
+            # the TTL for the document's domain class.
+            checked = self._parse(record.get("last_checked_at"))
+            ttl = ttls.get(str(record.get("domain_class") or "static"), ttls["static"])
+            if checked is None or now - checked >= ttl:
+                stale.append(record)
+            if len(stale) >= limit:
+                break
+        return stale
+
+    @staticmethod
+    def _parse(value: Any) -> datetime | None:
+        if not value:
+            return None
+        text = str(value)[:19]
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text[: len(fmt) + 2].strip(), fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+        return None
 
     # -- search ---------------------------------------------------------
     async def search_local(self, query: str, limit: int | None = None) -> list[RankedDocument]:
-        """Query the FTS5 index. Returns ranked documents, best first."""
+        """Query the FTS5 index. The only read the request path performs."""
         match = build_match_query(query)
         if not match:
             return []
@@ -141,7 +311,6 @@ class IndexStore:
         try:
             result = await client.execute(_SEARCH_FTS, [match, capped])
         except Exception as exc:
-            # A malformed MATCH is a miss, not a 500: fall back to the providers.
             logger.warning("index query failed for %r: %s", query, exc)
             return []
 
@@ -168,9 +337,19 @@ class IndexStore:
         rows = getattr(result, "rows", ()) or ()
         return int(rows[0][0]) if rows else 0
 
+    async def max_payload_bytes(self) -> int:
+        client = get_client()
+        result = await client.execute("SELECT COALESCE(MAX(payload_bytes), 0) FROM documents")
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def domain_counts(self) -> dict[str, int]:
+        client = get_client()
+        result = await client.execute("SELECT root_domain, COUNT(*) FROM documents GROUP BY root_domain")
+        return {str(row[0] or ""): int(row[1]) for row in getattr(result, "rows", ()) or ()}
+
     # -- crawler backlog ------------------------------------------------
     async def enqueue_backlog(self, query: str, hits: int) -> None:
-        """Record a query the index could not answer, so the crawler can target it."""
         cleaned = (query or "").strip().lower()
         if not cleaned:
             return
@@ -195,8 +374,7 @@ class IndexStore:
             "SELECT query FROM crawl_backlog WHERE status = 'pending' ORDER BY hits DESC, created_at ASC LIMIT ?",
             [limit],
         )
-        rows = getattr(result, "rows", ()) or ()
-        return [str(row[0]) for row in rows]
+        return [str(row[0]) for row in getattr(result, "rows", ()) or ()]
 
     async def mark_backlog_processed(self, query: str) -> None:
         client = get_client()
@@ -209,6 +387,9 @@ class IndexStore:
         client = get_client()
         statements: list[tuple[str, list[Any]]] = []
         for url in urls:
+            normalised = normalise_url(url)
+            if not normalised or not is_indexable(normalised):
+                continue
             statements.append(
                 (
                     """
@@ -216,7 +397,7 @@ class IndexStore:
                     VALUES (?, ?, 0, ?, 'pending', ?)
                     ON CONFLICT(url) DO NOTHING
                     """,
-                    [url, url.split("/")[2] if "://" in url and len(url.split("/")) > 2 else "", reason, _now()],
+                    [normalised, root_domain(normalised), reason, _now()],
                 )
             )
         if not statements:
@@ -224,7 +405,7 @@ class IndexStore:
         await client.batch(statements)
         return len(statements)
 
-    async def stats(self) -> dict[str, Any]:
+    async def stats(self) -> dict[str, int]:
         """Index health, surfaced on /health."""
         try:
             documents = await self.count_documents()
@@ -232,10 +413,14 @@ class IndexStore:
             backlog = await client.execute("SELECT COUNT(*) FROM crawl_backlog WHERE status = 'pending'")
             rows = getattr(backlog, "rows", ()) or ()
             pending = int(rows[0][0]) if rows else 0
-            return {"documents": documents, "backlog": pending}
+            return {
+                "documents": documents,
+                "backlog": pending,
+                "max_payload_bytes": await self.max_payload_bytes(),
+            }
         except Exception as exc:
             logger.warning("index stats unavailable: %s", exc)
-            return {"documents": 0, "backlog": 0}
+            return {"documents": 0, "backlog": 0, "max_payload_bytes": 0}
 
 
 _store: IndexStore | None = None

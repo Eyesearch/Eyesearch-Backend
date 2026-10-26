@@ -34,14 +34,26 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class EngineSettings:
-    """Crawler and index policy."""
+    """Storage budget, crawl policy and revalidation cadence."""
 
     # --- index routing ---------------------------------------------------
-    # Minimum number of local hits before the index answers on its own.
-    index_threshold: int = field(default_factory=lambda: _int("INDEX_THRESHOLD", 3))
+    index_threshold: int = field(default_factory=lambda: _int("INDEX_THRESHOLD", 1))
     index_limit: int = field(default_factory=lambda: _int("INDEX_LIMIT", 20))
-    # Weight of freshness in the blended score (0 = pure BM25).
     freshness_weight: float = field(default_factory=lambda: _float("INDEX_FRESHNESS_WEIGHT", 0.25))
+    # The request path never calls an external provider: a miss returns at once
+    # and the query is queued for the crawler. Flip this only for emergencies.
+    live_search_enabled: bool = field(default_factory=lambda: _bool("LIVE_SEARCH_ENABLED", False))
+
+    # --- storage budget (1-2 KB per page) --------------------------------
+    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 2048))
+    title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))
+    snippet_max_chars: int = field(default_factory=lambda: _int("INDEX_SNIPPET_MAX_CHARS", 200))
+    # The FTS5 `content` column only needs enough text to match on.
+    content_max_chars: int = field(default_factory=lambda: _int("INDEX_CONTENT_MAX_CHARS", 1200))
+
+    # --- dedupe and domain policy ----------------------------------------
+    max_urls_per_domain: int = field(default_factory=lambda: _int("INDEX_MAX_URLS_PER_DOMAIN", 12))
+    max_path_depth: int = field(default_factory=lambda: _int("INDEX_MAX_PATH_DEPTH", 2))
 
     # --- crawling --------------------------------------------------------
     crawl_enabled: bool = field(default_factory=lambda: _bool("CRAWL_ENABLED", True))
@@ -59,9 +71,14 @@ class EngineSettings:
     crawl_max_bytes: int = field(default_factory=lambda: _int("CRAWL_MAX_BYTES", 512_000))
     respect_robots: bool = field(default_factory=lambda: _bool("CRAWL_RESPECT_ROBOTS", True))
 
-    # --- content limits --------------------------------------------------
-    max_content_chars: int = field(default_factory=lambda: _int("INDEX_MAX_CONTENT_CHARS", 20_000))
-    max_snippet_chars: int = field(default_factory=lambda: _int("INDEX_MAX_SNIPPET_CHARS", 240))
+    # --- stale-while-revalidate ------------------------------------------
+    revalidate_enabled: bool = field(default_factory=lambda: _bool("REVALIDATE_ENABLED", True))
+    revalidate_interval_seconds: int = field(default_factory=lambda: _int("REVALIDATE_INTERVAL_SECONDS", 3600))
+    revalidate_batch_size: int = field(default_factory=lambda: _int("REVALIDATE_BATCH_SIZE", 10))
+    # Domain classes, in days.
+    news_ttl_days: float = field(default_factory=lambda: _float("REVALIDATE_NEWS_DAYS", 1.5))
+    government_ttl_days: float = field(default_factory=lambda: _float("REVALIDATE_GOV_DAYS", 7))
+    static_ttl_days: float = field(default_factory=lambda: _float("REVALIDATE_STATIC_DAYS", 21))
 
     # --- backlog ---------------------------------------------------------
     backlog_max_per_query: int = field(default_factory=lambda: _int("BACKLOG_MAX_PER_QUERY", 50))
