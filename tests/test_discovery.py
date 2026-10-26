@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app import database
@@ -161,3 +163,111 @@ async def test_discovery_pass_respects_the_storage_ceiling(temp_db, monkeypatch)
     assert report["ceiling"] is True
     assert report["attempted"] == 0
     assert await store.pending_domain_count() == 1  # left for later
+
+
+# --- persistence: writes must not wait for the whole pass ------------------
+
+async def test_each_domain_is_persisted_as_soon_as_it_finishes(temp_db, monkeypatch) -> None:
+    """A long pass must not hold every write until the end (that lost work on restart)."""
+    store = get_store()
+    fast = seed_crawler.CategorySeed("https://fast.gov.in", "Fast", "government")
+    slow = seed_crawler.CategorySeed("https://slow.gov.in", "Slow", "government")
+
+    from app.engine.text import ExtractedDocument
+
+    def _doc(seed, title):
+        return ExtractedDocument(
+            url=seed.url + "/", canonical_url=seed.url + "/", domain=seed.url.split("/")[2],
+            root_domain=seed.url.split("/")[2], domain_class="static", title=title,
+            snippet="Official portal.", content="Official portal content.",
+            language="en", favicon_url=None, category="government",
+        )
+
+    async def _crawl(seed, *, client, settings, robots, max_pages=None):
+        if seed is slow:
+            await asyncio.sleep(1.0)
+            return seed_crawler.SeedReport(category=seed.category, fetched=1, extracted=1), [_doc(seed, "Slow portal")]
+        return seed_crawler.SeedReport(category=seed.category, fetched=1, extracted=1), [_doc(seed, "Fast portal")]
+
+    monkeypatch.setattr(seed_crawler, "crawl_seed", _crawl)
+
+    settings = EngineSettings(
+        seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0,
+        seed_crawl_pages_per_domain=1, seed_crawl_concurrency=2,
+    )
+    task = asyncio.create_task(
+        seed_crawler.run_seed_pass(seeds=[fast, slow], settings=settings, store=store)
+    )
+
+    await asyncio.sleep(0.4)  # the slow seed is still crawling
+    mid_pass = await store.count_documents()
+    assert mid_pass == 1, "the finished domain should already be in the database"
+
+    await task
+    assert await store.count_documents() == 2
+
+
+async def test_a_failed_write_does_not_kill_the_pass(temp_db, monkeypatch, caplog) -> None:
+    store = get_store()
+    seeds = [seed_crawler.CategorySeed(f"https://site{i}.gov.in", f"Site {i}", "government") for i in range(3)]
+
+    from app.engine.text import ExtractedDocument
+
+    async def _crawl(seed, *, client, settings, robots, max_pages=None):
+        document = ExtractedDocument(
+            url=seed.url + "/", canonical_url=seed.url + "/", domain=seed.url.split("/")[2],
+            root_domain=seed.url.split("/")[2], domain_class="static", title="Portal",
+            snippet="Snippet.", content="Content.", language="en", favicon_url=None,
+            category="government",
+        )
+        return seed_crawler.SeedReport(category=seed.category, fetched=1, extracted=1), [document]
+
+    monkeypatch.setattr(seed_crawler, "crawl_seed", _crawl)
+
+    real_replace = store.replace_documents
+    calls = {"n": 0}
+
+    async def _flaky(documents):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("turso said no")
+        return await real_replace(documents)
+
+    monkeypatch.setattr(store, "replace_documents", _flaky)
+
+    settings = EngineSettings(
+        seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0,
+        seed_crawl_concurrency=1,
+    )
+    with caplog.at_level("ERROR"):
+        report = await seed_crawler.run_seed_pass(seeds=seeds, settings=settings, store=store)
+
+    assert calls["n"] == 3
+    assert await store.count_documents() == 2      # the other two persisted
+    assert any("index write failed" in record.message for record in caplog.records)
+
+
+async def test_successful_writes_are_logged_with_the_total(temp_db, monkeypatch, caplog) -> None:
+    store = get_store()
+    seed = seed_crawler.CategorySeed("https://logged.gov.in", "Logged", "government")
+
+    from app.engine.text import ExtractedDocument
+
+    async def _crawl(seed, *, client, settings, robots, max_pages=None):
+        document = ExtractedDocument(
+            url=seed.url + "/", canonical_url=seed.url + "/", domain=seed.url.split("/")[2],
+            root_domain=seed.url.split("/")[2], domain_class="static", title="Logged portal",
+            snippet="Snippet.", content="Content.", language="en", favicon_url=None,
+            category="government",
+        )
+        return seed_crawler.SeedReport(category=seed.category, fetched=1, extracted=1), [document]
+
+    monkeypatch.setattr(seed_crawler, "crawl_seed", _crawl)
+    settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+
+    with caplog.at_level("INFO"):
+        await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+
+    assert any(
+        "Successfully indexed site: logged.gov.in" in record.message for record in caplog.records
+    )
