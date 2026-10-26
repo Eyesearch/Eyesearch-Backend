@@ -72,6 +72,8 @@ class EngineSettings:
     # ceiling on indexed sites (well inside the free Turso allowance).
     discovery_batch_size: int = field(default_factory=lambda: _int("DISCOVERY_BATCH_SIZE", 10))
     discovery_batch_pause_seconds: float = field(default_factory=lambda: _float("DISCOVERY_BATCH_PAUSE_SECONDS", 0.5))
+    # How often the discovery worker drains a batch, independently of the seeds.
+    discovery_interval_seconds: int = field(default_factory=lambda: _int("DISCOVERY_INTERVAL_SECONDS", 300))
     max_indexed_sites: int = field(default_factory=lambda: _int("MAX_INDEXED_SITES", 50000))
     seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
     # Domains crawled at once: bounded so the target sites and the single Turso

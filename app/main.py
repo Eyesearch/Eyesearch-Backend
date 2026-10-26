@@ -142,10 +142,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as exc:
             logger.warning("seed coverage check failed: %s", exc)
     revalidate_scheduler.start_seed_crawler(initial_pass=app.state.db_ready)
+    # The discovered-domain queue drains on its own cadence.
+    revalidate_scheduler.start_discovery_worker()
 
     try:
         yield
     finally:
+        await revalidate_scheduler.stop_discovery_worker()
         await revalidate_scheduler.stop_seed_crawler()
         await revalidate_scheduler.stop_backlog_worker()
         await revalidate_scheduler.stop()

@@ -15,7 +15,7 @@ import random
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.indexer.backlog_worker import run_backlog_once
-from app.indexer.crawler import run_autonomous_seed_crawl
+from app.indexer.crawler import run_autonomous_seed_crawl, run_discovery_pass
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 _task: asyncio.Task[None] | None = None
 _backlog_task: asyncio.Task[None] | None = None
 _seed_task: asyncio.Task[None] | None = None
+_discovery_task: asyncio.Task[None] | None = None
 _cooldown: dict[str, int] = {}
 
 
@@ -115,6 +116,47 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
     return _seed_task
 
 
+async def _discovery_loop(settings: EngineSettings) -> None:
+    """Drain the discovered-domain backlog continuously, independently of seeds.
+
+    Without this the queue only moved after a full seed pass, which on a free
+    instance could take longer than the instance lived.
+    """
+    while True:
+        try:
+            report = await run_discovery_pass(settings=settings)
+            if report.get("attempted"):
+                logger.info("discovery worker: %s", report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("discovery worker failed: %s", exc)
+        await asyncio.sleep(max(30, settings.discovery_interval_seconds))
+
+
+def start_discovery_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
+    global _discovery_task
+    cfg = settings or get_engine_settings()
+    if not cfg.seed_crawl_enabled or _discovery_task is not None:
+        return _discovery_task
+    _discovery_task = asyncio.create_task(_discovery_loop(cfg), name="eyesearch-discovery")
+    logger.info("discovery worker started (every ~%ss)", cfg.discovery_interval_seconds)
+    return _discovery_task
+
+
+async def stop_discovery_worker() -> None:
+    global _discovery_task
+    if _discovery_task is None:
+        return
+    _discovery_task.cancel()
+    try:
+        await _discovery_task
+    except asyncio.CancelledError:
+        pass
+    _discovery_task = None
+    logger.info("discovery worker stopped")
+
+
 async def stop_seed_crawler() -> None:
     global _seed_task
     if _seed_task is None:
@@ -155,6 +197,8 @@ async def stop() -> None:
 
 
 __all__ = [
+    "start_discovery_worker",
+    "stop_discovery_worker",
     "start",
     "stop",
     "run_once",
