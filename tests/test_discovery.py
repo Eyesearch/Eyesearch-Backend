@@ -542,3 +542,66 @@ def test_the_running_commit_is_reported(monkeypatch, caplog) -> None:
     for name in ("GIT_COMMIT", "SOURCE_VERSION", "COMMIT_SHA"):
         monkeypatch.delenv(name, raising=False)
     assert "unknown" in main._running_commit()
+
+
+# --- the audit fetch: agent, timeout, redirects and TLS policy ------------
+
+async def test_the_crawl_fetch_uses_the_browser_agent_and_15s_timeout() -> None:
+    from app.crawler.crawler import fetch_page
+    from app.engine.config import EngineSettings
+
+    settings = EngineSettings()
+    assert "Chrome/128.0.0.0" in settings.crawl_user_agent
+    assert "EyesearchBot/1.0" in settings.crawl_user_agent
+    assert settings.crawl_timeout_seconds == 15.0
+
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["ua"] = request.headers.get("user-agent")
+        return httpx.Response(200, text="<html><title>Portal</title></html>",
+                              headers={"content-type": "text/html"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = await fetch_page(client, "https://karnataka.gov.in/", settings)
+
+    assert result is not None
+    assert seen["ua"] == settings.crawl_user_agent
+    await client.aclose()
+
+
+async def test_a_broken_certificate_is_retried_unverified(monkeypatch, caplog) -> None:
+    """NIC portals present incomplete chains; the domain must not be lost."""
+    from app.crawler import crawler as fetch_mod
+    from app.engine.config import EngineSettings
+
+    calls: list[str] = []
+
+    async def _stream(client, url, headers, settings):
+        calls.append("insecure" if getattr(client, "_insecure", False) else "verified")
+        if len(calls) == 1:
+            raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        return "<html><title>NIC portal</title></html>", 200
+
+    monkeypatch.setattr(fetch_mod, "_stream_page", _stream)
+    settings = EngineSettings(crawl_verify_tls="auto")
+
+    with caplog.at_level("WARNING"):
+        result = await fetch_mod.fetch_page(httpx.AsyncClient(), "https://nic.gov.in/", settings)
+
+    assert result is not None, "the unverified retry should have succeeded"
+    assert len(calls) == 2
+    assert any("retrying this request unverified" in record.message for record in caplog.records)
+
+
+async def test_the_tls_policy_can_forbid_the_fallback(monkeypatch) -> None:
+    from app.crawler import crawler as fetch_mod
+    from app.engine.config import EngineSettings
+
+    async def _stream(client, url, headers, settings):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+
+    monkeypatch.setattr(fetch_mod, "_stream_page", _stream)
+    settings = EngineSettings(crawl_verify_tls="always")
+
+    assert await fetch_mod.fetch_page(httpx.AsyncClient(), "https://strict.gov.in/", settings) is None
