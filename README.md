@@ -353,6 +353,19 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Writes land per domain, not per pass.** Each seed's pages are written the
+moment that seed finishes (`asyncio.as_completed`), so a long pass no longer
+holds every write until the end — on a free instance that used to mean a restart
+mid-crawl lost the whole pass while the logs still showed HTTP 200s and
+discovery lines. Every successful write logs
+`Successfully indexed site: <domain> (pages: N, total sites: M)`, a failed write
+logs the exception type, message and statement, and a write that stores nothing
+logs exactly which guard rejected the rows.
+
+The discovered-domain queue drains in its own worker every
+`DISCOVERY_INTERVAL_SECONDS` (300 s), independent of the seed pass, so backlog
+items are promoted into `sites`/`pages` even while a long seed run is in flight.
+
 **The Turso client is ours.** `libsql_client`'s HTTP backend parses the response
 as `response["result"]`, but Turso's pipeline endpoint answers
 `{"results": [{"type": "ok", "response": {"type": "execute", "result": {...}}}]}`.
@@ -387,7 +400,7 @@ storing one root page plus at most five sitelinks per domain with
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
 the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
 missing seeds** so repeated boots make progress instead of repeating work. The
 port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
@@ -703,6 +716,19 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Writes land per domain, not per pass.** Each seed's pages are written the
+moment that seed finishes (`asyncio.as_completed`), so a long pass no longer
+holds every write until the end — on a free instance that used to mean a restart
+mid-crawl lost the whole pass while the logs still showed HTTP 200s and
+discovery lines. Every successful write logs
+`Successfully indexed site: <domain> (pages: N, total sites: M)`, a failed write
+logs the exception type, message and statement, and a write that stores nothing
+logs exactly which guard rejected the rows.
+
+The discovered-domain queue drains in its own worker every
+`DISCOVERY_INTERVAL_SECONDS` (300 s), independent of the seed pass, so backlog
+items are promoted into `sites`/`pages` even while a long seed run is in flight.
+
 **The Turso client is ours.** `libsql_client`'s HTTP backend parses the response
 as `response["result"]`, but Turso's pipeline endpoint answers
 `{"results": [{"type": "ok", "response": {"type": "execute", "result": {...}}}]}`.
@@ -737,7 +763,7 @@ storing one root page plus at most five sitelinks per domain with
 
 **Nothing here needs a human.** On boot the lifespan checks coverage and, when
 the index is under `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000), launches
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000), launches
 `run_autonomous_seed_crawl()` with `asyncio.create_task`, crawling **only the
 missing seeds** so repeated boots make progress instead of repeating work. The
 port binds and `/health` answers in milliseconds while the crawl runs behind it. The same
@@ -863,7 +889,7 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `INDEX_MAX_SITE_PAYLOAD_BYTES` (10240),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (86400),
 `SEED_CRAWL_PAGES_PER_DOMAIN` (5), `SEED_CRAWL_CONCURRENCY` (5), `SEED_COVERAGE_MIN_SITES` (5), `SEED_COVERAGE_MIN_RATIO` (1.0), `DISCOVERY_BATCH_SIZE` (10),
-`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `MAX_INDEXED_SITES` (50000),
+`DISCOVERY_BATCH_PAUSE_SECONDS` (0.5), `DISCOVERY_INTERVAL_SECONDS` (300), `MAX_INDEXED_SITES` (50000),
 `CRAWL_TIMEOUT_SECONDS` (5), `INDEX_SECTIONS_MAX` (5),
 `PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
