@@ -323,8 +323,8 @@ documented exception — `/wiki/<Article>` *is* their entry-point shape. Each
 document stores the clean canonical title, the normalised URL, the domain, the
 category and a **3–4 sentence factual summary** capped at 1.5 KB
 (`INDEX_SUMMARY_SENTENCES`, `INDEX_CONTENT_MAX_CHARS`), inside a row budget of
-2 KB. Scripts, styles, navigation, cookie notices, footers, ads and inline
-images never reach storage.
+1.5 KB (`INDEX_MAX_PAYLOAD_BYTES`), sitelinks included. Scripts, styles,
+navigation, cookie notices, footers, ads and inline images never reach storage.
 
 **Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
 regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
@@ -390,6 +390,36 @@ One rule, no special cases — `app/engine/relevance.py`:
 
 The same function gates index hits and freshly discovered candidates, so there
 is exactly one definition of "relevant" in the system.
+
+### Domain root compaction and sitelinks
+
+One row per domain root, not one per page. A sub-page of a domain that already
+has a root entry is **folded into it**: its high-value navigation targets are
+merged into the root's `sections_json` and the row is not stored
+(`{"collapsed": 1, "inserted": 0}`), so Turso never fills with redundant path
+rows.
+
+```sql
+sections_json = '[{"title":"Sign in","url":"https://ztube.com/login","snippet":"Access your account"},
+                  {"title":"Documentation","url":"https://ztube.com/docs","snippet":"Official developer guides"}]'
+```
+
+Sections are extracted generically from the page's own links — sign in, sign up,
+documentation, pricing, dashboard, download, support — capped at
+`INDEX_SECTIONS_MAX` (5), de-duplicated by URL, and counted inside the row's
+1.5 KB budget.
+
+Serving unpacks them into sub-cards:
+
+- `GET /v1/search?q=ztube` → the root card plus five `sitelinks`, none marked.
+- `GET /v1/search?q=ztube pricing` → the **Pricing** sitelink is promoted to the
+  front and marked `"matched": true`, and the parent card's score is boosted
+  (0.8 → 1.0) so the intended destination leads.
+
+Section names are also folded into the document's searchable text, and a
+document's sections count toward the relevance gate — so a query for a section
+matches its domain root instead of falling through to discovery. The flat
+`format=json` contract carries the same `sitelinks` array.
 
 ### Native extraction (`app/indexer/extractor.py`)
 
@@ -587,8 +617,8 @@ documented exception — `/wiki/<Article>` *is* their entry-point shape. Each
 document stores the clean canonical title, the normalised URL, the domain, the
 category and a **3–4 sentence factual summary** capped at 1.5 KB
 (`INDEX_SUMMARY_SENTENCES`, `INDEX_CONTENT_MAX_CHARS`), inside a row budget of
-2 KB. Scripts, styles, navigation, cookie notices, footers, ads and inline
-images never reach storage.
+1.5 KB (`INDEX_MAX_PAYLOAD_BYTES`), sitelinks included. Scripts, styles,
+navigation, cookie notices, footers, ads and inline images never reach storage.
 
 **Crawler** (`app/crawler/`) — targeted, not general: a seed list of Indian and
 regional domains (`.gov.in`, `.nic.in`, Karnataka government, BMRC, ISRO,
@@ -682,7 +712,8 @@ Engine knobs (all optional): `INDEX_THRESHOLD` (default 1),
 `ON_DEMAND_MAX_FETCHES` (5), `ON_DEMAND_CONCURRENCY` (3),
 `ON_DEMAND_BUDGET_SECONDS` (12), `INDEX_SUMMARY_SENTENCES` (4),
 `SEED_CRAWL_ENABLED` (true), `SEED_CRAWL_INTERVAL_SECONDS` (21600),
-`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `PUBLIC_BASE_URL` ("")
+`SEED_CRAWL_PAGES_PER_DOMAIN` (5), `INDEX_SECTIONS_MAX` (5),
+`PUBLIC_BASE_URL` ("")
 `SUGGEST_LIMIT` (8), `BACKLOG_WORKER_ENABLED` (true),
 `BACKLOG_INTERVAL_SECONDS` (900), `BACKLOG_BATCH_QUERIES` (3),
 `BACKLOG_URLS_PER_QUERY` (5), `BACKLOG_DISCOVERY_ENABLED` (true),
