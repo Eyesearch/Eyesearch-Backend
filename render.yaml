@@ -1,0 +1,27 @@
+# Render blueprint for the EyeSearch gateway (free tier: 1 instance, 512 MB).
+services:
+  - type: web
+    name: eyesearch-backend
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SEARCH_REGION
+        value: in-en
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: TURSO_DB_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
