@@ -65,6 +65,28 @@ def _is_blocked(url: str) -> bool:
     return any(host == blocked or host.endswith(f".{blocked}") for blocked in BLOCKED_HOSTS)
 
 
+def browser_headers(user_agent: str) -> dict[str, str]:
+    """The header set a desktop Chrome sends, so WAFs serve the page.
+
+    A bare `Accept` with a bot-looking agent is what earns a 403/406 from several
+    Indian government gateways; these are the headers the browser would send.
+    """
+    return {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
+                  "image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8,kn;q=0.7,hi;q=0.6",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+        "Connection": "keep-alive",
+    }
+
+
 def crawl_client(settings: EngineSettings) -> httpx.AsyncClient:
     """The HTTP client for crawling, with TLS configured once.
 
@@ -111,6 +133,66 @@ async def _stream_page(
         return b"".join(chunks).decode(response.encoding or "utf-8", errors="ignore"), response.status_code
 
 
+async def fetch_page_status(
+    client: httpx.AsyncClient,
+    url: str,
+    settings: EngineSettings,
+) -> tuple[str | None, int | None]:
+    """Fetch a page and always report what happened.
+
+    Returns `(html, status)` for a served page, `(None, status)` when the server
+    answered with an error status, and `(None, None)` on a connection or SSL
+    failure — so the caller can persist the domain instead of discarding it.
+    """
+    if _is_blocked(url):
+        return None, None
+
+    headers = browser_headers(settings.crawl_user_agent)
+    policy = (settings.crawl_verify_tls or "never").lower()
+
+    async def _attempt(http: httpx.AsyncClient) -> tuple[str | None, int | None]:
+        async with http.stream(
+            "GET",
+            url,
+            headers=headers,
+            timeout=settings.crawl_timeout_seconds,
+            follow_redirects=True,
+        ) as response:
+            status = response.status_code
+            if status >= 400:
+                return None, status
+            content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+            if content_type and content_type not in ALLOWED_CONTENT_TYPES:
+                return None, status
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if size >= settings.crawl_max_bytes:
+                    break
+            return b"".join(chunks).decode(response.encoding or "utf-8", errors="ignore"), status
+
+    try:
+        try:
+            return await _attempt(client)
+        except (httpx.ConnectError, httpx.ReadError) as exc:
+            if policy != "auto" or "certificate" not in str(exc).lower():
+                raise
+            logger.warning(
+                "TLS verification failed for %s (%s) — retrying this request unverified",
+                url,
+                exc,
+            )
+            async with httpx.AsyncClient(
+                verify=False, follow_redirects=True, timeout=settings.crawl_timeout_seconds
+            ) as insecure:
+                return await _attempt(insecure)
+    except Exception as exc:
+        logger.info("SEED FETCHED: domain %s failed at the network level: %s", url, exc)
+        return None, None
+
+
 async def fetch_page(
     client: httpx.AsyncClient,
     url: str,
@@ -133,10 +215,7 @@ async def fetch_page(
     if _is_blocked(url):
         return None
 
-    headers = {
-        "User-Agent": settings.crawl_user_agent,
-        "Accept": "text/html,application/xhtml+xml",
-    }
+    headers = browser_headers(settings.crawl_user_agent)
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
@@ -253,4 +332,6 @@ async def crawl_seeds(
 
 
 __all__ = [
+    "browser_headers",
+    "fetch_page_status",
     "crawl_client","CrawlResult", "crawl_seed", "crawl_seeds", "fetch_page", "RobotsCache"]

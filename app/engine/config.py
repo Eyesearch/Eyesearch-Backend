@@ -118,10 +118,10 @@ class EngineSettings:
     crawl_user_agent: str = field(
         default_factory=lambda: os.environ.get(
             "CRAWL_USER_AGENT",
-            # A browser-shaped agent plus our identifier: NIC portals reject a
-            # bare bot string with a handshake error or a 403.
+            # Plain Chrome desktop string: a bot token in the agent makes WAFs
+            # answer 403/406 before the page is ever served.
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0",
+            "Chrome/128.0.0.0 Safari/537.36",
         )
     )
     crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 15.0))
