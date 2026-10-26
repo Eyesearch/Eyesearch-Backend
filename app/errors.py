@@ -80,3 +80,7 @@ class DatabaseError(AppError):
 
 def error_envelope(code: ErrorCode, message: str, retryable: bool) -> dict[str, Any]:
     return {"error": {"code": code, "message": message, "retryable": retryable}}
+
+
+class StorageQuotaError(DatabaseError):
+    """The database refused a write because it is out of space."""

@@ -80,6 +80,13 @@ class EngineSettings:
     # How often the discovery worker drains a batch, independently of the seeds.
     discovery_interval_seconds: int = field(default_factory=lambda: _int("DISCOVERY_INTERVAL_SECONDS", 300))
     max_indexed_sites: int = field(default_factory=lambda: _int("MAX_INDEXED_SITES", 50000))
+
+    # --- storage safety ---------------------------------------------------
+    # 300k pages is roughly 3.5–4 GB at our row sizes: pause well inside the
+    # 5 GB free allowance rather than discovering the limit with a bill.
+    storage_page_limit: int = field(default_factory=lambda: _int("STORAGE_PAGE_LIMIT", 300_000))
+    # How long to stay paused after a storage/quota failure before retrying.
+    storage_pause_seconds: int = field(default_factory=lambda: _int("STORAGE_PAUSE_SECONDS", 21600))
     seed_crawl_pages_per_domain: int = field(default_factory=lambda: _int("SEED_CRAWL_PAGES_PER_DOMAIN", 5))
     # Domains crawled at once: bounded so the target sites and the single Turso
     # connection both stay stable.
