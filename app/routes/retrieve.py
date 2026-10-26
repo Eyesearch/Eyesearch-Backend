@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.config import get_settings
 from app.errors import BadRequestError
-from app.schemas import ErrorEnvelope, RetrieveRequest, RetrieveResponse
+from app.schemas import ErrorEnvelope, RagResponse, RetrieveRequest, RetrieveResponse
 from app.services import formatter
 from app.services.search_service import get_service
 
@@ -81,14 +81,36 @@ async def retrieve_post(
 
 @router.get(
     "/v1/retrieve",
-    summary="Same contract as POST, for simple HTTP clients",
-    responses={200: _MARKDOWN_DOC, 400: {"model": ErrorEnvelope}},
+    summary="Token-optimised context for LLM agents (RAG)",
     response_model=None,
+    responses={200: {"model": RagResponse}, 400: {"model": ErrorEnvelope}},
 )
 async def retrieve_get(
     q: str = Query(..., min_length=1, max_length=512, description="Search query"),
-    format: Literal["markdown", "json"] = Query(default="markdown"),
-    limit: int | None = Query(default=None, ge=1, le=50),
-) -> PlainTextResponse | RetrieveResponse:
-    """Query-string form: `GET /v1/retrieve?q=...&format=markdown&limit=10`."""
-    return await _respond(q, format, limit)
+    max_results: int | None = Query(default=None, ge=1, le=50, description="Context blocks to return"),
+    limit: int | None = Query(default=None, ge=1, le=50, description="Alias of max_results"),
+    format: Literal["json", "markdown"] = Query(default="json"),
+) -> RagResponse | PlainTextResponse:
+    """`GET /v1/retrieve?q=...&max_results=5`
+
+    Returns `{query, source, context: [{title, url, text}]}` — clean text, no
+    HTML, no navigation, no boilerplate. `format=markdown` gives the same content
+    as a markdown document for prompt assembly.
+    """
+    cleaned = " ".join(q.split())
+    if not cleaned:
+        raise BadRequestError("query must not be blank")
+
+    settings = get_settings()
+    effective = min(max_results or limit or settings.default_limit, settings.max_limit)
+    service = get_service()
+
+    if format == "markdown":
+        results, acquisition = await service.retrieve(cleaned, limit=effective)
+        return PlainTextResponse(
+            formatter.to_markdown(acquisition.query, results, failed_providers=acquisition.failed_providers),
+            media_type="text/markdown; charset=utf-8",
+        )
+
+    context, acquisition = await service.rag_context(cleaned, limit=effective)
+    return RagResponse(query=acquisition.query, source=acquisition.source, context=context)

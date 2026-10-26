@@ -72,6 +72,41 @@ class AIContextResult(BaseModel):
     snippet: str = ""
 
 
+class MetaSearchResult(BaseModel):
+    """One result in the flat, aggregator-friendly JSON shape."""
+
+    title: str
+    url: str
+    snippet: str = ""
+    favicon: str | None = None
+
+
+class MetaSearchResponse(BaseModel):
+    """`GET /v1/search?format=json` — the meta-search contract."""
+
+    query: str
+    total_hits: int = 0
+    took_ms: int = 0
+    source: str = Field(description="`eyesearch_index`, `eyesearch_cache` or `eyesearch_queued`.")
+    results: list[MetaSearchResult] = Field(default_factory=list)
+
+
+class RagContextItem(BaseModel):
+    """One context block for an LLM: title, URL and clean text. No HTML."""
+
+    title: str
+    url: str
+    text: str = ""
+
+
+class RagResponse(BaseModel):
+    """`GET /v1/retrieve` — the RAG contract."""
+
+    query: str
+    source: Literal["index", "cache", "queued", "live"] = "index"
+    context: list[RagContextItem] = Field(default_factory=list)
+
+
 class RetrieveResponse(BaseModel):
     """JSON mode response for /v1/retrieve."""
 
@@ -82,7 +117,12 @@ class RetrieveResponse(BaseModel):
     index_hits: int = 0
     providers: dict[str, int] = Field(default_factory=dict)
     failed_providers: list[str] = Field(default_factory=list)
-    results: list[AIContextResult] = Field(default_factory=list)
+    results: list[AIContextResult] = Field(
+        default_factory=list, description="Legacy alias of `context` for the web client."
+    )
+    context: list[RagContextItem] = Field(
+        default_factory=list, description="The documented RAG shape."
+    )
 
 
 class HealthResponse(BaseModel):
