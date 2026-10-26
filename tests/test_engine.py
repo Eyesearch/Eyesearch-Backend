@@ -1,0 +1,224 @@
+"""Tests for the proprietary index: extraction, ranking, storage and routing."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from app import database
+from app.config import Settings
+from app.engine.config import EngineSettings
+from app.engine.ranking import RankedDocument, freshness, host_trust, rank_documents
+from app.engine.store import build_match_query
+from app.engine.text import canonicalise, detect_language, extract_document
+from app.services import live_retrieval, search_service
+from app.services.live_retrieval import RawResult, RetrievalOutcome
+
+ARTICLE_HTML = """
+<html><head>
+  <title>Namma Metro Purple Line timings — BMRC</title>
+  <meta name="description" content="Purple Line services run from 05:00 to 23:00 on weekdays." />
+  <link rel="canonical" href="https://english.bmrc.co.in/metro-timings?utm_source=feed" />
+  <link rel="icon" href="/favicon.ico" />
+</head><body>
+  <nav>Home | About | Contact</nav>
+  <article>
+    <h1>Purple Line timings</h1>
+    <p>The Purple Line runs between Whitefield and Challaghatta, with services
+       starting at 05:00 and the last train at 23:00 on weekdays. Sunday services
+       start later. Fares are distance based and can be paid by QR code.</p>
+    <p>Baiyappanahalli and Majestic are the busiest interchanges on the network.</p>
+  </article>
+  <footer>© BMRC</footer>
+</body></html>
+"""
+
+KANNADA_HTML = """
+<html><head><title>ಕರ್ನಾಟಕ ಸರ್ಕಾರ</title>
+<meta name="description" content="ಕರ್ನಾಟಕ ರಾಜ್ಯದ ಅಧಿಕೃತ ಜಾಲತಾಣ." /></head><body>
+<article><p>ಕರ್ನಾಟಕ ರಾಜ್ಯದ ರಾಜಧಾನಿ ಬೆಂಗಳೂರು. ಇದು ದಕ್ಷಿಣ ಭಾರತದ ಪ್ರಮುಖ ನಗರವಾಗಿದೆ.
+ಬೆಂಗಳೂರು ಮೆಟ್ರೋ, ನಮ್ಮ ಮೆಟ್ರೋ ಎಂದು ಜನಪ್ರಿಯವಾಗಿದೆ. ರಾಜ್ಯ ಸರ್ಕಾರದ ಎಲ್ಲಾ ಇಲಾಖೆಗಳ
+ಮಾಹಿತಿ ಈ ಜಾಲತಾಣದಲ್ಲಿ ಲಭ್ಯವಿದೆ. ಕನ್ನಡ ಭಾಷೆಯಲ್ಲಿ ಮಾಹಿತಿ ನೀಡಲಾಗುತ್ತದೆ.</p></article>
+</body></html>
+"""
+
+
+def test_extract_document_fields() -> None:
+    doc = extract_document("https://english.bmrc.co.in/metro-timings?utm_source=x", ARTICLE_HTML)
+    assert doc is not None
+    assert doc.title == "Namma Metro Purple Line timings — BMRC"
+    assert "Purple Line services run" in doc.snippet
+    assert doc.url == "https://english.bmrc.co.in/metro-timings"
+    assert doc.domain == "english.bmrc.co.in"
+    assert doc.language == "en"
+    assert doc.favicon_url.endswith("/favicon.ico")
+    # navigation and footer text is not part of the body
+    assert "Home | About" not in doc.content
+
+
+def test_extract_document_detects_kannada() -> None:
+    doc = extract_document("https://karnataka.gov.in/", KANNADA_HTML)
+    assert doc is not None
+    assert doc.language == "kn"
+
+
+def test_extract_document_rejects_empty_pages() -> None:
+    assert extract_document("https://example.in/", "<html><body>tiny</body></html>") is None
+
+
+def test_canonicalise_strips_tracking_and_fragments() -> None:
+    assert canonicalise("https://WWW.Example.in/path/?utm_source=a&b=2#top") == "https://example.in/path?b=2"
+
+
+def test_detect_language_defaults_to_english() -> None:
+    assert detect_language("bengaluru metro timings") == "en"
+
+
+def test_build_match_query_is_safe() -> None:
+    assert build_match_query("bengaluru metro") == '"bengaluru" "metro"*'
+    assert build_match_query('"; DROP TABLE documents; --') == '"DROP" "TABLE" "documents"*'
+    assert build_match_query("!!!") == ""
+
+
+def test_ranking_prefers_fresh_trusted_documents() -> None:
+    docs = [
+        RankedDocument(url="https://blog.example.com/a", title="old", snippet="", language="en",
+                       updated_at="2020-01-01 00:00:00", bm25=-5.0),
+        RankedDocument(url="https://karnataka.gov.in/b", title="new", snippet="", language="en",
+                       updated_at="2026-10-25 00:00:00", bm25=-5.0),
+    ]
+    ranked = rank_documents(docs)
+    assert ranked[0].url == "https://karnataka.gov.in/b"
+    assert ranked[0].score > ranked[1].score
+
+
+def test_freshness_and_host_trust() -> None:
+    assert freshness("2026-10-26 00:00:00") > 0.9
+    assert freshness("2015-01-01 00:00:00") < 0.1
+    assert host_trust("https://www.isro.gov.in/x") > host_trust("https://random.example/x")
+
+
+@pytest.fixture()
+async def temp_db(tmp_path):
+    settings = Settings(turso_db_url=f"file:{tmp_path}/engine.db")
+    await database.connect(settings)
+    await database.initialize_schema()
+    from app.engine.store import get_store
+
+    await get_store().ensure_schema()
+    yield
+    await database.close()
+
+
+async def _seed_index() -> None:
+    from app.engine.store import get_store
+
+    await get_store().upsert_documents(
+        [
+            {
+                "url": "https://english.bmrc.co.in/metro-timings",
+                "title": "Namma Metro Purple Line timings",
+                "snippet": "Purple Line runs 05:00 to 23:00.",
+                "content": "The Purple Line runs between Whitefield and Challaghatta. Metro timings for weekdays.",
+                "language": "en",
+                "domain": "english.bmrc.co.in",
+            },
+            {
+                "url": "https://www.karnataka.gov.in/metro",
+                "title": "Karnataka metro information",
+                "snippet": "State metro information portal.",
+                "content": "Metro projects across Karnataka, including Bengaluru metro timings.",
+                "language": "en",
+                "domain": "www.karnataka.gov.in",
+            },
+            {
+                "url": "https://www.prajavani.net/metro",
+                "title": "ಮೆಟ್ರೋ ಸುದ್ದಿ",
+                "snippet": "ಮೆಟ್ರೋ ಸಂಚಾರ ಸಮಯ.",
+                "content": "ಬೆಂಗಳೂರು ಮೆಟ್ರೋ ಸಂಚಾರ ಸಮಯ ಮತ್ತು ದರಗಳು.",
+                "language": "kn",
+                "domain": "www.prajavani.net",
+            },
+        ]
+    )
+
+
+async def test_local_search_returns_ranked_hits(temp_db) -> None:
+    await _seed_index()
+    from app.engine.store import get_store
+
+    hits = await get_store().search_local("metro timings", limit=5)
+    assert len(hits) >= 2
+    assert all(hit.score > 0 for hit in hits)
+    assert "metro" in hits[0].title.lower() or "metro" in hits[0].snippet.lower()
+
+    kannada = await get_store().search_local("ಮೆಟ್ರೋ", limit=5)
+    assert kannada and kannada[0].language == "kn"
+
+
+async def test_search_service_answers_from_index(temp_db, monkeypatch) -> None:
+    await _seed_index()
+    called = {"live": 0}
+
+    # Threshold is configuration, not a constant: two matching documents are
+    # enough to answer locally here.
+    monkeypatch.setattr(
+        search_service,
+        "get_engine_settings",
+        lambda: EngineSettings(index_threshold=2),
+    )
+
+    async def _no_live(*args, **kwargs):
+        called["live"] += 1
+        return RetrievalOutcome(results=[])
+
+    monkeypatch.setattr(live_retrieval, "retrieve", _no_live)
+    service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
+    response = await service.search("metro timings", limit=5)
+
+    assert response.source == "index"
+    assert response.index_hits >= 2
+    assert response.results and response.results[0].source == "eyesearch_index"
+    assert called["live"] == 0
+
+
+async def test_search_service_falls_back_and_queues_backlog(temp_db, monkeypatch) -> None:
+    async def _live(query, limit, **kwargs):
+        return RetrievalOutcome(
+            results=[RawResult(title="External result", url="https://example.in/x", snippet="s", source="duckduckgo")],
+            providers={"duckduckgo": 1},
+        )
+
+    monkeypatch.setattr(live_retrieval, "retrieve", _live)
+    service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
+    response = await service.search("something we have never crawled", limit=5)
+
+    assert response.source == "live"
+    assert response.index_hits == 0
+    assert response.results[0].source == "duckduckgo"
+
+    await search_service.drain_background_writes()
+    from app.engine.store import get_store
+
+    pending = await get_store().pending_backlog(10)
+    assert "something we have never crawled" in pending
+
+
+async def test_sparse_index_queues_backlog_even_when_providers_return_nothing(temp_db, monkeypatch) -> None:
+    """The crawl backlog is about our index, not about the providers' luck."""
+
+    async def _live_empty(query, limit, **kwargs):
+        return RetrievalOutcome(results=[], failed=[{"provider": "duckduckgo", "error": "timeout"}])
+
+    monkeypatch.setattr(live_retrieval, "retrieve", _live_empty)
+    service = search_service.SearchService(client=None, settings=Settings(turso_db_url="file:unused"))
+    response = await service.search("unindexed niche topic", limit=5)
+
+    assert response.source == "live"
+    assert response.results == []
+
+    await search_service.drain_background_writes()
+    from app.engine.store import get_store
+
+    assert "unindexed niche topic" in await get_store().pending_backlog(10)
