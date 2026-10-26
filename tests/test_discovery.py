@@ -129,7 +129,7 @@ async def test_discovery_pass_crawls_in_batches_and_stores_sites(temp_db, monkey
     async def _fetch(client, url, settings, **kwargs):
         return html, 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(
         seed_crawl_enabled=True,
         respect_robots=False,
@@ -154,7 +154,7 @@ async def test_discovery_pass_respects_the_storage_ceiling(temp_db, monkeypatch)
     async def _never(*args, **kwargs):  # pragma: no cover - ceiling stops it first
         raise AssertionError("the ceiling is reached; nothing should be fetched")
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _never)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _never)
     settings = EngineSettings(
         seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0,
         max_indexed_sites=0,
@@ -318,7 +318,7 @@ async def test_skip_reasons_are_logged_per_seed(temp_db, monkeypatch, caplog) ->
     async def _fetch(client, url, settings, **kwargs):
         return "<html><body><div id='app'></div></body></html>", 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
     with caplog.at_level("INFO"):
@@ -373,7 +373,7 @@ async def test_a_fetched_seed_always_persists_a_root(temp_db, monkeypatch) -> No
     async def _fetch(client, url, settings, **kwargs):
         return "<html><body><div id='app'></div></body></html>", 200
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
     report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
@@ -392,32 +392,47 @@ async def test_a_responding_seed_persists_even_on_a_non_200_status(temp_db, monk
     seed = seed_crawler.CategorySeed("https://canarabank.bank.in", "Canara Bank", "banking")
 
     async def _fetch(client, url, settings, **kwargs):
-        return "<html><body>Forbidden</body></html>", 403
+        return None, 403
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
     report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
 
     assert report["stored"] == 1
     assert await store.count_documents() == 1
+    stored = await store.get_document("https://canarabank.bank.in/")
+    assert stored is not None and stored["title"] == "canarabank.bank.in"
 
 
-async def test_a_seed_with_no_body_at_all_still_yields_nothing(temp_db, monkeypatch) -> None:
-    """No HTML, no record: an empty response is not a site."""
+async def test_a_5xx_or_ssl_failure_still_persists_the_hostname_root(temp_db, monkeypatch) -> None:
+    """Only invalid syntax is skipped: a refused domain is still a real domain."""
     store = get_store()
-    seed = seed_crawler.CategorySeed("https://empty-body.gov.in", "Empty", "government")
+    cases = [
+        ("https://broken.gov.in", None, 502),
+        ("https://sslbroken.gov.in", None, None),   # connection / SSL failure
+        ("https://eci.gov.in", None, 403),
+    ]
 
     async def _fetch(client, url, settings, **kwargs):
-        return "", 502
+        for prefix, html, status in cases:
+            if url.startswith(prefix):
+                return html, status
+        return None, 406
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
+    seeds = [seed_crawler.CategorySeed(prefix, "Seed", "government") for prefix, _, _ in cases]
 
-    report = await seed_crawler.run_seed_pass(seeds=[seed], settings=settings, store=store)
+    report = await seed_crawler.run_seed_pass(seeds=seeds, settings=settings, store=store)
 
-    assert report["stored"] == 0
-    assert await store.count_documents() == 0
+    assert report["stored"] == 3
+    assert await store.count_documents() == 3
+    for prefix, _, _ in cases:
+        host = prefix.split("//")[1]
+        stored = await store.get_document(f"https://{host}/")
+        assert stored is not None, host
+        assert stored["title"] == host
 
 
 # --- the write probe and step-level errors --------------------------------
@@ -519,7 +534,7 @@ async def test_the_seed_entry_and_exit_points_are_logged(temp_db, monkeypatch, c
         return ("<html><head><title>Logged portal</title></head>"
                 "<body><p>Official portal text here.</p></body></html>", 200)
 
-    monkeypatch.setattr(seed_crawler, "fetch_page", _fetch)
+    monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
     settings = EngineSettings(seed_crawl_enabled=True, respect_robots=False, crawl_delay_seconds=0.0)
 
     with caplog.at_level("INFO"):
@@ -551,14 +566,16 @@ async def test_the_crawl_fetch_uses_the_browser_agent_and_15s_timeout() -> None:
     from app.engine.config import EngineSettings
 
     settings = EngineSettings()
+    # Plain Chrome: a bot token in the agent earns a 403/406 from WAFs.
     assert "Chrome/128.0.0.0" in settings.crawl_user_agent
-    assert "EyesearchBot/1.0" in settings.crawl_user_agent
+    assert "EyesearchBot" not in settings.crawl_user_agent
     assert settings.crawl_timeout_seconds == 15.0
 
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["ua"] = request.headers.get("user-agent")
+        seen["Sec-Fetch-Mode"] = request.headers.get("sec-fetch-mode")
         return httpx.Response(200, text="<html><title>Portal</title></html>",
                               headers={"content-type": "text/html"})
 
@@ -567,6 +584,7 @@ async def test_the_crawl_fetch_uses_the_browser_agent_and_15s_timeout() -> None:
 
     assert result is not None
     assert seen["ua"] == settings.crawl_user_agent
+    assert "Sec-Fetch-Mode" in seen
     await client.aclose()
 
 
