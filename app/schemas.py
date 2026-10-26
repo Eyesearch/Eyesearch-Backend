@@ -137,6 +137,9 @@ class HealthResponse(BaseModel):
 
     ok: bool
     db: Literal["up", "down"]
+    db_target: str = Field(
+        default="", description="`remote:<url>` or `local:<path>` — what this process writes to."
+    )
     version: str
     environment: str
     uptime_s: int

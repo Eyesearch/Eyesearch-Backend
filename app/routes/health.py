@@ -34,9 +34,11 @@ async def _health() -> HealthResponse:
         index_stats = await get_store().stats() if db_up else {"documents": 0, "backlog": 0}
     except Exception:  # pragma: no cover - defensive
         index_stats = {"documents": 0, "backlog": 0}
+    target = database.describe_target(cfg)
     return HealthResponse(
         ok=db_up,
         db="up" if db_up else "down",
+        db_target=f"{target['kind']}:{target['url']}",
         version=cfg.app_version,
         environment=cfg.environment,
         uptime_s=int(time.monotonic() - _STARTED_AT),
