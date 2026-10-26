@@ -51,6 +51,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TURSO_AUTH_TOKEN", "TURSO_DB_TOKEN"),
     )
     db_timeout_s: float = Field(default=4.0, validation_alias=AliasChoices("DB_TIMEOUT_S"))
+    # Production must talk to the remote Turso database. Set ALLOW_LOCAL_DB=true
+    # to deliberately run against a local file instead (development only).
+    allow_local_db: bool = Field(default=False, validation_alias=AliasChoices("ALLOW_LOCAL_DB"))
 
     # --- cache --------------------------------------------------------------
     cache_ttl_hours: int = Field(default=24, validation_alias=AliasChoices("CACHE_TTL_HOURS"))
@@ -125,6 +128,11 @@ class Settings(BaseSettings):
     @property
     def is_remote_db(self) -> bool:
         return not self.turso_db_url.startswith("file:")
+
+    @property
+    def requires_remote_db(self) -> bool:
+        """True in production: a local file there means writes go nowhere durable."""
+        return self.environment == "production" and not self.allow_local_db
 
 
 @lru_cache(maxsize=1)

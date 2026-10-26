@@ -22,6 +22,10 @@ from app.config import Settings, get_settings
 from app.engine.schema import ENGINE_SCHEMA
 from app.errors import DatabaseError
 
+# What a database URL should look like once we are done with it: no token, no
+# credentials, safe to put in a log line or an HTTP response.
+_SENSITIVE_PARAMS = ("authToken", "auth_token", "token", "password")
+
 logger = logging.getLogger(__name__)
 
 # The schema from the task brief, plus additive indexes. Applied idempotently at
@@ -96,25 +100,87 @@ def _rows_to_dicts(result: Any) -> list[dict[str, Any]]:
     return out
 
 
+def safe_url(url: str) -> str:
+    """The URL with any credentials or token parameters removed."""
+    cleaned = url or ""
+    for param in _SENSITIVE_PARAMS:
+        if f"{param}=" in cleaned:
+            head, _, tail = cleaned.partition(f"{param}=")
+            remainder = tail.split("&", 1)[1] if "&" in tail else ""
+            cleaned = f"{head}{param}=***{'&' + remainder if remainder else ''}"
+    if "@" in cleaned and "://" in cleaned:
+        scheme, _, rest = cleaned.partition("://")
+        rest = rest.split("@", 1)[1]
+        cleaned = f"{scheme}://{rest}"
+    return cleaned
+
+
+def describe_target(settings: Settings | None = None) -> dict[str, str]:
+    """Where this process actually reads and writes. Safe to log and to expose."""
+    cfg = settings or get_settings()
+    return {
+        "kind": "remote" if cfg.is_remote_db else "local",
+        "url": safe_url(cfg.turso_db_url),
+        "has_token": "yes" if bool(cfg.turso_auth_token) else "no",
+    }
+
+
 async def connect(settings: Settings | None = None) -> libsql_client.Client:
-    """Create the shared client. Called once from ``lifespan``."""
+    """Create the shared client and prove it works. Called once from ``lifespan``."""
     global _client
     cfg = settings or get_settings()
     if _client is not None:
         return _client
+
+    target = describe_target(cfg)
+
+    # A remote URL without a token cannot work. Say so instead of silently
+    # degrading to a database nobody is writing to.
+    if cfg.is_remote_db and not cfg.turso_auth_token:
+        message = (
+            f"TURSO_AUTH_TOKEN is required for the remote database {target['url']}. "
+            "Set TURSO_AUTH_TOKEN (and TURSO_DB_URL/TURSO_DATABASE_URL) in the service "
+            "environment, or point TURSO_DB_URL at a file: path for local development."
+        )
+        logger.error(message)
+        raise DatabaseError(message)
 
     kwargs: dict[str, Any] = {"url": cfg.turso_db_url}
     if cfg.turso_auth_token:
         kwargs["auth_token"] = cfg.turso_auth_token
     try:
         _client = libsql_client.create_client(**kwargs)
-    except Exception as exc:  # driver/config error — the app can still boot degraded
-        logger.error("database client creation failed: %s", exc)
+    except Exception as exc:
+        logger.error("database client creation failed for %s: %s", target["url"], exc)
         raise DatabaseError(f"could not create database client: {exc}") from exc
-    logger.info(
-        "database client ready (%s)", "remote turso" if cfg.is_remote_db else cfg.turso_db_url
-    )
+
+    if cfg.is_remote_db:
+        logger.info("Connected to Remote Turso DB: %s", target["url"])
+    else:
+        logger.warning(
+            "Connected to LOCAL SQLite: %s — this is not the Turso cloud database",
+            target["url"],
+        )
     return _client
+
+
+async def probe() -> bool:
+    """Execute one real query, so a fresh deployment shows a read on the dashboard.
+
+    Raises ``DatabaseError`` when the database cannot be reached; the caller
+    decides whether that is fatal.
+    """
+    try:
+        async with asyncio.timeout(get_settings().db_timeout_s):
+            result = await get_client().execute("SELECT 1 AS ok")
+        rows = getattr(result, "rows", ()) or ()
+        return bool(rows)
+    except DatabaseError:
+        raise
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        raise DatabaseError("database probe timed out") from exc
+    except Exception as exc:
+        raise DatabaseError(f"database probe failed: {exc}") from exc
 
 
 async def close() -> None:
@@ -166,7 +232,7 @@ async def initialize_schema() -> None:
         raise DatabaseError("schema initialisation timed out") from exc
     except Exception as exc:
         raise DatabaseError(f"schema initialisation failed: {exc}") from exc
-    logger.info("schema ready")
+    logger.info("schema ready on %s", describe_target()["kind"])
 
 
 async def ping() -> bool:

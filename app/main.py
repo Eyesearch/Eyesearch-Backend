@@ -57,25 +57,60 @@ def _build_http_client(settings: Settings) -> httpx.AsyncClient:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     _configure_logging(settings)
+    target = database.describe_target(settings)
     logger.info(
-        "starting %s v%s (%s, db=%s)",
+        "starting %s v%s (%s, db=%s %s)",
         settings.app_name,
         settings.app_version,
         settings.environment,
-        "remote" if settings.is_remote_db else settings.turso_db_url,
+        target["kind"],
+        target["url"],
     )
+
+    # Production must write to Turso. A silent fall back to a local file is the
+    # exact failure this check exists to prevent: search keeps working from the
+    # live providers while the cloud database sees no reads and no writes.
+    if settings.requires_remote_db and not settings.is_remote_db:
+        message = (
+            f"refusing to start: environment={settings.environment} but the database is a "
+            f"local file ({target['url']}). Set TURSO_DB_URL/TURSO_DATABASE_URL and "
+            "TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true if that is genuinely intended."
+        )
+        logger.critical(message)
+        raise RuntimeError(message)
 
     http_client = _build_http_client(settings)
     app.state.http = http_client
     app.state.db_ready = False
+    app.state.db_error = ""
 
     try:
         await database.connect(settings)
         await database.initialize_schema()
+        await database.probe()
         app.state.db_ready = True
+        logger.info("database ready (%s): %s", target["kind"], target["url"])
     except DatabaseError as exc:
-        # Boot anyway: live retrieval still works, /health tells the truth.
+        app.state.db_error = str(exc)
         logger.error("database unavailable at startup: %s", exc)
+        if settings.requires_remote_db:
+            # In production, booting without the database means every write is
+            # lost. Fail instead of serving results that are never indexed.
+            raise RuntimeError(f"database unavailable in production: {exc}") from exc
+
+    if app.state.db_ready:
+        try:
+            from app.engine.store import get_store
+
+            stats = await get_store().stats()
+            logger.info(
+                "index: %d documents, %d queued queries (%s)",
+                stats.get("documents", 0),
+                stats.get("backlog", 0),
+                target["url"],
+            )
+        except Exception as exc:
+            logger.warning("index stats unavailable at startup: %s", exc)
 
     if app.state.db_ready:
         try:
