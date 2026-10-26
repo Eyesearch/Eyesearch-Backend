@@ -97,6 +97,18 @@ INSERT OR REPLACE INTO pages (
 """
 
 
+async def _batch(client: Any, statements: Sequence[tuple[str, list[Any]]], *, strict: bool = True) -> None:
+    """Run a batch, using the non-strict mode where the driver supports it.
+
+    The remote pipeline client can report which steps failed without discarding
+    the ones that committed; the local sqlite client has no such option.
+    """
+    try:
+        await client.batch(list(statements), strict=strict)
+    except TypeError:
+        await client.batch(list(statements))
+
+
 def _now_epoch() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
@@ -250,13 +262,7 @@ class IndexStore:
         try:
             # Sites commit on their own, in their own request: a failure writing
             # pages later can never take the site rows with it.
-            if hasattr(client, "batch"):
-                try:
-                    await client.batch(site_statements, strict=False)  # type: ignore[call-arg]
-                except TypeError:
-                    await client.batch(site_statements)
-            else:  # pragma: no cover - defensive
-                await client.batch(site_statements)
+            await _batch(client, site_statements, strict=False)
         except Exception as exc:
             logger.error(
                 "site write failed for %s: %s: %s (statement: %s)",
@@ -264,7 +270,7 @@ class IndexStore:
                 _SITE_UPSERT.strip().splitlines()[0][:80],
             )
             raise DatabaseError(f"site write failed: {exc}") from exc
-        logger.info("SITES COMMITTED: %d site rows written", len(site_statements))
+        logger.debug("site rows written: %d", len(site_statements))
 
         site_ids: dict[str, int] = {}
         for host in hosts:
@@ -403,18 +409,12 @@ class IndexStore:
                 outcome["sitelinks"] += 1
 
         if statements:
-            logger.info(
-                "PREPARING DB WRITE: %d pages for %d sites (%d sitelinks)",
+            logger.debug(
+                "writing %d pages for %d sites (%d sitelinks)",
                 outcome["pages"], len(site_ids), outcome["sitelinks"],
             )
             try:
-                if hasattr(client, "batch"):
-                    try:
-                        await client.batch(statements, strict=False)  # type: ignore[call-arg]
-                    except TypeError:
-                        await client.batch(statements)
-                else:  # pragma: no cover - defensive
-                    await client.batch(statements)
+                await _batch(client, statements, strict=False)
                 errors = list(getattr(client, "last_errors", []) or [])
                 if errors:
                     outcome["failed_statements"] = len(errors)
@@ -430,11 +430,12 @@ class IndexStore:
 
         if outcome["pages"]:
             logger.info(
-                "indexed %d pages across %d sites (%d sitelinks, %d rejected: %d not indexable, "
-                "%d over budget, %d duplicate)",
-                outcome["pages"], len(site_ids), outcome["sitelinks"], outcome["not_indexable"]
-                + outcome["over_budget"] + outcome["duplicate"] + outcome["domain_cap"],
-                outcome["not_indexable"], outcome["over_budget"], outcome["duplicate"],
+                "indexed %d pages across %d sites (%d sitelinks, %d rows rejected)",
+                outcome["pages"],
+                len(site_ids),
+                outcome["sitelinks"],
+                outcome["not_indexable"] + outcome["over_budget"] + outcome["duplicate"]
+                + outcome["domain_cap"],
             )
         elif prepared:
             logger.warning(
