@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 
 
+def _str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+
 def _int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
@@ -113,10 +118,17 @@ class EngineSettings:
     crawl_user_agent: str = field(
         default_factory=lambda: os.environ.get(
             "CRAWL_USER_AGENT",
-            "EyeSearchBot/1.0 (+https://github.com/Eyesearch/Eyesearch-Backend; indexing Indian web)",
+            # A browser-shaped agent plus our identifier: NIC portals reject a
+            # bare bot string with a handshake error or a 403.
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/128.0.0.0 Safari/537.36 EyesearchBot/1.0",
         )
     )
-    crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 5.0))
+    crawl_timeout_seconds: float = field(default_factory=lambda: _float("CRAWL_TIMEOUT_SECONDS", 15.0))
+    # TLS policy for the crawl: "auto" verifies and retries once without
+    # verification when a government site presents a broken chain; "never"
+    # disables verification outright; "always" refuses the fallback.
+    crawl_verify_tls: str = field(default_factory=lambda: _str("CRAWL_VERIFY_TLS", "auto").lower())
     crawl_max_bytes: int = field(default_factory=lambda: _int("CRAWL_MAX_BYTES", 512_000))
     respect_robots: bool = field(default_factory=lambda: _bool("CRAWL_RESPECT_ROBOTS", True))
 

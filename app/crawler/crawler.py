@@ -65,6 +65,37 @@ def _is_blocked(url: str) -> bool:
     return any(host == blocked or host.endswith(f".{blocked}") for blocked in BLOCKED_HOSTS)
 
 
+async def _stream_page(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    settings: EngineSettings,
+) -> tuple[str, int] | None:
+    """One streamed GET, byte-capped. TLS policy is the client's, not the call's."""
+    async with client.stream(
+        "GET",
+        url,
+        headers=headers,
+        timeout=settings.crawl_timeout_seconds,
+        follow_redirects=True,
+    ) as response:
+        if response.status_code == 304:
+            return None
+        content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if response.status_code >= 400:
+            return None
+        if content_type and content_type not in ALLOWED_CONTENT_TYPES:
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in response.aiter_bytes():
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= settings.crawl_max_bytes:
+                break
+        return b"".join(chunks).decode(response.encoding or "utf-8", errors="ignore"), response.status_code
+
+
 async def fetch_page(
     client: httpx.AsyncClient,
     url: str,
@@ -78,6 +109,11 @@ async def fetch_page(
     Pass `etag` / `last_modified` to make the request conditional; a 304 comes
     back as `None` here, which the revalidation worker treats as "unchanged" and
     answers with zero database writes.
+
+    TLS follows `CRAWL_VERIFY_TLS`: "auto" verifies and, when a host presents a
+    broken certificate chain (common on NIC portals), retries that one request
+    unverified with a warning; "never" skips verification entirely; "always"
+    refuses the fallback.
     """
     if _is_blocked(url):
         return None
@@ -91,29 +127,33 @@ async def fetch_page(
     if last_modified:
         headers["If-Modified-Since"] = last_modified
 
+    policy = (settings.crawl_verify_tls or "auto").lower()
     try:
-        async with client.stream(
-            "GET",
-            url,
-            headers=headers,
-            timeout=settings.crawl_timeout_seconds,
-            follow_redirects=True,
-        ) as response:
-            if response.status_code == 304:
-                return None
-            content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
-            if response.status_code >= 400:
-                return None
-            if content_type and content_type not in ALLOWED_CONTENT_TYPES:
-                return None
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                chunks.append(chunk)
-                size += len(chunk)
-                if size >= settings.crawl_max_bytes:
-                    break
-            return b"".join(chunks).decode(response.encoding or "utf-8", errors="ignore"), response.status_code
+        try:
+            if policy == "never":
+                # One unverified client for the whole request; httpx sets TLS at
+                # client level, not per call.
+                async with httpx.AsyncClient(
+                    verify=False,
+                    follow_redirects=True,
+                    timeout=settings.crawl_timeout_seconds,
+                ) as insecure:
+                    return await _stream_page(insecure, url, headers, settings)
+            return await _stream_page(client, url, headers, settings)
+        except (httpx.ConnectError, httpx.ReadError) as exc:
+            if policy != "auto" or "certificate" not in str(exc).lower():
+                raise
+            logger.warning(
+                "TLS verification failed for %s (%s) — retrying this request unverified",
+                url,
+                exc,
+            )
+            async with httpx.AsyncClient(
+                verify=False,
+                follow_redirects=True,
+                timeout=settings.crawl_timeout_seconds,
+            ) as insecure:
+                return await _stream_page(insecure, url, headers, settings)
     except (httpx.HTTPError, asyncio.TimeoutError) as exc:
         logger.debug("fetch failed %s: %s", url, exc)
         return None
