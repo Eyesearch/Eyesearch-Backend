@@ -15,6 +15,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
+from urllib.parse import urlparse
 
 import libsql_client
 
@@ -25,6 +26,33 @@ from app.errors import DatabaseError
 # What a database URL should look like once we are done with it: no token, no
 # credentials, safe to put in a log line or an HTTP response.
 _SENSITIVE_PARAMS = ("authToken", "auth_token", "token", "password")
+
+# Turso's cloud endpoint speaks Hrana over HTTP. libsql_client picks its backend
+# from the URL scheme, and `libsql://`, `wss://` and `ws://` all select the
+# WebSocket client — which Turso rejects with `400 Invalid response status`.
+# Only `https://` selects the HTTP client, so remote URLs are rewritten here.
+_SCHEME_REWRITES: tuple[tuple[str, str], ...] = (
+    ("libsql://", "https://"),
+    ("libsql+https://", "https://"),
+    ("wss://", "https://"),
+    ("ws://", "http://"),
+)
+
+
+def normalise_url_scheme(url: str) -> str:
+    """Rewrite a remote database URL to the scheme the HTTP backend needs.
+
+    `libsql://` and `wss://` both mean "WebSocket" to libsql_client, and Turso's
+    cloud endpoint answers those with HTTP 400. `file:` URLs are left untouched.
+    """
+    cleaned = (url or "").strip()
+    if not cleaned or cleaned.startswith("file:"):
+        return cleaned
+    lowered = cleaned.lower()
+    for prefix, replacement in _SCHEME_REWRITES:
+        if lowered.startswith(prefix):
+            return f"{replacement}{cleaned[len(prefix):]}"
+    return cleaned
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +146,11 @@ def safe_url(url: str) -> str:
 def describe_target(settings: Settings | None = None) -> dict[str, str]:
     """Where this process actually reads and writes. Safe to log and to expose."""
     cfg = settings or get_settings()
+    effective = normalise_url_scheme(cfg.turso_db_url)
     return {
         "kind": "remote" if cfg.is_remote_db else "local",
-        "url": safe_url(cfg.turso_db_url),
+        "url": safe_url(effective),
+        "scheme": urlparse(effective).scheme or ("file" if effective.startswith("file:") else ""),
         "has_token": "yes" if bool(cfg.turso_auth_token) else "no",
     }
 
@@ -145,8 +175,17 @@ async def connect(settings: Settings | None = None) -> libsql_client.Client:
         logger.error(message)
         raise DatabaseError(message)
 
-    kwargs: dict[str, Any] = {"url": cfg.turso_db_url}
+    effective_url = normalise_url_scheme(cfg.turso_db_url)
+    if effective_url != cfg.turso_db_url.strip():
+        logger.info(
+            "database URL scheme normalised: %s → %s (Turso requires Hrana over HTTPS)",
+            safe_url(cfg.turso_db_url),
+            safe_url(effective_url),
+        )
+
+    kwargs: dict[str, Any] = {"url": effective_url}
     if cfg.turso_auth_token:
+        # libsql_client sends this as `Authorization: Bearer <token>`.
         kwargs["auth_token"] = cfg.turso_auth_token
     try:
         _client = libsql_client.create_client(**kwargs)
@@ -154,8 +193,17 @@ async def connect(settings: Settings | None = None) -> libsql_client.Client:
         logger.error("database client creation failed for %s: %s", target["url"], exc)
         raise DatabaseError(f"could not create database client: {exc}") from exc
 
+    client_class = type(_client).__name__
     if cfg.is_remote_db:
-        logger.info("Connected to Remote Turso DB: %s", target["url"])
+        logger.info("Connected to Remote Turso DB: %s (%s)", target["url"], client_class)
+        if client_class == "HranaClient":
+            # The WebSocket backend: Turso's cloud answers it with HTTP 400.
+            logger.error(
+                "database client is WebSocket-based (%s) for %s; Turso cloud needs the HTTP "
+                "backend. Check that the URL scheme is https://.",
+                client_class,
+                target["url"],
+            )
     else:
         logger.warning(
             "Connected to LOCAL SQLite: %s — this is not the Turso cloud database",
