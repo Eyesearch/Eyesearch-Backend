@@ -217,12 +217,22 @@ class TursoHTTPClient:
         except Exception as exc:
             raise DatabaseError(f"libsql http returned non-JSON: {response.text[:200]}") from exc
 
-        results = parse_pipeline_response(payload)
-        for step in payload.get("results", []) if isinstance(payload, dict) else []:
-            if isinstance(step, dict) and step.get("type") == "error":
-                error = step.get("error") or {}
-                raise DatabaseError(f"libsql step failed: {error.get('message') or error}")
-        return results
+        steps = payload.get("results") if isinstance(payload, dict) else None
+        # Turso answers 200 OK even when a statement inside the batch failed, so
+        # every step has to be inspected. This is the difference between "the
+        # request succeeded" and "the row was written".
+        if isinstance(steps, list):
+            for index, step in enumerate(steps):
+                if isinstance(step, dict) and step.get("type") == "error":
+                    error = step.get("error") or {}
+                    sql = ""
+                    if index < len(requests):
+                        sql = str(requests[index].get("stmt", {}).get("sql", "")).strip().splitlines()[0][:120]
+                    raise DatabaseError(
+                        f"libsql step {index} failed: {error.get('message') or error} "
+                        f"(statement: {sql})"
+                    )
+        return parse_pipeline_response(payload)
 
     async def execute(self, sql: str, params: Sequence[Any] | None = None) -> ResultSet:
         requests = [
