@@ -215,9 +215,9 @@ class TursoHTTPClient:
             cls._COUNTS[verb] = cls._COUNTS.get(verb, 0) + 1
             cls._TOTAL += 1
             heads.append(sql.splitlines()[0][:60])
-        logger.info("TURSO PIPELINE EXECUTE: %s", heads)
+        logger.debug("pipeline execute: %s", heads)
         if cls._TOTAL % 50 < len(requests):
-            logger.info("TURSO STATEMENTS SO FAR: %s", dict(sorted(cls._COUNTS.items())))
+            logger.debug("statements so far: %s", dict(sorted(cls._COUNTS.items())))
 
     async def _post(self, requests: list[dict[str, Any]]) -> list[ResultSet]:
         self._record(requests)

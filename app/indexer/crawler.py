@@ -35,7 +35,7 @@ from app.engine.text import (
     extract_links,
     fallback_document,
 )
-from app.engine.urls import infer_category, is_indexable, normalise_url
+from app.engine.urls import infer_category, is_authoritative_indian, is_indexable, normalise_url
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ async def crawl_seed(
         if url in seen or not is_indexable(url):
             continue
         seen.add(url)
-        logger.info("SEED START: processing domain %s", urlparse(url).netloc or url)
+        logger.debug("seed page: %s", url)
 
         if settings.respect_robots and not await robots.allowed(url):
             report.skip(url, "robots_disallowed")
@@ -142,14 +142,14 @@ async def crawl_seed(
         html, status = await fetch_page_status(client, url, settings)
         report.fetched += 1
         host = urlparse(url).netloc or url
-        logger.info("SEED FETCHED: domain %s returned status %s", host, status or "no response")
+        logger.debug("fetched %s -> %s", host, status or "no response")
 
         if html is None:
             # A refused or unreachable domain still exists. Persist its root
             # rather than discarding the seed — only invalid syntax is skipped.
             reason = f"status_{status}" if status else "network_error"
             report.skip(url, reason)
-            if url == normalise_url(seed.url):
+            if url == normalise_url(seed.url) and is_authoritative_indian(url):
                 document = fallback_document(
                     url,
                     label=seed.label,
@@ -159,7 +159,8 @@ async def crawl_seed(
                 )
                 if document is not None:
                     logger.info(
-                        "persisting hostname root for %s (reason: %s)", _seed_domain(seed), reason
+                        "official portal refused us (%s) — keeping a root card for %s",
+                        reason, _seed_domain(seed),
                     )
                     documents.append(document)
             continue
@@ -168,16 +169,17 @@ async def crawl_seed(
         )
         if document is None:
             report.skip(url, reason or "not_extracted")
-            logger.info("skipped: %s (%s)", reason or "not_extracted", url)
+            logger.debug("skipped: %s (%s)", reason or "not_extracted", url)
             # The seed's own entry page must persist even when extraction fails:
             # a root record from the hostname beats losing the domain entirely.
-            if url == normalise_url(seed.url) and html.strip():
+            if url == normalise_url(seed.url) and is_authoritative_indian(url):
                 document = fallback_document(
-                    url, label=seed.label, category=seed.category, http_status=status
+                    url, label=seed.label, category=seed.category, http_status=status or 200
                 )
                 if document is not None:
                     logger.info(
-                        "using fallback metadata for %s (reason: %s)", _seed_domain(seed), reason
+                        "official portal had nothing extractable (%s) — keeping a root card for %s",
+                        reason, _seed_domain(seed),
                     )
             if document is None:
                 continue
@@ -250,10 +252,6 @@ async def run_seed_pass(
         for finished in asyncio.as_completed(tasks):
             seed, seed_report, documents = await finished
             if documents:
-                logger.info(
-                    "PREPARING DB WRITE: domain %s with %d pages",
-                    _seed_domain(seed), len(documents),
-                )
                 try:
                     written = await index.replace_documents(
                         [document.as_row() for document in documents]
