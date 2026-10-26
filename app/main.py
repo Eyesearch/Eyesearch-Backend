@@ -128,9 +128,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     revalidate_scheduler.start()
     revalidate_scheduler.start_backlog_worker()
 
+    # Populate an empty index on first boot, then keep the categories warm.
+    initial_pass = False
+    if app.state.db_ready:
+        try:
+            from app.engine.store import get_store
+
+            initial_pass = (await get_store().count_documents()) == 0
+        except Exception as exc:
+            logger.warning("could not check index size before the seed pass: %s", exc)
+    revalidate_scheduler.start_seed_crawler(initial_pass=initial_pass)
+
     try:
         yield
     finally:
+        await revalidate_scheduler.stop_seed_crawler()
         await revalidate_scheduler.stop_backlog_worker()
         await revalidate_scheduler.stop()
         await search_service.drain_background_writes()

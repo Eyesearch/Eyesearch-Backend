@@ -15,12 +15,14 @@ import random
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.indexer.backlog_worker import run_backlog_once
+from app.indexer.crawler import run_seed_pass
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
 
 _task: asyncio.Task[None] | None = None
 _backlog_task: asyncio.Task[None] | None = None
+_seed_task: asyncio.Task[None] | None = None
 _cooldown: dict[str, int] = {}
 
 
@@ -78,6 +80,52 @@ def start_backlog_worker(settings: EngineSettings | None = None) -> asyncio.Task
     return _backlog_task
 
 
+async def _seed_loop(settings: EngineSettings) -> None:
+    """Keep the foundational categories warm, one pass at a time."""
+    while True:
+        try:
+            await run_seed_pass()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("seed pass failed: %s", exc)
+        await asyncio.sleep(max(600, settings.seed_crawl_interval_seconds) + random.uniform(0, 120))
+
+
+def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: bool = False) -> asyncio.Task[None] | None:
+    """Start the category crawler. `initial_pass` populates an empty index at boot."""
+    global _seed_task
+    cfg = settings or get_engine_settings()
+    if not cfg.seed_crawl_enabled or _seed_task is not None:
+        return _seed_task
+
+    async def runner() -> None:
+        if initial_pass:
+            try:
+                logger.info("initial seed crawl pass starting")
+                await run_seed_pass()
+            except Exception as exc:
+                logger.warning("initial seed pass failed: %s", exc)
+        await _seed_loop(cfg)
+
+    _seed_task = asyncio.create_task(runner(), name="eyesearch-seed-crawler")
+    logger.info("seed crawler started (every ~%ss)", cfg.seed_crawl_interval_seconds)
+    return _seed_task
+
+
+async def stop_seed_crawler() -> None:
+    global _seed_task
+    if _seed_task is None:
+        return
+    _seed_task.cancel()
+    try:
+        await _seed_task
+    except asyncio.CancelledError:
+        pass
+    _seed_task = None
+    logger.info("seed crawler stopped")
+
+
 async def stop_backlog_worker() -> None:
     global _backlog_task
     if _backlog_task is None:
@@ -104,4 +152,12 @@ async def stop() -> None:
     logger.info("revalidation worker stopped")
 
 
-__all__ = ["start", "stop", "run_once", "start_backlog_worker", "stop_backlog_worker"]
+__all__ = [
+    "start",
+    "stop",
+    "run_once",
+    "start_backlog_worker",
+    "stop_backlog_worker",
+    "start_seed_crawler",
+    "stop_seed_crawler",
+]
