@@ -366,16 +366,12 @@ Title, description, H1/H2 headings and up to five authoritative child links are
 extracted, and the domain is committed straight to `sites`/`pages` — no
 intermediate holding pen.
 
-**Every stage is logged, so "no writes" is diagnosable from the log alone.**
-Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
-which build is live. Each seed logs `SEED START: processing domain …` and
-`SEED FETCHED: domain … returned status …`; each write logs
-`PREPARING DB WRITE: domain … with N pages`; each commit logs
-`DB COMMIT SUCCESS: Indexed … (Running total: N)`. Every request to the Turso
-pipeline logs its statements — `TURSO PIPELINE EXECUTE: ['SELECT domain FROM
-sites …', 'INSERT INTO sites …']` — with a running tally every fifty statements
-(`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
-a read loop from an ingestion loop.
+**Logging is structured.** INFO carries what an operator needs: `RUNNING ENGINE
+COMMIT`, the startup database and write checks, `migration applied: …`,
+`DB COMMIT SUCCESS: Indexed … (Running total: N)`, the seed pass summary with its
+skip-reason tally, and coverage. Per-URL tracing (each fetch, each pipeline
+statement, each write batch) is at DEBUG, so the INFO stream stays readable while
+the detail is one `LOG_LEVEL=DEBUG` away.
 
 **Schema migrations run before the DDL batch, and are verified.** A production
 database whose `crawl_backlog` predated the `kind` column made every backlog
@@ -411,16 +407,27 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**Every seed persists a root — whatever the server answers.** A 200 with
-nothing extractable, a JavaScript shell, a 403, a 406, a 500 or a connection/SSL
-failure all end in a committed root record, titled with the seed label when we
-have content and with the bare hostname when we do not (`eci.gov.in`). Sitelinks
-are optional; only a syntactically invalid domain is skipped. Each seed is
-written as it finishes, so the site count moves with every seed rather than at
-the end of the pass. Verified against all five cases in one run: `eci.gov.in`
-(403), `ssc.nic.in` (406), `sslbroken.gov.in` (SSL failure), `error.gov.in`
-(500) → hostname roots, `karnataka.gov.in` (200) → extracted title; 5 seeds,
-5 sites, 5 pages committed.
+**The quality gate is strict.** A page is indexed only with a semantic
+`<title>` (≥ 3 chars), a meaningful meta description (≥ 20 chars) and **at least
+80 characters of server-rendered text**. JavaScript shells, WAF block pages
+(`403 Forbidden`, `Access denied`, `Just a moment`), thin pages and untitled
+documents are refused, each with its reason: `no_title`, `no_description`,
+`low_text_density`, `junk_page`, `not_indexable`, `over_budget`, `duplicate`.
+Sitelinks come only from `<nav>`/`<header>` anchors (falling back to the whole
+document when a page marks none), need a 3–40 character label, must be same-host
+and within two path levels, and are capped at five per domain.
+
+**Official Indian portals are never lost.** A `.gov.in`, `.nic.in`, `.ac.in`,
+`.res.in` or `.edu.in` seed that answers 403/406/500, fails its TLS handshake or
+returns a JavaScript shell keeps a minimal root card titled with the hostname
+(`eci.gov.in`). Non-whitelisted domains get no such card: a shell or a refusal
+there is simply not indexed. Each seed is written as it finishes, so the site
+count moves with every seed rather than at the end of the pass.
+
+Verified in one run: `good.gov.in` (real content) → extracted title,
+`shell.gov.in`, `blocked.gov.in`, `thin.gov.in`, `refused.gov.in` (all
+whitelisted) → hostname roots, `notgov.example` (shell on a non-whitelisted
+domain) → rejected. Five sites committed, one domain refused.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
@@ -818,16 +825,12 @@ Title, description, H1/H2 headings and up to five authoritative child links are
 extracted, and the domain is committed straight to `sites`/`pages` — no
 intermediate holding pen.
 
-**Every stage is logged, so "no writes" is diagnosable from the log alone.**
-Startup prints `RUNNING ENGINE COMMIT: <sha> (RENDER_GIT_COMMIT)` so you can see
-which build is live. Each seed logs `SEED START: processing domain …` and
-`SEED FETCHED: domain … returned status …`; each write logs
-`PREPARING DB WRITE: domain … with N pages`; each commit logs
-`DB COMMIT SUCCESS: Indexed … (Running total: N)`. Every request to the Turso
-pipeline logs its statements — `TURSO PIPELINE EXECUTE: ['SELECT domain FROM
-sites …', 'INSERT INTO sites …']` — with a running tally every fifty statements
-(`TURSO STATEMENTS SO FAR: {'INSERT': 12, 'SELECT': 480}`), which is how you tell
-a read loop from an ingestion loop.
+**Logging is structured.** INFO carries what an operator needs: `RUNNING ENGINE
+COMMIT`, the startup database and write checks, `migration applied: …`,
+`DB COMMIT SUCCESS: Indexed … (Running total: N)`, the seed pass summary with its
+skip-reason tally, and coverage. Per-URL tracing (each fetch, each pipeline
+statement, each write batch) is at DEBUG, so the INFO stream stays readable while
+the detail is one `LOG_LEVEL=DEBUG` away.
 
 **Schema migrations run before the DDL batch, and are verified.** A production
 database whose `crawl_backlog` predated the `kind` column made every backlog
@@ -863,16 +866,27 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
-**Every seed persists a root — whatever the server answers.** A 200 with
-nothing extractable, a JavaScript shell, a 403, a 406, a 500 or a connection/SSL
-failure all end in a committed root record, titled with the seed label when we
-have content and with the bare hostname when we do not (`eci.gov.in`). Sitelinks
-are optional; only a syntactically invalid domain is skipped. Each seed is
-written as it finishes, so the site count moves with every seed rather than at
-the end of the pass. Verified against all five cases in one run: `eci.gov.in`
-(403), `ssc.nic.in` (406), `sslbroken.gov.in` (SSL failure), `error.gov.in`
-(500) → hostname roots, `karnataka.gov.in` (200) → extracted title; 5 seeds,
-5 sites, 5 pages committed.
+**The quality gate is strict.** A page is indexed only with a semantic
+`<title>` (≥ 3 chars), a meaningful meta description (≥ 20 chars) and **at least
+80 characters of server-rendered text**. JavaScript shells, WAF block pages
+(`403 Forbidden`, `Access denied`, `Just a moment`), thin pages and untitled
+documents are refused, each with its reason: `no_title`, `no_description`,
+`low_text_density`, `junk_page`, `not_indexable`, `over_budget`, `duplicate`.
+Sitelinks come only from `<nav>`/`<header>` anchors (falling back to the whole
+document when a page marks none), need a 3–40 character label, must be same-host
+and within two path levels, and are capped at five per domain.
+
+**Official Indian portals are never lost.** A `.gov.in`, `.nic.in`, `.ac.in`,
+`.res.in` or `.edu.in` seed that answers 403/406/500, fails its TLS handshake or
+returns a JavaScript shell keeps a minimal root card titled with the hostname
+(`eci.gov.in`). Non-whitelisted domains get no such card: a shell or a refusal
+there is simply not indexed. Each seed is written as it finishes, so the site
+count moves with every seed rather than at the end of the pass.
+
+Verified in one run: `good.gov.in` (real content) → extracted title,
+`shell.gov.in`, `blocked.gov.in`, `thin.gov.in`, `refused.gov.in` (all
+whitelisted) → hostname roots, `notgov.example` (shell on a non-whitelisted
+domain) → rejected. Five sites committed, one domain refused.
 
 **Nothing is skipped silently.** Every page the crawler rejects is logged with
 the rule that rejected it — `skipped: no_title`, `skipped: blocked_status`,
