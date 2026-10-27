@@ -71,7 +71,11 @@ def test_the_parser_extracts_absolute_links_and_drops_non_navigable_hrefs():
     assert SEED + "logo.png" not in kept
     assert SEED + "login" not in kept
     assert SEED + "a/b/c/d/e/f/g/h" not in kept
-    assert "https://facebook.com/karnataka" not in kept
+
+    # With global domains allowed, an ordinary .com link survives the frontier.
+    assert "https://facebook.com/karnataka" in kept
+    india_only = FrontierAgent.filter_links(None, parsed.links, SEED, allow_global=False)
+    assert "https://facebook.com/karnataka" not in india_only
 
 
 def test_relative_links_are_resolved_against_the_page_url():
@@ -111,11 +115,30 @@ def test_is_crawlable_rejects_junk_extensions_and_deep_paths():
     assert is_crawlable("https://karnataka.gov.in/a/b/c/d/e/f/g/h") is False
 
 
-def test_crawl_scope_is_the_same_host_or_an_indian_public_domain():
+def test_crawl_scope_widens_from_host_to_india_to_global():
+    # Ring 1: the source host itself.
     assert in_crawl_scope("https://karnataka.gov.in/about", "karnataka.gov.in") is True
+    # Ring 2: authoritative Indian domains.
     assert in_crawl_scope("https://india.gov.in/services", "karnataka.gov.in") is True
-    assert in_crawl_scope("https://facebook.com/karnataka", "karnataka.gov.in") is False
-    assert in_crawl_scope("https://example.com/x", "karnataka.gov.in") is False
+    # Ring 3: ordinary global domains, while allow_global is on.
+    assert in_crawl_scope("https://example.com/x", "karnataka.gov.in") is True
+    # A TLD outside the allowed set is still refused.
+    assert in_crawl_scope("https://example.xyz/x", "karnataka.gov.in") is False
+
+
+def test_the_india_only_crawl_can_be_restored():
+    """ALLOW_GLOBAL_DOMAINS=false must bring back the old behaviour exactly."""
+    for url in (
+        "https://facebook.com/karnataka",
+        "https://example.com/x",
+        "https://randomshop.com/product",
+    ):
+        assert in_crawl_scope(url, "karnataka.gov.in") is True
+        assert in_crawl_scope(url, "karnataka.gov.in", allow_global=False) is False
+
+    # The Indian rings are unaffected by the switch.
+    assert in_crawl_scope("https://india.gov.in/x", "karnataka.gov.in", allow_global=False) is True
+    assert in_crawl_scope("https://karnataka.gov.in/x", "karnataka.gov.in", allow_global=False) is True
 
 
 def test_filter_links_keeps_only_what_is_in_scope():
@@ -131,7 +154,14 @@ def test_filter_links_keeps_only_what_is_in_scope():
 
     accepted = FrontierAgent.filter_links(None, links, SEED)
 
-    assert accepted == [SEED + "about", "https://india.gov.in/services"]
+    assert accepted == [
+        SEED + "about",
+        "https://india.gov.in/services",
+        "https://facebook.com/karnataka",
+    ]
+
+    india_only = FrontierAgent.filter_links(None, links, SEED, allow_global=False)
+    assert india_only == [SEED + "about", "https://india.gov.in/services"]
 
 
 def test_filter_links_never_returns_the_source_page():
@@ -300,9 +330,15 @@ def test_whitelisted_indian_portals_are_in_scope(url):
     assert is_authoritative(frontier_module.domain_of(url)) is True
 
 
-def test_a_non_whitelisted_commercial_domain_stays_out_of_scope():
-    assert in_crawl_scope("https://randomshop.com/product", "karnataka.gov.in") is False
-    assert in_crawl_scope("https://facebook.com/karnataka", "karnataka.gov.in") is False
+def test_global_web_domains_are_in_scope():
+    assert in_crawl_scope("https://bbc.com/news", "karnataka.gov.in") is True
+    assert in_crawl_scope("https://arxiv.org/abs/1234", "karnataka.gov.in") is True
+    assert in_crawl_scope("https://python.org/doc", "karnataka.gov.in") is True
+
+
+def test_a_domain_outside_the_allowed_tlds_stays_out():
+    assert in_crawl_scope("https://randomshop.xyz/product", "karnataka.gov.in") is False
+    assert in_crawl_scope("https://bit.ly/abc", "karnataka.gov.in") is False
 
 
 def test_a_whitelisted_domain_sorts_with_the_authoritative_urls():

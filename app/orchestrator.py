@@ -218,7 +218,13 @@ class Orchestrator:
             # Every page that parsed contributes its outbound links, whether
             # or not it passed the gate: a thin page can still point at good
             # ones. The frontier applies the crawl-scope rules.
-            discovered.extend(self._frontier.filter_links(parsed.links, item.url))
+            discovered.extend(
+                self._frontier.filter_links(
+                    parsed.links,
+                    item.url,
+                    allow_global=self._settings.allow_global_domains,
+                )
+            )
 
             document = PageDocument(
                 url=item.url,

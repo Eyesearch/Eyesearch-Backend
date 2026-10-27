@@ -36,8 +36,9 @@ PRIORITY_SUFFIXES: tuple[str, ...] = (
     ".in",
 )
 
-#: Indian portals that are not on a public suffix but are worth crawling.
-#: News, legal reporting, startup and developer media, jobs and open data.
+#: Domains worth crawling that are not on an Indian public suffix: Indian
+#: news, legal, startup and developer media, plus high-value global reference,
+#: science, open-source and news sources.
 WHITELISTED_DOMAINS: tuple[str, ...] = (
     "thehindu.com",
     "indianexpress.com",
@@ -51,6 +52,24 @@ WHITELISTED_DOMAINS: tuple[str, ...] = (
     "data.gov.in",
     "freejobalert.com",
     "ncs.gov.in",
+    "wikipedia.org",
+    "wikimedia.org",
+    "w3.org",
+    "ietf.org",
+    "github.com",
+    "archive.org",
+    "reuters.com",
+    "bbc.com",
+    "nature.com",
+    "sciencedirect.com",
+    "arxiv.org",
+)
+
+#: Ordinary global TLDs. With `allow_global` on, a link to any registrable
+#: domain under one of these is crawlable, which is what stops the frontier
+#: starving once the Indian sources are exhausted.
+GLOBAL_ALLOWED_TLDS: frozenset[str] = frozenset(
+    {".org", ".edu", ".net", ".com", ".io", ".dev", ".gov", ".int"}
 )
 
 #: Extensions that are never a page to index.
@@ -254,14 +273,29 @@ def is_crawlable(url: str) -> bool:
     return True
 
 
-def in_crawl_scope(url: str, source_host: str) -> bool:
-    """Same host, or an authoritative Indian public domain."""
+def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = True) -> bool:
+    """Whether a link belongs to the crawl.
+
+    Three widening rings: the source host itself, an authoritative Indian
+    domain, and — when `allow_global` is on — any registrable domain under a
+    standard global TLD.
+
+    The outer ring is what keeps the frontier from starving once the Indian
+    sources are exhausted, but it is a real change of character: it makes this
+    a general web crawler rather than an India-focused one, and `.com` is the
+    largest trap surface there is. `allow_global=False` restores the previous
+    behaviour, and `ALLOW_GLOBAL_DOMAINS=false` does it per deployment.
+    """
     host = domain_of(url)
     if not host:
         return False
     if host == source_host:
         return True
-    return is_authoritative(host)
+    if is_authoritative(host):
+        return True
+    if allow_global:
+        return any(host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS)
+    return False
 
 
 def is_authoritative(host: str) -> bool:
@@ -291,6 +325,7 @@ async def discover_sitemap_urls(
     *,
     max_urls: int = SITEMAP_MAX_URLS_PER_DOMAIN,
     max_fetches: int = SITEMAP_MAX_FETCHES,
+    allow_global: bool = True,
 ) -> list[str]:
     """Crawlable URLs from a domain's sitemap, bounded and in scope.
 
@@ -348,7 +383,7 @@ async def discover_sitemap_urls(
             continue
         if not is_crawlable(normalised):
             continue
-        if not in_crawl_scope(normalised, domain):
+        if not in_crawl_scope(normalised, domain, allow_global=allow_global):
             continue
         seen.add(normalised)
         accepted.append(normalised)
@@ -434,7 +469,13 @@ class FrontierAgent:
             logger.info("frontier: queued %d new URLs (depth now %d)", added, await self.depth())
         return added
 
-    def filter_links(self, links: list[str] | tuple[str, ...], source_url: str) -> list[str]:
+    def filter_links(
+        self,
+        links: list[str] | tuple[str, ...],
+        source_url: str,
+        *,
+        allow_global: bool = True,
+    ) -> list[str]:
         """The subset of a page's links that belongs in the frontier.
 
         Pure and synchronous: no database, no network. The orchestrator calls
@@ -452,7 +493,7 @@ class FrontierAgent:
                 continue
             if not is_crawlable(normalised):
                 continue
-            if not in_crawl_scope(normalised, source_host):
+            if not in_crawl_scope(normalised, source_host, allow_global=allow_global):
                 continue
             seen.add(normalised)
             accepted.append(normalised)
@@ -592,6 +633,7 @@ class FrontierAgent:
 __all__ = [
     "AUTHORITATIVE_DOMAINS",
     "FRONTIER_LOW_WATER",
+    "GLOBAL_ALLOWED_TLDS",
     "LOC_PATTERN",
     "SITEMAP_COOLDOWN_SECONDS",
     "SITEMAP_MAX_FETCHES",

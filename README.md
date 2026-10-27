@@ -228,7 +228,7 @@ seeds. The work is split in two, and the split matters:
 | rule | value |
 | --- | --- |
 | scheme | `http` / `https` only |
-| host | the source host's registrable domain, any `.in` domain, or a whitelisted Indian portal |
+| host | the source host, any `.in` domain, a whitelisted portal, or (with `ALLOW_GLOBAL_DOMAINS`) any global TLD |
 | path depth | ≤ `MAX_PATH_DEPTH` (6) — Indian portals nest real content several levels down |
 | extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
@@ -236,12 +236,30 @@ seeds. The work is split in two, and the split matters:
 | frontier size | capped at `MAX_PENDING_QUEUE` (10,000) pending rows |
 | batch order | round-robin across domains, not plain `rowid` order |
 
-Crawl scope is not limited to public suffixes: `WHITELISTED_DOMAINS` adds
-Indian news, legal, startup and developer media that sit on `.com` — thehindu,
-indianexpress, prajavani, vijaykarnataka, indiankanoon, livelaw, barandbench,
-inc42, hasgeek — alongside `data.gov.in`, `freejobalert.com` and `ncs.gov.in`.
-The seed list is 21 roots chosen to span categories rather than to favour
-government alone.
+Crawl scope widens in three rings: the source host itself, then authoritative
+Indian domains, then — while `ALLOW_GLOBAL_DOMAINS` is true — any registrable
+domain under `GLOBAL_ALLOWED_TLDS` (`.org`, `.edu`, `.net`, `.com`, `.io`,
+`.dev`, `.gov`, `.int`).
+
+The middle ring is `WHITELISTED_DOMAINS`: Indian news, legal, startup and
+developer media on `.com` (thehindu, indianexpress, prajavani, vijaykarnataka,
+indiankanoon, livelaw, barandbench, inc42, hasgeek), `data.gov.in`,
+`freejobalert.com`, `ncs.gov.in`, plus high-value global reference and science
+(wikipedia, wikimedia, w3.org, ietf.org, github.com, archive.org, reuters,
+bbc.com, nature.com, sciencedirect, arxiv). Whitelisted domains sort with the
+authoritative ones and are eligible for sitemap harvesting.
+
+The outer ring is what stops the frontier starving once the Indian sources are
+exhausted, but it changes the character of the crawl: `.com` is the largest
+trap surface there is. The guardrails still apply to a global link — path depth,
+junk extensions, blocked paths, the 10-page-per-domain cap and the 10,000-row
+frontier cap — and `ALLOW_GLOBAL_DOMAINS=false` restores the India-only crawl
+per deployment without a code change.
+
+Measured on a page carrying one of each: with the flag on, 4 links are queued
+(arxiv, bbc, python.org, karnataka.gov.in) and a `.xyz` domain, a depth-8 path,
+a `.png` and a `/login` are all still refused; with it off, 3 are queued —
+python.org drops, while the whitelisted arxiv and bbc stay.
 
 Batches are dealt round-robin. A plain `ORDER BY rowid` hands all ten slots to
 whichever domain was queued first — one portal with forty pending URLs takes
