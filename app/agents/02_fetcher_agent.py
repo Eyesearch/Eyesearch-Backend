@@ -88,8 +88,20 @@ class FetcherAgent:
     def client(self) -> httpx.AsyncClient:
         return self._client
 
-    async def fetch(self, url: str, *, attempts: int = 2) -> FetchResult:
-        """Fetch one URL, retrying only what is worth retrying."""
+    async def fetch(self, url: str, *, attempts: int = 1) -> FetchResult:
+        """Fetch one URL, single pass by default.
+
+        A retry costs a second full timeout while still holding a semaphore
+        slot, and a batch waits for its slowest member — so one dead host used
+        to stall twenty other URLs behind it. Failed URLs are marked `failed`
+        and the frontier moves on, which is cheaper than waiting.
+
+        There is no sleep between attempts either. The semaphore already paces
+        requests, and sleeping inside it multiplied the stall.
+
+        `attempts` is still honoured for callers that want a retry; the
+        revalidation worker passes 1 explicitly.
+        """
         started = time.monotonic()
         last_error = ""
         last_status = 0
@@ -128,7 +140,7 @@ class FetcherAgent:
                         )
 
             if attempt < attempts:
-                await asyncio.sleep(0.5 * attempt)
+                logger.debug("retrying %s (attempt %d of %d)", url, attempt + 1, attempts)
 
         return FetchResult(
             url=url,

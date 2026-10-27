@@ -99,3 +99,60 @@ def test_an_empty_document_is_rejected_rather_than_capped():
 
     assert parsed.ok is False
     assert parsed.reason == "empty_response"
+
+
+# ---------------------------------------------------------------------------
+# Fetcher: single pass by default
+# ---------------------------------------------------------------------------
+
+
+async def test_a_dead_host_is_not_retried_by_default():
+    """A retry holds a semaphore slot for a second full timeout."""
+    import httpx
+
+    from app.agents import load_agent
+    from app.engine.config import Settings
+
+    FetcherAgent = load_agent("02_fetcher_agent").FetcherAgent
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("dead")
+
+    fetcher = FetcherAgent(
+        Settings(environment="test", crawl_timeout_seconds=1.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await fetcher.fetch("https://dead.gov.in/x")
+    finally:
+        await fetcher.aclose()
+
+    assert result.ok is False
+    assert calls["n"] == 1
+
+
+async def test_an_explicit_attempt_count_still_retries():
+    import httpx
+
+    from app.agents import load_agent
+    from app.engine.config import Settings
+
+    FetcherAgent = load_agent("02_fetcher_agent").FetcherAgent
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("dead")
+
+    fetcher = FetcherAgent(
+        Settings(environment="test", crawl_timeout_seconds=1.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await fetcher.fetch("https://dead.gov.in/x", attempts=2)
+    finally:
+        await fetcher.aclose()
+
+    assert calls["n"] == 2
