@@ -102,6 +102,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 #: database created by an earlier build picks them up without a rebuild.
 COLUMN_ADDITIONS: tuple[tuple[str, str, str], ...] = (
     ("crawl_queue", "processed_at", "TIMESTAMP"),
+    ("crawl_queue", "last_error", "TEXT"),
     ("pages", "category", "TEXT DEFAULT 'general_reference'"),
     ("pages", "language", "TEXT DEFAULT 'en'"),
 )
