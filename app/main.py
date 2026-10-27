@@ -24,7 +24,7 @@ from app.errors import AppError, DatabaseError, error_envelope
 from app.engine.config import get_engine_settings
 from app.indexer import crawler as seed_crawler
 from app.indexer import scheduler as revalidate_scheduler
-from app.routes import health, opensearch, retrieve, search
+from app.routes import chat, health, opensearch, retrieve, search
 from app.services import live_retrieval, search_service
 
 logger = logging.getLogger(__name__)
@@ -211,6 +211,7 @@ def create_app() -> FastAPI:
     application.include_router(opensearch.router)
     application.include_router(search.router)
     application.include_router(retrieve.router)
+    application.include_router(chat.router)
 
     @application.exception_handler(AppError)
     async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
