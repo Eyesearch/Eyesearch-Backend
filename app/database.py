@@ -231,6 +231,145 @@ async def migrate_legacy_schema(
     return found
 
 
+async def resync_fts(client: LibsqlClient) -> bool:
+    """Rebuild the FTS index when it has drifted from `pages`.
+
+    `page_fts` is external content, so its triggers issue a `'delete'` command
+    against the index for every updated row. If the index never held those rows
+    — a database whose `pages` were written before the triggers existed — that
+    command fails with `database disk image is malformed`, and *any* update to
+    `pages` breaks, including the subdomain normalisation below. Search would
+    also quietly return nothing.
+
+    `COUNT(*)` on an external-content FTS table reads the content table and so
+    always matches; the shadow `page_fts_docsize` table is what actually counts
+    indexed documents. If the shadow table is unavailable, the check is skipped
+    rather than guessed at.
+    """
+    try:
+        pages = await client.execute("SELECT COUNT(*) FROM pages")
+        indexed = await client.execute("SELECT COUNT(*) FROM page_fts_docsize")
+    except LibsqlError as error:
+        logger.debug("could not compare the FTS index with pages: %s", error)
+        return False
+
+    page_count = int(pages.scalar(0) or 0)
+    indexed_count = int(indexed.scalar(0) or 0)
+    if page_count == indexed_count:
+        return False
+
+    logger.warning(
+        "FTS index out of sync (%d pages, %d indexed) — rebuilding", page_count, indexed_count
+    )
+    try:
+        await client.execute("INSERT INTO page_fts(page_fts) VALUES('rebuild')")
+    except LibsqlError as error:
+        logger.error("FTS rebuild failed: %s", error)
+        return False
+    return True
+
+
+async def normalize_legacy_subdomains(client: LibsqlClient) -> int:
+    """Merge subdomain rows in `sites` into their registrable root domain.
+
+    Before `domain_of()` collapsed subdomains, `sites` and `crawl_queue` stored
+    raw hosts, so `python.fossee.in` and `om.fossee.in` were separate rows and
+    each carried its own page quota. This folds them together: the group keeps
+    one `sites` row under the canonical domain, its pages are re-pointed to that
+    row, and the redundant rows are deleted.
+
+    Order matters and is enforced here — pages are re-pointed *before* their old
+    site row is deleted, so a foreign key can never be left dangling. The whole
+    thing is one transaction, and it is idempotent: a database that is already
+    canonical produces no statements and no writes.
+
+    Returns the number of redundant `sites` rows removed.
+    """
+    from app.agents import load_agent
+
+    domain_of = load_agent("01_frontier_agent").domain_of
+
+    sites = await client.execute("SELECT site_id, domain FROM sites")
+    if not sites.rows:
+        return 0
+
+    domain_by_id: dict[int, str] = {}
+    by_canonical: dict[str, list[int]] = {}
+    for row in sites.rows:
+        site_id = int(row[0])
+        raw = str(row[1] or "")
+        domain_by_id[site_id] = raw
+        canonical = domain_of(f"https://{raw}/") or raw
+        by_canonical.setdefault(canonical, []).append(site_id)
+
+    statements: list[tuple[str, tuple]] = [("BEGIN IMMEDIATE", ())]
+    merged = 0
+    renamed = 0
+
+    for canonical, site_ids in by_canonical.items():
+        if len(site_ids) == 1 and domain_by_id[site_ids[0]] == canonical:
+            continue
+
+        # Prefer a row that already holds the canonical domain, so its id and
+        # any reference to it survive; otherwise promote the lowest id.
+        matching = [site_id for site_id in site_ids if domain_by_id[site_id] == canonical]
+        target = matching[0] if matching else min(site_ids)
+        redundant = [site_id for site_id in site_ids if site_id != target]
+
+        if domain_by_id[target] != canonical:
+            statements.append(
+                ("UPDATE sites SET domain = ? WHERE site_id = ?", (canonical, target))
+            )
+            renamed += 1
+
+        if redundant:
+            placeholders = ", ".join("?" for _ in redundant)
+            statements.append(
+                (
+                    f"UPDATE pages SET site_id = ? WHERE site_id IN ({placeholders})",
+                    (target, *redundant),
+                )
+            )
+            statements.append(
+                (f"DELETE FROM sites WHERE site_id IN ({placeholders})", tuple(redundant))
+            )
+            merged += len(redundant)
+
+    queued = await client.execute("SELECT DISTINCT domain FROM crawl_queue")
+    queue_updates = 0
+    for row in queued.rows:
+        raw = str(row[0] or "")
+        canonical = domain_of(f"https://{raw}/") or raw
+        if canonical != raw:
+            statements.append(
+                ("UPDATE crawl_queue SET domain = ? WHERE domain = ?", (canonical, raw))
+            )
+            queue_updates += 1
+
+    if len(statements) == 1:  # only BEGIN: nothing to do
+        return 0
+
+    statements.append(("COMMIT", ()))
+    try:
+        await client.batch(statements)
+    except LibsqlError as error:
+        logger.error("subdomain normalisation failed: %s", error)
+        try:
+            await client.execute("ROLLBACK")
+        except LibsqlError:
+            pass
+        return 0
+
+    logger.info(
+        "normalised legacy subdomains: %d site rows merged, %d renamed, "
+        "%d queue domains updated",
+        merged,
+        renamed,
+        queue_updates,
+    )
+    return merged
+
+
 async def initialize_database(
     client: LibsqlClient,
     *,
@@ -244,6 +383,9 @@ async def initialize_database(
     await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
     await ensure_columns(client)
     await client.batch([(sql, ()) for sql in POST_COLUMN_STATEMENTS])
+    # Before anything updates `pages`: a stale index makes every update fail.
+    await resync_fts(client)
+    await normalize_legacy_subdomains(client)
     counts = await read_counts(client)
     logger.info(
         "schema ready: %d sites, %d pages, %d queued",
@@ -322,7 +464,10 @@ async def probe(client: LibsqlClient) -> dict[str, Any]:
 
 
 __all__ = [
+    "COLUMN_ADDITIONS",
     "COUNT_STATEMENTS",
+    "normalize_legacy_subdomains",
+    "resync_fts",
     "SCHEMA_STATEMENTS",
     "initialize_database",
     "probe",

@@ -267,6 +267,22 @@ share one ten-page quota — 10 indexed, 1 skipped.
 The URL itself keeps its full host — only the grouping key is collapsed, so
 pages on different subdomains are still crawled and stored as themselves.
 
+Rows written before the collapse are folded in at startup by
+`normalize_legacy_subdomains()`: each group of subdomain `sites` rows keeps one
+row under the canonical domain, its pages are re-pointed to that row, and the
+redundant rows are deleted — in one transaction, pages before deletes so a
+foreign key is never left dangling, and idempotent so a second boot does nothing.
+`crawl_queue.domain` is normalised in the same pass.
+
+That migration is only safe on a consistent index, so `resync_fts()` runs
+first. `page_fts` is external content, and its triggers issue a `'delete'`
+command for every updated row; if the index never held those rows — a database
+whose `pages` predate the triggers — the command fails with
+`database disk image is malformed` and *any* update to `pages` breaks, while
+search quietly returns nothing. `COUNT(*)` on an external-content FTS table
+reads the content table and always matches, so the shadow `page_fts_docsize`
+table is what counts indexed documents; a mismatch triggers a `'rebuild'`.
+
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue
 row rather than four.
