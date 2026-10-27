@@ -19,6 +19,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import warnings
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -174,12 +175,25 @@ def _unwrap_ddg_url(href: str) -> str:
     return candidate
 
 
+def _load_ddgs() -> Any:
+    """The DDGS client from the current package, with the old name as a fallback.
+
+    `duckduckgo_search` is deprecated and emits a RuntimeWarning on import; the
+    package is now `ddgs`. We prefer the new namespace and silence the legacy
+    warning rather than let it print on every search.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            from ddgs import DDGS  # type: ignore[import-not-found]
+        except ImportError:
+            from duckduckgo_search import DDGS  # type: ignore[import-not-found]
+    return DDGS
+
+
 def _ddgs_sync(query: str, limit: int, region: str, safesearch: str) -> list[dict[str, Any]]:
     """Blocking library call — always invoked through ``asyncio.to_thread``."""
-    try:  # the package was renamed; support both import paths
-        from ddgs import DDGS  # type: ignore[import-not-found]
-    except ImportError:
-        from duckduckgo_search import DDGS  # type: ignore[import-not-found]
+    DDGS = _load_ddgs()
 
     with DDGS() as client:
         return list(
