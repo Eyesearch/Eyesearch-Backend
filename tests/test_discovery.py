@@ -705,3 +705,60 @@ async def test_a_failing_page_step_does_not_undo_the_site_commit(temp_db) -> Non
     assert len(calls) == 2                     # sites, then pages — separate requests
     assert outcome["failed_statements"] == 1
     assert await store.count_documents() == 1  # the site row survived
+
+
+# --- deep extraction: body text is indexed, not just meta tags ------------
+
+def test_a_page_carries_up_to_1200_characters_of_body_text() -> None:
+    from app.engine.text import extract_document_with_reason
+
+    prose = "Karnataka publishes district-wise rainfall data every season. " * 60
+    html = (
+        "<html><head><title>Rainfall data</title>"
+        "<meta name='description' content='District-wise rainfall for Karnataka.'>"
+        f"</head><body><h1>Rainfall</h1><h2>Districts</h2><p>{prose}</p></body></html>"
+    )
+    document, reason = extract_document_with_reason("https://karnataka.gov.in/rain", html)
+
+    assert document is not None, reason
+    assert 1000 <= len(document.body_text) <= 1200, len(document.body_text)
+    # the body opens with the page's own headings, then the prose
+    assert "Karnataka publishes district-wise rainfall data" in document.body_text
+    assert "Rainfall" in document.headings
+    row = document.as_row()
+    # the row may be trimmed to the budget, never expanded
+    assert row["content"].startswith(document.body_text[:200])
+    assert len(row["content"]) <= 1200
+    assert row["headings"].startswith("Rainfall")
+
+
+async def test_body_text_makes_a_body_only_match_findable(temp_db) -> None:
+    """The point of deep extraction: a term that appears only in the body."""
+    from app.engine.text import extract_document_with_reason
+
+    html = (
+        "<html><head><title>District portal</title>"
+        "<meta name='description' content='Official district services.'>"
+        "</head><body><h1>Services</h1>"
+        f"<p>{'The sakala guarantee scheme covers 1,100 services. ' * 20}</p></body></html>"
+    )
+    document, reason = extract_document_with_reason("https://example.gov.in/", html)
+    assert document is not None, reason
+
+    store = get_store()
+    await store.ingest_documents([document.as_row()])
+
+    hits = await store.search_local("sakala", limit=3)
+    assert hits, "the body term should match through page_fts"
+    assert hits[0].url == "https://example.gov.in/"
+
+
+async def test_the_row_budget_accommodates_the_deeper_body(temp_db) -> None:
+    from app.engine.config import get_engine_settings
+
+    cfg = get_engine_settings()
+    assert cfg.max_payload_bytes >= 8192
+    assert cfg.body_max_chars == 1200
+    # the domain ceiling and the 300k page cap are unchanged
+    assert cfg.max_site_payload_bytes == 10240
+    assert cfg.storage_page_limit == 300000
