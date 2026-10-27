@@ -27,6 +27,16 @@ logger = logging.getLogger(__name__)
 # Columns the FTS index carries, in bm25 weight order.
 BM25_WEIGHTS = (10.0, 5.0, 1.0)
 
+#: How much a title match is worth on top of bm25. bm25 is negative and
+#: lower-is-better, so this is subtracted from the score to promote the row.
+TITLE_MATCH_BOOST = 1.0
+
+#: How many query terms are checked against the title.
+MAX_TITLE_TOKENS = 5
+
+#: Width of the passage returned as a match snippet, in characters.
+SNIPPET_CHAR_CAP = 320
+
 
 @dataclass
 class PageDocument:
@@ -96,12 +106,27 @@ class SearchHit:
     description: str
     body_text: str
     score: float = 0.0
+    match_snippet: str = ""
+    raw_score: float = 0.0
 
     @property
     def snippet(self) -> str:
+        """The passage that matched the query, else the description.
+
+        `snippet()` from FTS5 picks the part of the page the query actually
+        hit, which beats a fixed prefix of the body. When the match was on the
+        title the snippet is the title again, so it falls back rather than
+        repeating the heading back at the reader.
+        """
+        matched = " ".join((self.match_snippet or "").split())
+        title = " ".join((self.title or "").split())
+        if matched and matched.strip("…").strip() != title:
+            return matched[:SNIPPET_CHAR_CAP]
+
         text = (self.description or "").strip()
         if text:
             return text
+
         body = " ".join((self.body_text or "").split())
         return body[:200] + ("…" if len(body) > 200 else "")
 
@@ -156,6 +181,53 @@ def build_match_query(query: str, *, prefix: bool = False) -> str:
     if prefix:
         return " OR ".join(f'"{token}"*' for token in tokens)
     return " AND ".join(f'"{token}"' for token in tokens)
+
+
+def passage_around_match(text: str, tokens: Sequence[str], window: int = SNIPPET_CHAR_CAP) -> str:
+    """The window of `text` around the first query term it contains.
+
+    FTS5's own `snippet()` was the obvious tool and is what the brief asked
+    for, but on the SQLite build this project runs on it ignores `colnum` and
+    returns column 0 for every call — verified against both a plain and an
+    external-content FTS5 table, where `highlight()` behaves correctly and
+    `snippet()` does not. Rather than depend on behaviour that is wrong here
+    and unverifiable on Turso, the window is computed in Python: portable,
+    deterministic and testable.
+
+    Returns `""` when no token appears, so the caller can fall back to the
+    description instead of showing an arbitrary opening.
+    """
+    cleaned = " ".join((text or "").split())
+    if not cleaned or not tokens:
+        return ""
+
+    lowered = cleaned.lower()
+    positions = [lowered.find(token) for token in tokens if token]
+    positions = [position for position in positions if position >= 0]
+    if not positions:
+        return ""
+
+    match_at = min(positions)
+    start = max(0, match_at - window // 3)
+    end = min(len(cleaned), start + window)
+    start = max(0, min(start, end - window))
+
+    # Do not cut a word in half at either edge.
+    if start > 0:
+        space = cleaned.find(" ", start)
+        if 0 <= space < match_at:
+            start = space + 1
+    if end < len(cleaned):
+        space = cleaned.rfind(" ", match_at, end)
+        if space > match_at:
+            end = space
+
+    passage = cleaned[start:end].strip()
+    if start > 0:
+        passage = "…" + passage
+    if end < len(cleaned):
+        passage = passage + "…"
+    return passage
 
 
 def normalise_score(raw: float) -> float:
@@ -450,6 +522,7 @@ class IndexStore:
             return []
 
         weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
+
         filters = ""
         extra: list[Any] = []
         if category:
@@ -459,37 +532,76 @@ class IndexStore:
             filters += " AND p.language = ?"
             extra.append(language)
 
+        # Title boost. Bound parameters appear in SQL order, so the title
+        # terms (in the SELECT) are bound before the MATCH term (in the WHERE).
+        tokens = fts_tokens(query)
+        title_tokens = tokens[:MAX_TITLE_TOKENS]
+        if title_tokens:
+            title_terms = " OR ".join("instr(lower(p.title), ?) > 0" for _ in title_tokens)
+        else:
+            title_terms = "0"
+
         sql = (
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
-            f"bm25(page_fts, {weights}) AS lexical_score "
+            f"bm25(page_fts, {weights}) AS lexical_score, "
+            f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit "
             "FROM page_fts JOIN pages p ON p.page_id = page_fts.rowid "
-            f"WHERE page_fts MATCH ?{filters} ORDER BY lexical_score ASC LIMIT ? OFFSET ?"
+            f"WHERE page_fts MATCH ?{filters} "
+            "ORDER BY (lexical_score - ? * title_hit) ASC LIMIT ? OFFSET ?"
         )
+        args = (*title_tokens, match, *extra, TITLE_MATCH_BOOST, limit, offset)
 
-        result = await self._client.execute(sql, (match, *extra, limit, offset))
-        hits = [self._row_to_hit(row) for row in result.rows]
+        result = await self._client.execute(sql, args)
+        hits = [self._row_to_hit(row, tokens) for row in result.rows]
 
         if hits:
+            self._rescale_scores(hits)
             return hits
 
         # A strict AND is right for precision and wrong for a half-remembered
         # query. Fall back to OR rather than answering "nothing found".
         loose = build_match_query(query, prefix=True)
         if loose and loose != match:
-            result = await self._client.execute(sql, (loose, *extra, limit, offset))
-            hits = [self._row_to_hit(row) for row in result.rows]
+            result = await self._client.execute(
+                sql, (*title_tokens, loose, *extra, TITLE_MATCH_BOOST, limit, offset)
+            )
+            hits = [self._row_to_hit(row, tokens) for row in result.rows]
+            self._rescale_scores(hits)
         return hits
 
     @staticmethod
-    def _row_to_hit(row: Sequence[Any]) -> SearchHit:
+    def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
+        title_hit = int(row[6] or 0)
+        boosted = float(row[5] or 0.0) - TITLE_MATCH_BOOST * title_hit
+        body = str(row[4] or "")
         return SearchHit(
             page_id=int(row[0]),
             url=str(row[1] or ""),
             title=str(row[2] or ""),
             description=str(row[3] or ""),
-            body_text=str(row[4] or ""),
-            score=normalise_score(row[5]),
+            body_text=body,
+            score=normalise_score(boosted),
+            match_snippet=passage_around_match(body, tokens),
+            raw_score=boosted,
         )
+
+    @staticmethod
+    def _rescale_scores(hits: Sequence[SearchHit]) -> None:
+        """Spread `score` across the page of results, best first.
+
+        bm25 is negative and lower-is-better, and the title boost pushes a
+        good row below zero — so mapping it absolutely would make a boosted
+        result look *worse* than an unboosted one. Rescaling against the page
+        keeps the number monotone with the order the caller actually receives.
+        It is relative within one page of results, not comparable across pages.
+        """
+        if not hits:
+            return
+        best = min(hit.raw_score for hit in hits)
+        worst = max(hit.raw_score for hit in hits)
+        span = worst - best
+        for hit in hits:
+            hit.score = 1.0 if span <= 0 else round((worst - hit.raw_score) / span, 4)
 
     async def suggest(self, query: str, limit: int = 6) -> list[str]:
         """Title completions for the search bar."""
@@ -558,6 +670,10 @@ class IndexStore:
 
 __all__ = [
     "BM25_WEIGHTS",
+    "MAX_TITLE_TOKENS",
+    "SNIPPET_CHAR_CAP",
+    "TITLE_MATCH_BOOST",
+    "passage_around_match",
     "IndexStore",
     "PageDocument",
     "PersistOutcome",

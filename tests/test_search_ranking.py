@@ -1,0 +1,177 @@
+"""Match snippets and title ranking.
+
+The brief asked for FTS5's `snippet()`. On the SQLite build this project runs
+on, `snippet()` ignores its `colnum` argument and returns column 0 for every
+call — `highlight()` behaves correctly, `snippet()` does not. The window is
+therefore computed in Python, and these tests pin the behaviour that matters:
+the passage shown contains the term that matched, and a title match is not
+echoed back as the snippet.
+"""
+
+from __future__ import annotations
+
+import app.engine.store as store_module
+from app.engine.store import PageDocument, passage_around_match
+
+FILLER = "The department publishes routine notices for district offices. " * 6
+
+
+def _doc(url: str, title: str, body: str, digest: str) -> PageDocument:
+    return PageDocument(
+        url=url,
+        domain=url.split("//", 1)[1].split("/", 1)[0],
+        title=title,
+        description=f"{title} description.",
+        body_text=body,
+        digest=digest,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The passage window
+# ---------------------------------------------------------------------------
+
+
+def test_the_passage_contains_the_term_that_matched():
+    body = FILLER + "Bengaluru metro fares were revised in March." + FILLER
+
+    passage = passage_around_match(body, ["metro"])
+
+    assert "metro" in passage.lower()
+
+
+def test_a_passage_is_shorter_than_a_long_body():
+    body = FILLER * 5 + "metro" + FILLER * 5
+
+    assert len(passage_around_match(body, ["metro"])) < len(body)
+
+
+def test_no_match_returns_nothing_so_the_caller_can_fall_back():
+    assert passage_around_match("nothing relevant here at all", ["metro"]) == ""
+    assert passage_around_match("", ["metro"]) == ""
+    assert passage_around_match("some text", []) == ""
+
+
+def test_the_window_does_not_cut_a_word_in_half():
+    passage = passage_around_match("alpha beta gamma delta", ["gamma"], window=12)
+
+    assert passage == "…gamma…"
+
+
+def test_a_match_at_the_start_has_no_leading_ellipsis():
+    passage = passage_around_match("metro fares rose today and more follows", ["metro"], window=20)
+
+    assert not passage.startswith("…")
+    assert passage.startswith("metro")
+
+
+def test_the_first_occurrence_wins():
+    body = "alpha metro beta " + ("filler " * 100) + "metro again"
+
+    passage = passage_around_match(body, ["metro"], window=40)
+
+    assert passage.count("metro") == 1
+
+
+# ---------------------------------------------------------------------------
+# Search results
+# ---------------------------------------------------------------------------
+
+
+async def test_a_body_match_produces_a_snippet_containing_the_term(store):
+    await store.persist_batch(
+        [_doc("https://a.gov.in/", "Notices", FILLER + "Metro fares were revised." + FILLER, "a")]
+    )
+
+    hits = await store.search("metro")
+
+    assert len(hits) == 1
+    assert "metro" in hits[0].snippet.lower()
+
+
+async def test_a_title_only_match_falls_back_to_the_description(store):
+    """The snippet must not just repeat the heading."""
+    await store.persist_batch(
+        [_doc("https://b.gov.in/", "Metro fares revised", "Nothing about transport here.", "b")]
+    )
+
+    hits = await store.search("metro")
+
+    assert hits[0].title == "Metro fares revised"
+    assert hits[0].snippet == "Metro fares revised description."
+
+
+async def test_a_page_with_no_body_match_and_no_description_still_has_a_snippet(store):
+    document = _doc("https://c.gov.in/", "Metro", "", "c")
+    document.description = ""
+    await store.persist_batch([document])
+
+    hits = await store.search("metro")
+
+    assert hits[0].snippet == ""
+
+
+# ---------------------------------------------------------------------------
+# Title boost
+# ---------------------------------------------------------------------------
+
+
+async def _seed_title_and_body(store) -> None:
+    await store.persist_batch(
+        [
+            _doc("https://title.gov.in/", "Metro fares revised", "Fares went up this year.", "title"),
+            _doc("https://body.gov.in/", "Notices", "Metro fares were revised this year.", "body"),
+        ]
+    )
+
+
+async def test_a_title_match_ranks_first(store):
+    await _seed_title_and_body(store)
+
+    hits = await store.search("metro")
+
+    assert hits[0].title == "Metro fares revised"
+
+
+async def test_the_title_boost_lowers_the_ranking_key(store, monkeypatch):
+    """bm25 is lower-is-better, so a boost must make the key more negative."""
+    await _seed_title_and_body(store)
+
+    boosted = await store.search("metro")
+    boosted_key = next(hit.raw_score for hit in boosted if "Metro" in hit.title)
+
+    monkeypatch.setattr(store_module, "TITLE_MATCH_BOOST", 0.0)
+    plain = await store.search("metro")
+    plain_key = next(hit.raw_score for hit in plain if "Metro" in hit.title)
+
+    assert boosted_key < plain_key
+
+
+async def test_the_reported_score_is_monotone_with_the_order(store):
+    await _seed_title_and_body(store)
+
+    hits = await store.search("metro")
+    scores = [hit.score for hit in hits]
+
+    assert scores == sorted(scores, reverse=True)
+    assert scores[0] == 1.0
+
+
+async def test_the_boost_does_not_change_which_pages_match(store):
+    await _seed_title_and_body(store)
+
+    hits = await store.search("metro")
+
+    assert len(hits) == 2
+
+
+async def test_filters_still_apply_with_the_boost(store):
+    first = _doc("https://a.gov.in/", "Metro fares", "Fares.", "a")
+    first.category = "government"
+    second = _doc("https://b.gov.in/", "Metro news", "News.", "b")
+    second.category = "news_media"
+    await store.persist_batch([first, second])
+
+    hits = await store.search("metro", category="news_media")
+
+    assert [hit.title for hit in hits] == ["Metro news"]

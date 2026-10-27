@@ -29,6 +29,24 @@ PRIORITY_SUFFIXES: tuple[str, ...] = (
     ".res.in",
     ".org.in",
     ".co.in",
+    ".in",
+)
+
+#: Indian portals that are not on a public suffix but are worth crawling.
+#: News, legal reporting, startup and developer media, jobs and open data.
+WHITELISTED_DOMAINS: tuple[str, ...] = (
+    "thehindu.com",
+    "indianexpress.com",
+    "prajavani.net",
+    "vijaykarnataka.com",
+    "indiankanoon.org",
+    "livelaw.in",
+    "barandbench.com",
+    "inc42.com",
+    "hasgeek.com",
+    "data.gov.in",
+    "freejobalert.com",
+    "ncs.gov.in",
 )
 
 #: Extensions that are never a page to index.
@@ -85,6 +103,14 @@ SEED_URLS: tuple[str, ...] = (
     "https://www.digitalindia.gov.in/",
     "https://data.gov.in/",
     "https://www.meity.gov.in/",
+    "https://www.mohfw.gov.in/",
+    "https://agricoop.nic.in/",
+    "https://www.ncs.gov.in/",
+    "https://www.thehindu.com/news/",
+    "https://www.prajavani.net/",
+    "https://indiankanoon.org/",
+    "https://inc42.com/",
+    "https://hasgeek.com/",
     "https://en.wikipedia.org/wiki/Karnataka",
 )
 
@@ -168,13 +194,19 @@ def in_crawl_scope(url: str, source_host: str) -> bool:
         return False
     if host == source_host:
         return True
-    return any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES)
+    return is_authoritative(host)
+
+
+def is_authoritative(host: str) -> bool:
+    """An Indian public suffix, or one of the whitelisted portals."""
+    if any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES):
+        return True
+    return any(host == domain or host.endswith(f".{domain}") for domain in WHITELISTED_DOMAINS)
 
 
 def priority_of(url: str) -> int:
     """Lower sorts first: official public domains, then everything else."""
-    host = domain_of(url)
-    return 0 if any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES) else 1
+    return 0 if is_authoritative(domain_of(url)) else 1
 
 
 class FrontierAgent:
@@ -323,8 +355,10 @@ __all__ = [
     "PRIORITY_SUFFIXES",
     "SEED_URLS",
     "TRACKING_PARAMS",
+    "WHITELISTED_DOMAINS",
     "domain_of",
     "in_crawl_scope",
+    "is_authoritative",
     "is_crawlable",
     "normalise_url",
     "priority_of",

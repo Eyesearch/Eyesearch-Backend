@@ -11,6 +11,7 @@ frontier applies crawl scope, and the orchestrator queues what survives.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from app.agents import load_agent
 from app.engine.config import Settings
@@ -25,6 +26,8 @@ MAX_PENDING_QUEUE = frontier_module.MAX_PENDING_QUEUE
 ParserAgent = parser_module.ParserAgent
 filter_links = FrontierAgent.filter_links
 in_crawl_scope = frontier_module.in_crawl_scope
+is_authoritative = frontier_module.is_authoritative
+priority_of = frontier_module.priority_of
 is_crawlable = frontier_module.is_crawlable
 normalise_url = frontier_module.normalise_url
 
@@ -270,3 +273,56 @@ async def test_a_crawled_url_is_stamped_with_its_processed_time(store, client):
 
     stamped = await client.execute("SELECT processed_at FROM crawl_queue WHERE rowid = ?", (rowid,))
     assert stamped.scalar(None) is not None
+
+
+# ---------------------------------------------------------------------------
+# Widened crawl scope: the bare .in suffix and the whitelisted portals
+# ---------------------------------------------------------------------------
+
+
+def test_the_bare_in_suffix_is_in_scope():
+    assert in_crawl_scope("https://somewhere.in/page", "karnataka.gov.in") is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.thehindu.com/news/national",
+        "https://indianexpress.com/article/india",
+        "https://indiankanoon.org/doc/1234",
+        "https://inc42.com/features/startup",
+        "https://hasgeek.com/fifthelephant",
+        "https://barandbench.com/news",
+    ],
+)
+def test_whitelisted_indian_portals_are_in_scope(url):
+    assert in_crawl_scope(url, "karnataka.gov.in") is True
+    assert is_authoritative(frontier_module.domain_of(url)) is True
+
+
+def test_a_non_whitelisted_commercial_domain_stays_out_of_scope():
+    assert in_crawl_scope("https://randomshop.com/product", "karnataka.gov.in") is False
+    assert in_crawl_scope("https://facebook.com/karnataka", "karnataka.gov.in") is False
+
+
+def test_a_whitelisted_domain_sorts_with_the_authoritative_urls():
+    assert priority_of("https://www.thehindu.com/") == 0
+    assert priority_of("https://randomshop.com/") == 1
+
+
+def test_the_seeds_span_more_than_one_category():
+    """Seeds are meant to feed every part of the index, not just government."""
+    classifier = load_agent("07_classifier_agent").ClassifierAgent()
+
+    categories = {classifier.classify(seed).category for seed in SEED_URLS}
+
+    # A bare root URL carries little signal, so seeds alone cannot span all
+    # ten categories — the pages discovered beneath them do that.
+    assert len(categories) >= 4
+    assert "government" in categories
+    assert "legal_judiciary" in categories
+
+
+def test_a_whitelisted_portal_is_not_capped_out_by_its_suffix():
+    """`.com` news portals are in scope by whitelist, not by suffix."""
+    assert in_crawl_scope("https://www.prajavani.net/", "karnataka.gov.in") is True

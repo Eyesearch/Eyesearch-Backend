@@ -220,12 +220,19 @@ seeds. The work is split in two, and the split matters:
 | rule | value |
 | --- | --- |
 | scheme | `http` / `https` only |
-| host | the source host, or an authoritative Indian public suffix |
+| host | the source host, any `.in` domain, or a whitelisted Indian portal |
 | path depth | ≤ `MAX_PATH_DEPTH` (6) — Indian portals nest real content several levels down |
 | extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
 | query | tracking keys (`utm_*`, `gclid`, `fbclid`, `ref`, …) dropped, keys sorted |
 | frontier size | capped at `MAX_PENDING_QUEUE` (10,000) pending rows |
+
+Crawl scope is not limited to public suffixes: `WHITELISTED_DOMAINS` adds
+Indian news, legal, startup and developer media that sit on `.com` — thehindu,
+indianexpress, prajavani, vijaykarnataka, indiankanoon, livelaw, barandbench,
+inc42, hasgeek — alongside `data.gov.in`, `freejobalert.com` and `ncs.gov.in`.
+The seed list is 21 roots chosen to span categories rather than to favour
+government alone.
 
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue
@@ -303,6 +310,32 @@ that never happened.
 
 Measured on a stubbed portal whose every subpage carried the same meta
 description: 10 pages indexed, 10 distinct descriptions.
+
+## Ranking and match snippets
+
+`GET /v1/search` ranks with bm25 weighted `title 10, description 5, body 1`, plus
+an explicit title boost: a row whose title contains any of up to five query
+terms has `TITLE_MATCH_BOOST` subtracted from its bm25 score. bm25 is negative
+and lower-is-better, so that promotes the row.
+
+`score` in the response is **relative within the page of results** — the best
+hit is `1.0` and the rest are spread below it. That is deliberate: the boost
+pushes a good row below zero, and mapping bm25 absolutely would make a boosted
+result report a *worse* score than an unboosted one. Scores from different
+pages are not comparable.
+
+The snippet shown for each result is the passage of the body around the first
+query term, cut at word boundaries and capped at 320 characters, with an
+ellipsis only where text was removed. When the match was on the title alone the
+snippet falls back to the description rather than repeating the heading.
+
+**Why not FTS5's `snippet()`.** The brief asked for it and it was the obvious
+choice, but on the SQLite this project runs on, `snippet()` ignores its
+`colnum` argument and returns column 0 for every call — reproduced against both
+a plain and an external-content FTS5 table, where `highlight()` behaves
+correctly and `snippet()` does not. Turso runs a different SQLite that cannot
+be exercised from here, so the window is computed in Python
+(`passage_around_match`) instead: portable, deterministic and covered by tests.
 
 ## Classification and language
 
@@ -422,6 +455,7 @@ and atomic batches are under test. Nothing touches the network.
 | `test_link_discovery.py` | link extraction, crawl scope, frontier re-arm |
 | `test_domain_cap_and_description.py` | per-domain cap, page-specific descriptions |
 | `test_classifier_and_language.py` | category and language tagging, search filters |
+| `test_search_ranking.py` | match snippets, title boost, score ordering |
 
 ## What is not here
 

@@ -92,7 +92,10 @@ RULES: tuple[CategoryRule, ...] = (
     ),
     CategoryRule(
         name="legal_judiciary",
-        url_tokens=("court", "judgment", "judgement", "act", "legal", "law", "tribunal", "notifications"),
+        url_tokens=(
+            "court", "judgment", "judgement", "act", "legal", "law", "tribunal",
+            "notifications", "indiankanoon",
+        ),
         keywords=(
             "supreme court", "high court", "judgment", "petitioner", "respondent",
             "section", "act, 19", "tribunal", "writ petition",
