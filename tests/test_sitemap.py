@@ -225,3 +225,116 @@ async def test_refill_never_requeues_a_known_url(temp_db, monkeypatch) -> None:
         "SELECT url FROM crawl_queue WHERE url = 'https://eci.gov.in/voters'"
     )
     assert len(getattr(rows, "rows", ())) == 1, "no duplicate queue entry"
+
+
+# --- gzip sitemaps --------------------------------------------------------
+
+def test_a_gzipped_urlset_is_decompressed_and_parsed() -> None:
+    import gzip
+
+    payload = gzip.compress(URLSET.encode("utf-8"))
+    assert sitemap.is_gzip_payload(payload) is True
+    assert sitemap.looks_like_sitemap(payload) is True
+
+    urls = sitemap.harvest_urls([("https://eci.gov.in/sitemap.xml.gz", payload)], host="eci.gov.in")
+    assert urls == ["https://eci.gov.in/voters", "https://eci.gov.in/forms/registration"]
+
+
+def test_a_gzipped_index_is_followed() -> None:
+    import gzip
+
+    payload = gzip.compress(INDEX.encode("utf-8"))
+    children = list(sitemap.iter_sitemap_index(payload, url="https://eci.gov.in/sitemap.xml.gz"))
+    assert children == [
+        "https://eci.gov.in/sitemap-pages.xml",
+        "https://eci.gov.in/sitemap-news.xml",
+    ]
+
+
+def test_decompression_streams_rather_than_buffering_everything() -> None:
+    import gzip
+
+    big = "<urlset>" + "".join(
+        f"<url><loc>https://eci.gov.in/p{i}</loc></url>" for i in range(20000)
+    ) + "</urlset>"
+    payload = gzip.compress(big.encode("utf-8"))
+
+    stream = sitemap.open_stream(payload, url="https://eci.gov.in/sitemap.xml.gz")
+    assert stream is not None
+    # the stream is lazy: nothing is inflated until it is read
+    first = stream.read(64)
+    assert first.startswith("<?xml") or first.startswith("<urlset")
+    urls = sitemap.harvest_urls([("s.xml.gz", payload)], host="eci.gov.in", limit=10)
+    assert len(urls) == 10
+
+
+def test_a_corrupt_gzip_member_is_survivable() -> None:
+    broken = b"\x1f\x8b\x08\x00not-really-gzip"
+    assert sitemap.harvest_urls([("s.xml.gz", broken)], host="eci.gov.in") == []
+
+
+def test_the_standard_paths_include_the_gzipped_forms() -> None:
+    assert "/sitemap.xml.gz" in sitemap.STANDARD_SITEMAP_PATHS
+    assert "/sitemap_index.xml.gz" in sitemap.STANDARD_SITEMAP_PATHS
+
+
+async def test_harvest_uses_raw_bytes_for_a_gzipped_sitemap(temp_db) -> None:
+    import gzip
+
+    class _Fetcher:
+        async def fetch(self, url):
+            class R:
+                html = "User-agent: *\nSitemap: https://eci.gov.in/sitemap.xml.gz\n"
+                status = 200
+
+                @property
+                def ok(self):
+                    return True
+
+            return R()
+
+        async def fetch_raw(self, url):
+            if url.endswith(".gz"):
+                return gzip.compress(URLSET.encode("utf-8")), 200
+            return None, 404
+
+        async def aclose(self):
+            return None
+
+    frontier = FrontierAgent(store=temp_db, config=FrontierConfig())
+    urls = await frontier.harvest("eci.gov.in", fetcher=_Fetcher())
+
+    assert urls == ["https://eci.gov.in/voters", "https://eci.gov.in/forms/registration"]
+
+
+async def test_a_thin_queue_triggers_the_aggressive_harvest(temp_db, monkeypatch) -> None:
+    from app.indexer import crawler as pipeline
+
+    store = temp_db
+    for i in range(6):
+        await store.ingest_documents(
+            [{"url": f"https://site{i}.gov.in/", "canonical_url": f"https://site{i}.gov.in/",
+              "title": f"Portal {i}", "description": "Official portal.", "payload_bytes": 90}]
+        )
+
+    harvested_hosts: list[str] = []
+
+    async def _fake_harvest(self, host, *, fetcher=None):
+        harvested_hosts.append(host)
+        return [f"https://{host}/page{i}" for i in range(30)]
+
+    monkeypatch.setattr(FrontierAgent, "harvest", _fake_harvest)
+    monkeypatch.setattr(pipeline, "seeds_for", lambda categories=None: [])
+
+    report = await pipeline.refill_frontier(
+        target=120,
+        store=store,
+        settings=EngineSettings(
+            frontier_refill_trigger=50, harvest_hosts_per_pass=1,
+            harvest_hosts_per_pass_aggressive=4,
+        ),
+    )
+
+    assert report["aggressive"] is True
+    assert len(harvested_hosts) >= 2, "aggressive mode inspects several domains"
+    assert report["after"] >= 100
