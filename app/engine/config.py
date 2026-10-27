@@ -61,6 +61,9 @@ class EngineSettings:
     body_max_chars: int = field(default_factory=lambda: _int("INDEX_BODY_MAX_CHARS", 1200))
     # How many failed resolutions before a backlog query goes to history.
     backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
+    # How many already-crawled domains to inspect for a sitemap per refill pass.
+    harvest_hosts_per_pass: int = field(default_factory=lambda: _int("HARVEST_HOSTS_PER_PASS", 5))
+
     # Keep the discovery queue at least this deep so the pipeline never starves.
     frontier_buffer_target: int = field(default_factory=lambda: _int("FRONTIER_BUFFER_TARGET", 150))
 

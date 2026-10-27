@@ -807,6 +807,18 @@ class IndexStore:
             logger.debug("backlog probe failed for %r: %s", query, exc)
             return False
 
+    async def url_is_known(self, url: str) -> bool:
+        """True when a URL is already indexed or already queued."""
+        try:
+            page = await execute_safe("SELECT 1 FROM pages WHERE url = ? LIMIT 1", [url])
+            if getattr(page, "rows", ()):
+                return True
+            queued = await execute_safe("SELECT 1 FROM crawl_queue WHERE url = ? LIMIT 1", [url])
+            return bool(getattr(queued, "rows", ()))
+        except Exception as exc:
+            logger.debug("url_is_known failed for %s: %s", url, exc)
+            return False
+
     async def queue_url(self, url: str, *, domain: str = "", reason: str = "discovered") -> None:
         """Mirror a URL into `crawl_queue` so the buffer is visible."""
         await execute_safe(

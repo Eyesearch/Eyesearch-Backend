@@ -29,6 +29,7 @@ from app.indexer.discovery import discover_domains, is_indian_authoritative
 from app.indexer.guard import storage_paused
 from app.indexer.seed_registry import CATEGORY_ORDER, SEED_ROWS
 from app.engine.config import EngineSettings, get_engine_settings
+from app import database
 from app.database import execute_safe, get_client
 from app.engine.store import get_store
 from app.engine.text import (
@@ -406,6 +407,7 @@ async def refill_frontier(
     before = await frontier.queue_depth()
     queued_seeds = 0
     queued_links = 0
+    harvested_total = 0
 
     for seed in seeds_for(None):
         if await frontier.queue_depth() >= wanted:
@@ -413,6 +415,39 @@ async def refill_frontier(
         host = _seed_domain(seed)
         if await frontier.enqueue(host, reason="seed-refill"):
             queued_seeds += 1
+
+    # Sitemaps next: a domain that publishes one tells us its canonical pages,
+    # which beats recycling URLs we already hold.
+    if await frontier.queue_depth() < wanted:
+        try:
+            harvested, hosts_used = 0, 0
+            result = await database.execute_safe(
+                "SELECT domain FROM sites WHERE category IS NOT NULL "
+                "ORDER BY COALESCE(domain, '') ASC LIMIT ?",
+                [max(1, cfg.harvest_hosts_per_pass) * 4],
+            )
+            hosts = [str(row[0]) for row in (getattr(result, "rows", ()) or ()) if row and row[0]]
+            for host in hosts:
+                if await frontier.queue_depth() >= wanted:
+                    break
+                if hosts_used >= max(1, cfg.harvest_hosts_per_pass):
+                    break
+                urls = await frontier.harvest(host)
+                if not urls:
+                    continue
+                hosts_used += 1
+                for url in urls:
+                    if await frontier.queue_depth() >= wanted:
+                        break
+                    if await index.url_is_known(url):
+                        continue
+                    await index.queue_url(url, domain=host, reason="sitemap")
+                    harvested += 1
+            harvested_total = harvested
+            if harvested:
+                logger.info("frontier refill: %d sitemap urls from %d domains", harvested, hosts_used)
+        except Exception as exc:
+            logger.warning("frontier refill from sitemaps failed: %s", exc)
 
     if await frontier.queue_depth() < wanted:
         try:
@@ -435,14 +470,15 @@ async def refill_frontier(
 
     after = await frontier.queue_depth()
     logger.info(
-        "frontier refill: %d → %d queued (%d seeds, %d stored links, target %d)",
-        before, after, queued_seeds, queued_links, wanted,
+        "frontier refill: %d → %d queued (%d seeds, %d sitemap urls, %d stored links, target %d)",
+        before, after, queued_seeds, harvested_total, queued_links, wanted,
     )
     return {
         "before": before,
         "after": after,
         "seeds": queued_seeds,
-        "links": queued_links,
+        "sitemap": harvested_total,
+        "links": queued_links + harvested_total,
         "target": wanted,
     }
 
