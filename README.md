@@ -430,6 +430,18 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**Bot blocks are answered once, not retried forever.** The fetcher rotates two
+current desktop profiles (Chrome 128 on Windows, Safari 17 on macOS) with
+`Accept-Language: en-US,en;q=0.9` and the `sec-ch-ua` client hints, a different
+one per attempt. A 403, 202 challenge, 429 or 451 marks the host **restricted**
+for `RESTRICTION_COOLDOWN_SECONDS` (6 h): the fetch returns immediately with
+`restricted: true` and no request is made, so the queue moves on instead of
+stalling on a site that will not answer. On the query side, a backlog query that
+resolves to nothing is retried, and after `BACKLOG_MAX_ATTEMPTS` (3) it is moved
+to history (`status = 'dropped'`) rather than blocking the queue on every pass.
+`DDGS` is imported from the current `ddgs` package with the deprecated
+`duckduckgo_search` warning suppressed.
+
 **Storage has two brakes.** Before any pass runs, the crawler compares the page
 count against `STORAGE_PAGE_LIMIT` (300,000 — roughly 3.5–4 GB at our row sizes,
 well inside the 5 GB free allowance) and, when it is reached, logs
@@ -924,6 +936,18 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**Bot blocks are answered once, not retried forever.** The fetcher rotates two
+current desktop profiles (Chrome 128 on Windows, Safari 17 on macOS) with
+`Accept-Language: en-US,en;q=0.9` and the `sec-ch-ua` client hints, a different
+one per attempt. A 403, 202 challenge, 429 or 451 marks the host **restricted**
+for `RESTRICTION_COOLDOWN_SECONDS` (6 h): the fetch returns immediately with
+`restricted: true` and no request is made, so the queue moves on instead of
+stalling on a site that will not answer. On the query side, a backlog query that
+resolves to nothing is retried, and after `BACKLOG_MAX_ATTEMPTS` (3) it is moved
+to history (`status = 'dropped'`) rather than blocking the queue on every pass.
+`DDGS` is imported from the current `ddgs` package with the deprecated
+`duckduckgo_search` warning suppressed.
 
 **Storage has two brakes.** Before any pass runs, the crawler compares the page
 count against `STORAGE_PAGE_LIMIT` (300,000 — roughly 3.5–4 GB at our row sizes,
