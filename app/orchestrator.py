@@ -395,25 +395,29 @@ class Orchestrator:
             try:
                 outcome = await self.run_batch()
 
+                # Recover the frontier on EVERY pass, including successful
+                # batches. Previously the non-empty fast path continued before
+                # refill/retry ran, so recovery silently depended on the queue
+                # becoming empty. Re-arm work and refill before deciding to
+                # sleep; INSERT OR IGNORE and cooldowns keep this bounded.
+                rearmed = await self._store.rearm_retryable_failed(limit=25)
+                if rearmed:
+                    logger.info("re-armed %d transient crawler failures", rearmed)
+
+                added = await self._frontier.refill(minimum=1)
+                if added:
+                    logger.info("crawler frontier refilled with %d URLs", added)
+
                 if outcome is not None and not outcome.empty and not outcome.paused:
                     await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
                     continue
 
                 delay = self._settings.crawl_empty_backoff_seconds
-
-                rearmed = await self._store.rearm_retryable_failed(limit=25)
-                if rearmed:
-                    logger.info("re-armed %d transient crawler failures", rearmed)
-
-                # Every pass, not only an empty one: the queue can be full of
-                # work from a single domain while every authoritative one sits
-                # idle.
-                added = await self._frontier.refill(minimum=1)
-                if outcome is not None and outcome.empty and not added:
+                if outcome is not None and outcome.empty and not added and not rearmed:
                     # Nothing to crawl and nothing past its cooldown yet.
                     delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
 
-                logger.debug("crawl worker sleeping %.1fs (queue empty)", delay)
+                logger.debug("crawl worker sleeping %.1fs (frontier idle)", delay)
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
