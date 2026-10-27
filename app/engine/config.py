@@ -61,6 +61,9 @@ class EngineSettings:
     body_max_chars: int = field(default_factory=lambda: _int("INDEX_BODY_MAX_CHARS", 1200))
     # How many failed resolutions before a backlog query goes to history.
     backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
+    # Keep the discovery queue at least this deep so the pipeline never starves.
+    frontier_buffer_target: int = field(default_factory=lambda: _int("FRONTIER_BUFFER_TARGET", 150))
+
     # How long a blocked domain is skipped before we try it again.
     restriction_cooldown_seconds: int = field(
         default_factory=lambda: _int("RESTRICTION_COOLDOWN_SECONDS", 21600)

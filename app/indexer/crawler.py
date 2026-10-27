@@ -360,6 +360,10 @@ async def run_discovery_pass(
             seed_report = (outcome.get("reports") or {}).get(host, {})
             status = "processed" if seed_report.get("stored") else "failed"
             await orchestrator.frontier.mark_done(host, status=status)
+            logger.info(
+                "discovery indexed %s: %d pages (sites now %d)",
+                host, int(seed_report.get("stored", 0)), await index.count_documents(),
+            )
 
         sites = await index.count_documents()
         logger.info(
@@ -376,6 +380,71 @@ async def run_discovery_pass(
 
 def _seed_domain(seed: CategorySeed) -> str:
     return urlparse(seed.url).netloc.lower().removeprefix("www.")
+
+
+async def refill_frontier(
+    *,
+    target: int | None = None,
+    store: object | None = None,
+    settings: EngineSettings | None = None,
+) -> dict[str, object]:
+    """Top the frontier up so discovery always has work.
+
+    Sources, in order: registry seeds that are not indexed yet, then the sitelink
+    URLs already stored (a cheap way to keep the buffer warm without inventing
+    URLs), then nothing — the queue simply stays short until discovery finds
+    more. Returns the buffer depth so the caller can log it.
+    """
+    from app.orchestrator import Orchestrator
+
+    cfg = settings or get_engine_settings()
+    index = store or get_store()
+    wanted = max(1, target or cfg.frontier_buffer_target)
+    orchestrator = Orchestrator(store=index, settings=cfg)
+    frontier = orchestrator.frontier
+
+    before = await frontier.queue_depth()
+    queued_seeds = 0
+    queued_links = 0
+
+    for seed in seeds_for(None):
+        if await frontier.queue_depth() >= wanted:
+            break
+        host = _seed_domain(seed)
+        if await frontier.enqueue(host, reason="seed-refill"):
+            queued_seeds += 1
+
+    if await frontier.queue_depth() < wanted:
+        try:
+            result = await database.execute_safe(
+                "SELECT p.url FROM pages p WHERE p.kind = 'sitelink' "
+                "ORDER BY COALESCE(p.last_crawled_at, 0) ASC LIMIT ?",
+                [max(0, wanted - await frontier.queue_depth()) * 2],
+            )
+            for row in getattr(result, "rows", ()) or ():
+                if await frontier.queue_depth() >= wanted:
+                    break
+                url = str(row[0])
+                host = urlparse(url).netloc.lower().removeprefix("www.")
+                if not host:
+                    continue
+                if await frontier.enqueue(host, reason="link-refill"):
+                    queued_links += 1
+        except Exception as exc:
+            logger.warning("frontier refill from stored links failed: %s", exc)
+
+    after = await frontier.queue_depth()
+    logger.info(
+        "frontier refill: %d → %d queued (%d seeds, %d stored links, target %d)",
+        before, after, queued_seeds, queued_links, wanted,
+    )
+    return {
+        "before": before,
+        "after": after,
+        "seeds": queued_seeds,
+        "links": queued_links,
+        "target": wanted,
+    }
 
 
 async def coverage(store: object | None = None) -> dict[str, object]:
@@ -475,6 +544,7 @@ async def _main() -> None:
     parser.add_argument("--list", action="store_true", help="print the seed list and exit")
     parser.add_argument("--verify", action="store_true", help="print index and search verification")
     parser.add_argument("--probe", action="store_true", help="check the database is reachable and writable")
+    parser.add_argument("--refill", action="store_true", help="top the discovery queue up to the buffer target")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s :: %(message)s")
@@ -497,6 +567,12 @@ async def _main() -> None:
     await database.connect(settings)
     try:
         await database.initialize_schema()
+        if args.refill:
+            refill = await refill_frontier(settings=engine_settings)
+            print(refill)
+            await database.close()
+            return
+
         if args.probe:
             report = await database.verify_database()
             print(report)
