@@ -137,6 +137,8 @@ async def fetch_page_status(
     client: httpx.AsyncClient,
     url: str,
     settings: EngineSettings,
+    *,
+    headers: dict[str, str] | None = None,
 ) -> tuple[str | None, int | None]:
     """Fetch a page and always report what happened.
 

@@ -48,8 +48,13 @@ class IndexerAgent:
             logger.exception("storage check failed; refusing database writes")
             return False
 
-    async def persist(self, documents: Sequence[Any]) -> dict[str, int]:
-        """Write documents, reporting a failure when no page was persisted."""
+    async def persist(
+        self,
+        documents: Sequence[Any],
+        *,
+        queue_rowid: int | None = None,
+    ) -> dict[str, int]:
+        """Write documents, optionally atomically completing a URL queue row."""
         empty = {"pages": 0, "sites": 0, "sitelinks": 0}
         if not documents:
             return empty
@@ -62,7 +67,10 @@ class IndexerAgent:
                 doc.as_row() if hasattr(doc, "as_row") else dict(doc)
                 for doc in documents
             ]
-            outcome = await self.store.replace_documents(rows)
+            outcome = await self.store.replace_documents(
+                rows,
+                queue_rowid=queue_rowid,
+            )
             pages = int(outcome.get("pages", 0) or 0)
             if pages <= 0:
                 logger.error("index write returned no persisted pages: %s", outcome)
