@@ -12,4 +12,4 @@ venv/
 .DS_Store
 
 # Generated code dumps - concatenations of the tree, never source.
-*_repo_code.txt
+*_repo*.txt
