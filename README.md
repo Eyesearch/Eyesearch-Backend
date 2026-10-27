@@ -27,7 +27,7 @@ app/
 │   ├── 05_indexer_agent.py     Fail-closed storage guard, atomic persistence
 │   ├── 06_revalidation_agent.py Background stale-page revalidation
 │   ├── 07_classifier_agent.py  Ten-category tagging at ingestion
-│   └── 08_language_agent.py    Indian-script detection plus Arabic-script fallback
+│   └── 08_language_agent.py    Indian-script plus Arabic-block detection
 ├── engine/
 │   ├── config.py               Pydantic BaseSettings — every knob
 │   └── store.py                IndexStore: atomic batches, FTS5 search, stats
@@ -41,7 +41,8 @@ tests/
 ├── test_rate_limiter.py
 ├── test_parser_cap.py
 ├── test_quality_gate.py
-└── test_persistence_atomic.py
+├── test_persistence_atomic.py
+└── test_frontier_sitemap.py
 ```
 
 The agent files are numbered because the brief names them that way. Python
