@@ -24,6 +24,7 @@ _task: asyncio.Task[None] | None = None
 _backlog_task: asyncio.Task[None] | None = None
 _seed_task: asyncio.Task[None] | None = None
 _discovery_task: asyncio.Task[None] | None = None
+_url_queue_task: asyncio.Task[None] | None = None
 _cooldown: dict[str, int] = {}
 
 
@@ -204,6 +205,75 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
     return _seed_task
 
 
+async def _url_queue_loop(settings: EngineSettings) -> None:
+    """Continuously drain sitemap/frontier URLs independently of domain discovery.
+
+    The queue worker must start even when seed/discovery crawling is disabled:
+    sitemap harvesting can already have populated crawl_queue, and those rows
+    still need to pass through Agents 02–05 into pages.
+    """
+    while True:
+        try:
+            from app.indexer.guard import storage_paused
+
+            if await storage_paused():
+                await _sleep_logged(
+                    max(300, settings.storage_pause_seconds),
+                    "URL queue worker",
+                    "storage paused",
+                )
+                continue
+
+            report = await run_url_pass(settings=settings)
+            attempted = int(report.get("attempted", 0) or 0)
+            processed = int(report.get("processed", 0) or 0)
+            failed = int(report.get("failed", 0) or 0)
+
+            if attempted or failed or report.get("error"):
+                logger.info("URL queue worker: %s", report)
+
+            if report.get("error") and not attempted:
+                # Poll failures do not sleep inside run_url_pass; avoid a DB-error spin.
+                await _sleep_logged(_idle_seconds(settings), "URL queue worker", "poll failed")
+            elif attempted:
+                # Keep draining promptly, but give the database/network a short breather.
+                await _sleep_logged(
+                    max(1.0, float(settings.discovery_batch_pause_seconds)),
+                    "URL queue worker",
+                    f"batch complete ({processed} processed, {failed} failed)",
+                )
+            # An empty queue is already handled by run_url_pass with a 15-second sleep.
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("URL queue worker failed: %s", exc)
+            await _sleep_logged(_idle_seconds(settings), "URL queue worker", "worker error")
+
+
+def start_url_queue_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
+    """Start the URL queue drainer independently of discovery/seed feature flags."""
+    global _url_queue_task
+    cfg = settings or get_engine_settings()
+    if _url_queue_task is not None:
+        return _url_queue_task
+    _url_queue_task = asyncio.create_task(_url_queue_loop(cfg), name="eyesearch-url-queue")
+    logger.info("URL queue worker started (batch size 10; idle poll 15s)")
+    return _url_queue_task
+
+
+async def stop_url_queue_worker() -> None:
+    global _url_queue_task
+    if _url_queue_task is None:
+        return
+    _url_queue_task.cancel()
+    try:
+        await _url_queue_task
+    except asyncio.CancelledError:
+        pass
+    _url_queue_task = None
+    logger.info("URL queue worker stopped")
+
+
 async def _discovery_loop(settings: EngineSettings) -> None:
     """Drain the discovered-domain backlog continuously, independently of seeds.
 
@@ -222,16 +292,6 @@ async def _discovery_loop(settings: EngineSettings) -> None:
         except Exception as exc:
             logger.warning("discovery worker failed: %s", exc)
 
-        # The domain discovery pass and the URL queue are separate sources of
-        # work. Drain pending URLs every cycle so sitemap URLs do not starve.
-        try:
-            url_report = await run_url_pass(settings=settings)
-            if url_report.get("attempted") or url_report.get("failed"):
-                logger.info("URL queue worker: %s", url_report)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.warning("URL queue pass failed: %s", exc)
         from app.indexer.guard import storage_paused
 
         if await storage_paused():
@@ -314,6 +374,8 @@ async def stop() -> None:
 __all__ = [
     "start_discovery_worker",
     "stop_discovery_worker",
+    "start_url_queue_worker",
+    "stop_url_queue_worker",
     "start",
     "stop",
     "run_once",
