@@ -66,6 +66,7 @@ class BatchOutcome:
     skipped: int = 0
     discovered: int = 0
     harvested: int = 0
+    sitemap_domains_scheduled: int = 0
     paused: bool = False
     skip_reasons: dict[str, int] = field(default_factory=dict)
     elapsed_ms: int = 0
@@ -87,6 +88,7 @@ class BatchOutcome:
             "skipped": self.skipped,
             "discovered": self.discovered,
             "harvested": self.harvested,
+            "sitemap_domains_scheduled": self.sitemap_domains_scheduled,
             "paused": self.paused,
             "skip_reasons": dict(self.skip_reasons),
             "elapsed_ms": self.elapsed_ms,
@@ -126,6 +128,8 @@ class Orchestrator:
         )
         self.batches = 0
         self.pages_indexed = 0
+        self._pending_sitemap_domains: set[str] = set()
+        self._sitemap_harvest_task: asyncio.Task[None] | None = None
 
     # -- accessors ---------------------------------------------------------
 
@@ -307,17 +311,14 @@ class Orchestrator:
                 }
             )
             if new_domains:
-                try:
-                    outcome.harvested = await self._frontier.harvest_sitemap(
-                        new_domains, force=True
-                    )
-                except Exception as error:  # harvesting must never fail a batch
-                    logger.debug("sitemap harvest for discovered domains failed: %s", error)
+                outcome.sitemap_domains_scheduled = len(new_domains)
+                self._schedule_sitemap_harvest(new_domains)
 
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "batch done: %d queued, %d fetched, %d accepted, %d rejected, "
-            "%d skipped, %d indexed, %d discovered, %d harvested (%dms)",
+            "%d skipped, %d indexed, %d discovered, %d sitemap domains scheduled, "
+            "queue_closed=%d queue_failed=%d paused=%s skip_reasons=%s (%dms)",
             outcome.attempted,
             outcome.fetched,
             outcome.accepted,
@@ -325,10 +326,45 @@ class Orchestrator:
             outcome.skipped,
             outcome.indexed_pages,
             outcome.discovered,
-            outcome.harvested,
+            outcome.sitemap_domains_scheduled,
+            outcome.queue_closed,
+            outcome.queue_failed,
+            outcome.paused,
+            outcome.skip_reasons,
             outcome.elapsed_ms,
         )
         return outcome
+
+    # -- background sitemap discovery ------------------------------------
+
+    def _schedule_sitemap_harvest(self, domains: Sequence[str]) -> None:
+        """Schedule sitemap work without making page indexing wait for it."""
+        self._pending_sitemap_domains.update(domain for domain in domains if domain)
+        task = self._sitemap_harvest_task
+        if task is None or task.done():
+            self._sitemap_harvest_task = asyncio.create_task(self._drain_sitemap_harvests())
+        logger.info(
+            "sitemap harvest scheduled: domains=%d pending_domains=%d",
+            len(domains),
+            len(self._pending_sitemap_domains),
+        )
+
+    async def _drain_sitemap_harvests(self) -> None:
+        """Drain accumulated sitemap work; the frontier bounds network concurrency."""
+        while self._pending_sitemap_domains:
+            domains = tuple(sorted(self._pending_sitemap_domains))
+            self._pending_sitemap_domains.clear()
+            try:
+                queued = await self._frontier.harvest_sitemap(domains, force=True)
+                logger.info(
+                    "background sitemap harvest finished: domains=%d urls_queued=%d",
+                    len(domains),
+                    queued,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("background sitemap harvest failed for %d domains", len(domains))
 
     # -- the loop ----------------------------------------------------------
 
@@ -375,6 +411,13 @@ class Orchestrator:
         return await self.run_batch(limit=len(domains) or self._settings.crawl_batch_size)
 
     async def close(self) -> None:
+        task = self._sitemap_harvest_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await self._fetcher.aclose()
 
     @staticmethod
