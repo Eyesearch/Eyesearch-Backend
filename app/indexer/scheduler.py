@@ -15,6 +15,7 @@ import random
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.indexer.backlog_worker import run_backlog_once
+from app.indexer.baseline import run_baseline_pass
 from app.indexer.crawler import run_autonomous_seed_crawl, run_discovery_pass, run_url_pass
 from app.indexer.revalidate import revalidate_batch
 
@@ -26,7 +27,22 @@ _backlog_task: asyncio.Task[None] | None = None
 _seed_task: asyncio.Task[None] | None = None
 _discovery_task: asyncio.Task[None] | None = None
 _url_queue_task: asyncio.Task[None] | None = None
+_baseline_task: asyncio.Task[None] | None = None
 _cooldown: dict[str, int] = {}
+
+
+def baseline_only(settings: EngineSettings | None = None) -> bool:
+    """Whether the process is running the single baseline workflow."""
+    cfg = settings or get_engine_settings()
+    return bool(getattr(cfg, "baseline_only", False))
+
+
+def _skip(worker: str) -> None:
+    logger.info(
+        "%s not started: BASELINE_ONLY=true — the baseline workflow is the only "
+        "ingestion path (set BASELINE_ONLY=false to restore it)",
+        worker,
+    )
 
 
 async def run_once(limit: int | None = None) -> dict[str, int]:
@@ -65,6 +81,9 @@ def start(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
     """Start the loop in the running event loop (idempotent)."""
     global _task
     cfg = settings or get_engine_settings()
+    if baseline_only(cfg):
+        _skip("revalidation worker")
+        return _task
     if not cfg.revalidate_enabled or _task is not None:
         return _task
     _task = asyncio.create_task(_loop(cfg), name="eyesearch-revalidate")
@@ -158,6 +177,9 @@ async def _backlog_loop(settings: EngineSettings) -> None:
 def start_backlog_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
     global _backlog_task
     cfg = settings or get_engine_settings()
+    if baseline_only(cfg):
+        _skip("backlog worker")
+        return _backlog_task
     if not cfg.backlog_worker_enabled or _backlog_task is not None:
         return _backlog_task
     _backlog_task = asyncio.create_task(_backlog_loop(cfg), name="eyesearch-backlog")
@@ -189,6 +211,9 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
     """Start the category crawler. `initial_pass` populates an empty index at boot."""
     global _seed_task
     cfg = settings or get_engine_settings()
+    if baseline_only(cfg):
+        _skip("seed crawler")
+        return _seed_task
     if not cfg.seed_crawl_enabled or _seed_task is not None:
         return _seed_task
 
@@ -207,32 +232,35 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
 
 
 async def _url_queue_loop(settings: EngineSettings) -> None:
-    """Drain crawl_queue using the baseline fetch -> parse -> direct-store path.
-
-    The storage guard is intentionally bypassed in baseline mode: its cached
-    fail-closed state previously could park this worker for minutes without
-    attempting a page write. Actual Turso write/quota errors are logged by the
-    store path and each affected queue row is transitioned to failed.
-    """
+    """Continuously drain sitemap/frontier URLs with bounded polling frequency."""
     while True:
         try:
-            report = await run_url_pass(settings=settings)
-            attempted = int(report.get("attempted", 0) or 0)
-            processed = int(report.get("processed", 0) or 0)
-            failed = int(report.get("failed", 0) or 0)
-            if attempted or failed or report.get("error"):
-                logger.info(
-                    "BASELINE URL queue worker: attempted=%d processed=%d failed=%d error=%s",
-                    attempted, processed, failed, report.get("error", ""),
+            from app.indexer.guard import storage_paused
+
+            if await storage_paused():
+                await _sleep_logged(
+                    max(300, settings.storage_pause_seconds),
+                    "URL queue worker",
+                    "storage paused",
                 )
-            if report.get("error") and not attempted:
-                await asyncio.sleep(15.0)
+            else:
+                report = await run_url_pass(settings=settings)
+                attempted = int(report.get("attempted", 0) or 0)
+                processed = int(report.get("processed", 0) or 0)
+                failed = int(report.get("failed", 0) or 0)
+                if attempted or failed or report.get("error"):
+                    logger.info("URL queue worker: %s", report)
+                if report.get("error") and not attempted:
+                    # Poll failures need a longer cooldown before another Turso request.
+                    await asyncio.sleep(15.0)
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("BASELINE URL queue worker iteration failed")
+            # Include traceback and exact exception; never retry in a tight loop.
+            logger.exception("URL queue worker iteration failed")
             await asyncio.sleep(15.0)
         finally:
+            # Mandatory throttle for every iteration, including empty and failed batches.
             await asyncio.sleep(URL_BATCH_THROTTLE_SECONDS)
 
 
@@ -240,6 +268,9 @@ def start_url_queue_worker(settings: EngineSettings | None = None) -> asyncio.Ta
     """Start the URL queue drainer independently of discovery/seed feature flags."""
     global _url_queue_task
     cfg = settings or get_engine_settings()
+    if baseline_only(cfg):
+        _skip("URL queue worker (the baseline worker drains crawl_queue instead)")
+        return _url_queue_task
     if _url_queue_task is not None:
         return _url_queue_task
     _url_queue_task = asyncio.create_task(_url_queue_loop(cfg), name="eyesearch-url-queue")
@@ -258,6 +289,58 @@ async def stop_url_queue_worker() -> None:
         pass
     _url_queue_task = None
     logger.info("URL queue worker stopped")
+
+
+async def _baseline_loop(settings: EngineSettings) -> None:
+    """Drain `crawl_queue` through the one baseline workflow, and nothing else.
+
+    One batch at a time, a fixed pause between batches, and a longer pause when
+    the queue is empty — the same shape as the other workers, with one writer.
+    """
+    logger.info(
+        "baseline worker started (batch %d, pause %.1fs) — crawl_queue -> fetch -> "
+        "parse -> pages -> queue status",
+        settings.baseline_batch_size, settings.baseline_interval_seconds,
+    )
+    while True:
+        try:
+            report = await run_baseline_pass(settings=settings)
+            if report.get("processed") or report.get("failed") or report.get("error"):
+                logger.info("baseline worker: %s", report)
+            empty = bool(report.get("empty"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("baseline worker iteration failed")
+            empty = False
+        await asyncio.sleep(
+            max(15.0, float(settings.worker_idle_backoff_seconds))
+            if empty
+            else float(settings.baseline_interval_seconds)
+        )
+
+
+def start_baseline_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
+    """Start the single baseline ingestion worker (idempotent)."""
+    global _baseline_task
+    cfg = settings or get_engine_settings()
+    if not baseline_only(cfg) or _baseline_task is not None:
+        return _baseline_task
+    _baseline_task = asyncio.create_task(_baseline_loop(cfg), name="eyesearch-baseline")
+    return _baseline_task
+
+
+async def stop_baseline_worker() -> None:
+    global _baseline_task
+    if _baseline_task is None:
+        return
+    _baseline_task.cancel()
+    try:
+        await _baseline_task
+    except asyncio.CancelledError:
+        pass
+    _baseline_task = None
+    logger.info("baseline worker stopped")
 
 
 async def _discovery_loop(settings: EngineSettings) -> None:
@@ -298,6 +381,9 @@ async def _discovery_loop(settings: EngineSettings) -> None:
 def start_discovery_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
     global _discovery_task
     cfg = settings or get_engine_settings()
+    if baseline_only(cfg):
+        _skip("discovery worker")
+        return _discovery_task
     if not cfg.seed_crawl_enabled or _discovery_task is not None:
         return _discovery_task
     _discovery_task = asyncio.create_task(_discovery_loop(cfg), name="eyesearch-discovery")
@@ -358,6 +444,9 @@ async def stop() -> None:
 
 
 __all__ = [
+    "baseline_only",
+    "start_baseline_worker",
+    "stop_baseline_worker",
     "start_discovery_worker",
     "stop_discovery_worker",
     "start_url_queue_worker",

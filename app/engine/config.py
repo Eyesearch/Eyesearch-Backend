@@ -101,6 +101,19 @@ class EngineSettings:
     content_max_chars: int = field(default_factory=lambda: _int("INDEX_CONTENT_MAX_CHARS", 1500))
     summary_max_sentences: int = field(default_factory=lambda: _int("INDEX_SUMMARY_SENTENCES", 4))
 
+    # --- baseline ingestion workflow --------------------------------------
+    # The single path we are proving first: crawl_queue -> fetch -> basic
+    # parse -> direct write into `pages` -> queue row processed/failed.
+    # While this is true the other five agents' workers (seed, discovery,
+    # backlog, revalidation, URL-queue drainer) are not started and the store's
+    # site/domain caps, quality gate and sitelink fan-out are off the path.
+    # Set BASELINE_ONLY=false to bring the full six-agent pipeline back.
+    baseline_only: bool = field(default_factory=lambda: _bool("BASELINE_ONLY", True))
+    baseline_batch_size: int = field(default_factory=lambda: _int("BASELINE_BATCH_SIZE", 10))
+    baseline_interval_seconds: float = field(
+        default_factory=lambda: max(2.0, _float("BASELINE_INTERVAL_SECONDS", 5.0))
+    )
+
     # --- category seed crawler -------------------------------------------
     seed_crawl_enabled: bool = field(default_factory=lambda: _bool("SEED_CRAWL_ENABLED", True))
     # The self-healing refresh: every 24 hours by default.
@@ -155,6 +168,8 @@ class EngineSettings:
 
     # --- crawling --------------------------------------------------------
     crawl_enabled: bool = field(default_factory=lambda: _bool("CRAWL_ENABLED", True))
+    # Kept above for readability: the baseline pass uses crawl_timeout_seconds,
+    # crawl_delay_seconds and crawl_user_agent directly.
     crawl_max_pages_per_seed: int = field(default_factory=lambda: _int("CRAWL_MAX_PAGES_PER_SEED", 20))
     crawl_max_depth: int = field(default_factory=lambda: _int("CRAWL_MAX_DEPTH", 1))
     crawl_concurrency: int = field(default_factory=lambda: _int("CRAWL_CONCURRENCY", 3))
