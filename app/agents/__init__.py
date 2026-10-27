@@ -16,6 +16,8 @@ _parser = import_module("app.agents.03_parser_agent.agent")
 _quality = import_module("app.agents.04_quality_agent.agent")
 _indexer = import_module("app.agents.05_indexer_agent.agent")
 _semantic = import_module("app.agents.06_semantic_ai_agent.agent")
+_restrictions = import_module("app.agents.02_fetcher_agent.restrictions")
+_headers = import_module("app.agents.02_fetcher_agent.headers")
 
 FrontierAgent = _frontier.FrontierAgent
 FrontierConfig = _frontier_config.FrontierConfig
@@ -28,6 +30,9 @@ QualityVerdict = _quality.QualityVerdict
 IndexerAgent = _indexer.IndexerAgent
 SemanticAIAgent = _semantic.SemanticAIAgent
 SemanticResult = _semantic.SemanticResult
+is_restricted_host = _restrictions.is_restricted
+mark_restricted_host = _restrictions.mark_restricted
+browser_headers_for = _headers.headers_for
 
 AGENTS = (
     "frontier",
@@ -51,4 +56,7 @@ __all__ = [
     "IndexerAgent",
     "SemanticAIAgent",
     "SemanticResult",
+    "browser_headers_for",
+    "is_restricted_host",
+    "mark_restricted_host",
 ]

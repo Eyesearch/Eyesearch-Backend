@@ -45,13 +45,22 @@ class FrontierAgent:
         return (authoritative + rest)[:size]
 
     async def enqueue(self, host: str, *, reason: str = "discovered") -> bool:
-        """Queue one domain, applying the authority and exclusion rules."""
+        """Queue one domain, applying the authority and exclusion rules.
+
+        The domain lands in `crawl_backlog` (kind='domain') for the pipeline and
+        is mirrored into `crawl_queue`, which is the table an operator watches.
+        """
         if self.config.is_excluded(host):
             return False
+        key = (host or "").lower().removeprefix("www.").strip()
+        if not key:
+            return False
         try:
-            if await self.store.site_exists(host):
+            if await self.store.site_exists(key):
                 return False
-            return await self.store.enqueue_domain(host, reason=reason)
+            queued = await self.store.enqueue_domain(key, reason=reason)
+            await self.store.queue_url(f"https://{key}/", domain=key, reason=reason)
+            return bool(queued)
         except Exception as exc:
             logger.warning("frontier enqueue failed for %s: %s", host, exc)
             return False
@@ -59,8 +68,16 @@ class FrontierAgent:
     async def mark_done(self, host: str, *, status: str = "processed") -> None:
         try:
             await self.store.mark_domain_processed(host, status=status)
+            await self.store.close_queue_url(f"https://{(host or '').lower().removeprefix('www.')}/")
         except Exception as exc:
             logger.warning("frontier mark failed for %s: %s", host, exc)
+
+    async def queue_depth(self) -> int:
+        """How many URLs sit in `crawl_queue`, i.e. how full the buffer is."""
+        try:
+            return await self.store.queue_depth()
+        except Exception:
+            return 0
 
     async def pending(self) -> int:
         try:
