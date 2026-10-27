@@ -11,12 +11,20 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .headers import browser_headers
 from app.crawler.crawler import crawl_client, fetch_page_status
+
+from .headers import browser_headers, headers_for
+from .restrictions import is_restricted, is_restricting, mark_restricted
 
 logger = logging.getLogger(__name__)
 
-TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
+TRANSIENT_STATUS = frozenset({500, 502, 503, 504})
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlparse
+
+    return (urlparse(url).netloc or "").lower().removeprefix("www.")
 
 
 @dataclass(slots=True)
@@ -29,9 +37,16 @@ class FetchResult:
     error: str = ""
     attempts: int = 1
 
+    restricted: bool = False
+
     @property
     def ok(self) -> bool:
-        return self.html is not None and self.status is not None and self.status < 400
+        return (
+            self.html is not None
+            and self.status is not None
+            and self.status < 400
+            and not self.restricted
+        )
 
 
 class FetcherAgent:
@@ -84,7 +99,16 @@ class FetcherAgent:
             self._client = None
 
     async def fetch(self, url: str) -> FetchResult:
-        """Fetch one URL, retrying transient failures with a short backoff."""
+        """Fetch one URL, retrying transient failures with a short backoff.
+
+        A 403/202/429 marks the host restricted and returns immediately: the
+        queue moves on instead of stalling on a site that will not answer.
+        """
+        host = _host_of(url)
+        cooldown = getattr(self.settings, "restriction_cooldown_seconds", None)
+        if host and is_restricted(host, cooldown_seconds=cooldown):
+            return FetchResult(url=url, error="restricted", restricted=True, attempts=0)
+
         client = self._client
         owned = False
         if client is None:
@@ -92,11 +116,22 @@ class FetcherAgent:
             owned = True
         try:
             for attempt in range(1, self.retries + 1):
+                headers = headers_for(attempt - 1, user_agent=self.settings.crawl_user_agent)
                 try:
+                    html, status = await self._fetch_fn(client, url, self.settings, headers=headers)
+                except TypeError:
+                    # the low-level fetch may not take headers (older callers)
                     html, status = await self._fetch_fn(client, url, self.settings)
                 except Exception as exc:  # never raise out of the fetcher
                     logger.warning("fetch failed for %s: %s", url, exc)
                     html, status = None, None
+
+                if is_restricting(status):
+                    mark_restricted(host, int(status or 0))
+                    return FetchResult(
+                        url=url, html=None, status=status,
+                        error=f"restricted ({status})", restricted=True, attempts=attempt,
+                    )
 
                 transient = status is None or status in TRANSIENT_STATUS
                 if (html is not None or status) and not transient:

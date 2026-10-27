@@ -59,6 +59,13 @@ class EngineSettings:
     # budget is 8 KB while the domain budget stays at 10 KB.
     max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 8192))
     body_max_chars: int = field(default_factory=lambda: _int("INDEX_BODY_MAX_CHARS", 1200))
+    # How many failed resolutions before a backlog query goes to history.
+    backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
+    # How long a blocked domain is skipped before we try it again.
+    restriction_cooldown_seconds: int = field(
+        default_factory=lambda: _int("RESTRICTION_COOLDOWN_SECONDS", 21600)
+    )
+
     # Two to three readable lines under a card title.
     max_site_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_SITE_PAYLOAD_BYTES", 10240))
     title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))

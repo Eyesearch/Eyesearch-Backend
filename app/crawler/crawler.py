@@ -147,7 +147,7 @@ async def fetch_page_status(
     if _is_blocked(url):
         return None, None
 
-    headers = browser_headers(settings.crawl_user_agent)
+    headers = dict(headers) if headers else browser_headers(settings.crawl_user_agent)
     policy = (settings.crawl_verify_tls or "never").lower()
 
     async def _attempt(http: httpx.AsyncClient) -> tuple[str | None, int | None]:
@@ -200,6 +200,7 @@ async def fetch_page(
     *,
     etag: str | None = None,
     last_modified: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> tuple[str, int] | None:
     """Fetch one page, capped by bytes and content type. None means skip.
 
@@ -215,7 +216,7 @@ async def fetch_page(
     if _is_blocked(url):
         return None
 
-    headers = browser_headers(settings.crawl_user_agent)
+    headers = dict(headers) if headers else browser_headers(settings.crawl_user_agent)
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
