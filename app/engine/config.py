@@ -55,13 +55,19 @@ class Settings(BaseSettings):
     libsql_min_interval_seconds: float = 0.5
 
     # --- Crawl pipeline -----------------------------------------------------
+    # Tuned for throughput on a single 512 MB instance. `crawl_batch_size`
+    # bounds how much HTML is held in memory at once: the fetcher returns every
+    # body in the batch before any of it is parsed, so the peak is roughly
+    # batch_size x crawl_max_body_bytes. Every value here is overridable from
+    # the environment, so a smaller instance can be dialled back without a code
+    # change.
     crawler_enabled: bool = True
-    crawl_batch_size: int = 10
-    crawl_batch_sleep_seconds: float = 2.0
-    crawl_empty_backoff_seconds: float = 15.0
-    crawl_timeout_seconds: float = 15.0
+    crawl_batch_size: int = 40
+    crawl_batch_sleep_seconds: float = 0.2
+    crawl_empty_backoff_seconds: float = 5.0
+    crawl_timeout_seconds: float = 10.0
     crawl_max_body_bytes: int = 512_000
-    crawl_concurrency: int = 5
+    crawl_concurrency: int = 20
     # When the frontier runs dry and every seed is already indexed, the
     # stalest crawled URLs return to 'pending' after this cooldown.
     rearm_cooldown_seconds: int = 6 * 3600

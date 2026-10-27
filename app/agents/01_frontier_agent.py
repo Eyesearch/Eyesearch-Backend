@@ -522,16 +522,28 @@ class FrontierAgent:
             )
         return rearmed
 
-    async def harvest_sitemap(self, domains: tuple[str, ...] | None = None) -> int:
+    async def harvest_sitemap(
+        self,
+        domains: tuple[str, ...] | None = None,
+        *,
+        force: bool = False,
+    ) -> int:
         """Queue URLs from the sitemap of an authoritative domain, once an hour.
 
-        Only runs when the frontier is below `FRONTIER_LOW_WATER` and a client
-        is available. A domain is marked as attempted before its sitemap is
-        fetched, so a domain without one is not retried on every pass.
+        Normally this only runs when the frontier is below `FRONTIER_LOW_WATER`,
+        on the reasoning that a queue with work in it does not need more. That
+        gate is wrong once the queue is large: with thousands of URLs pending,
+        the depth never drops and sitemaps are skipped forever — precisely the
+        domains that most need their sitemap read. `force=True` is for callers
+        that know a specific domain is newly interesting, and it bypasses the
+        depth check while still honouring the per-domain cooldown.
+
+        A domain is marked as attempted before its sitemap is fetched, so a
+        domain without one is not retried on every pass.
         """
         if self._client is None:
             return 0
-        if await self.depth() >= FRONTIER_LOW_WATER:
+        if not force and await self.depth() >= FRONTIER_LOW_WATER:
             return 0
 
         now = time.monotonic()

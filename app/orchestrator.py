@@ -65,6 +65,7 @@ class BatchOutcome:
     queue_failed: int = 0
     skipped: int = 0
     discovered: int = 0
+    harvested: int = 0
     paused: bool = False
     skip_reasons: dict[str, int] = field(default_factory=dict)
     elapsed_ms: int = 0
@@ -85,6 +86,7 @@ class BatchOutcome:
             "queue_failed": self.queue_failed,
             "skipped": self.skipped,
             "discovered": self.discovered,
+            "harvested": self.harvested,
             "paused": self.paused,
             "skip_reasons": dict(self.skip_reasons),
             "elapsed_ms": self.elapsed_ms,
@@ -287,10 +289,31 @@ class Orchestrator:
             # Queue after the commit, so a failed write never grows the frontier.
             outcome.discovered = await self._frontier.enqueue(discovered)
 
+            # A newly discovered authoritative domain gets its sitemap read now
+            # rather than waiting for the frontier to run dry, which on a busy
+            # queue never happens. The per-domain cooldown inside
+            # harvest_sitemap() is what stops this running on every batch.
+            new_domains = tuple(
+                {
+                    domain
+                    for domain in (
+                        _frontier_module.domain_of(url) for url in discovered
+                    )
+                    if domain and _frontier_module.is_authoritative(domain)
+                }
+            )
+            if new_domains:
+                try:
+                    outcome.harvested = await self._frontier.harvest_sitemap(
+                        new_domains, force=True
+                    )
+                except Exception as error:  # harvesting must never fail a batch
+                    logger.debug("sitemap harvest for discovered domains failed: %s", error)
+
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "batch done: %d queued, %d fetched, %d accepted, %d rejected, "
-            "%d skipped, %d indexed, %d discovered (%dms)",
+            "%d skipped, %d indexed, %d discovered, %d harvested (%dms)",
             outcome.attempted,
             outcome.fetched,
             outcome.accepted,
@@ -298,6 +321,7 @@ class Orchestrator:
             outcome.skipped,
             outcome.indexed_pages,
             outcome.discovered,
+            outcome.harvested,
             outcome.elapsed_ms,
         )
         return outcome

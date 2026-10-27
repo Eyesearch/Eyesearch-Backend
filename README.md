@@ -199,8 +199,16 @@ exists to keep that true.
 
 8. **Workers never block startup.** They are scheduled from a bootstrap task
    after the event loop has a turn, so the port binds and `/health` answers in
-   milliseconds while the crawl runs behind it. A batch iteration sleeps 2.0 s;
-   an empty queue backs off 15.0 s.
+   milliseconds while the crawl runs behind it. A batch iteration sleeps 0.2 s;
+   an empty queue backs off 5.0 s.
+
+   Throughput is tuned for one 512 MB instance: `CRAWL_BATCH_SIZE` 40,
+   `CRAWL_CONCURRENCY` 20, `CRAWL_TIMEOUT_SECONDS` 10. The fetcher returns every
+   body in a batch before any of it is parsed, so peak memory scales with
+   `batch_size × crawl_max_body_bytes`. Measured at the 512 KB body cap: a
+   40-URL batch peaks 22 MB above the interpreter baseline (100 MB total),
+   against 14 MB for the old 10-URL batch. Every one of these is an environment
+   variable, so a smaller instance can be dialled back without a code change.
 
 ## Link discovery
 
@@ -412,6 +420,20 @@ asks one authoritative domain what it publishes: `/sitemap.xml`, then
 - A domain is marked as attempted *before* its sitemap is fetched and is not
   retried for `SITEMAP_COOLDOWN_SECONDS` (1 h), so a domain without a sitemap
   costs one request an hour rather than one per pass.
+
+The depth gate alone was a trap. A queue holding thousands of URLs never drops
+below 20, so `harvest_sitemap()` never ran — the domains that most needed their
+sitemap read were the ones permanently skipped. Two things fix that:
+
+- `harvest_sitemap(..., force=True)` bypasses the depth check while still
+  honouring the per-domain cooldown. It is for a caller that knows a specific
+  domain is newly interesting.
+- `Orchestrator.run_batch()` passes the authoritative domains it has just
+  discovered, forced. `BatchOutcome.harvested` reports the count, so the log
+  line shows `… 1 discovered, 1 harvested`.
+
+Measured with a 60-URL queue: one batch takes 40 URLs, indexes 40, discovers 1
+and harvests 1 — where the old gate would have returned 0.
 
 Parsing is a `<loc>` regex rather than a full XML parser: it is the only element
 needed, and it cannot be made to allocate on an unbounded document.

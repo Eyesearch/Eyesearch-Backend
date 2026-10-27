@@ -6,6 +6,7 @@ import httpx
 
 from app.agents import load_agent
 from app.engine.store import PageDocument, highlight_terms
+from app.orchestrator import Orchestrator
 from app.services.search_service import SearchCache, SearchService
 
 frontier_module = load_agent("01_frontier_agent")
@@ -181,7 +182,9 @@ async def test_harvesting_is_skipped_when_the_frontier_is_healthy(store, client,
     )
     frontier = FrontierAgent(store, settings, client=http)
     try:
-        assert await frontier.harvest_sitemap(domains=("karnataka.gov.in",)) == 0
+        assert await frontier.harvest_sitemap(domains=("karnataka.gov.in",), force=False) == 0
+        # A full queue must not block a domain we were explicitly asked about.
+        assert await frontier.harvest_sitemap(domains=("karnataka.gov.in",), force=True) == 2
     finally:
         await http.aclose()
 
@@ -352,3 +355,56 @@ async def test_snippets_carry_highlighting_only_when_asked(store):
 
     assert "<b>" not in plain["results"][0]["snippet"]
     assert "<b>" in marked["results"][0]["snippet"]
+
+
+async def test_forcing_a_harvest_still_respects_the_cooldown(store, client, settings):
+    """`force` bypasses the depth gate, not the once-an-hour rule."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, text=SITEMAP)
+
+    await store.enqueue_urls(
+        [(f"https://busy.gov.in/p{i}", "busy.gov.in") for i in range(FRONTIER_LOW_WATER)]
+    )
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    frontier = FrontierAgent(store, settings, client=http)
+    try:
+        first = await frontier.harvest_sitemap(domains=("karnataka.gov.in",), force=True)
+        second = await frontier.harvest_sitemap(domains=("karnataka.gov.in",), force=True)
+    finally:
+        await http.aclose()
+
+    assert first == 2
+    assert second == 0
+    assert len(calls) == 1
+
+
+async def test_the_orchestrator_harvests_for_a_newly_discovered_domain(store, client, settings):
+    """Discovery of an authoritative domain triggers its sitemap immediately."""
+    page = (
+        "<html><head><title>Karnataka portal</title></head><body>"
+        '<a href="https://www.thehindu.com/news/">news</a>'
+        "<p>The department publishes notifications, citizen services and contact "
+        "details for district offices across the state of Karnataka.</p></body></html>"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("sitemap.xml"):
+            return httpx.Response(
+                200,
+                text="<urlset><url><loc>https://www.thehindu.com/news/national</loc></url></urlset>",
+            )
+        return httpx.Response(200, text=page)
+
+    orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
+    try:
+        await orchestrator.frontier.enqueue(["https://karnataka.gov.in/"])
+        outcome = await orchestrator.run_batch()
+
+        assert outcome.discovered >= 1
+        assert outcome.harvested == 1
+    finally:
+        await orchestrator.close()
