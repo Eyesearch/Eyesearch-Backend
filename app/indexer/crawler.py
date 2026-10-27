@@ -340,11 +340,28 @@ async def run_discovery_pass(
         return report
 
     orchestrator = Orchestrator(store=index, settings=cfg)
+    seen_hosts: set[str] = set()
+    max_batches = max(1, cfg.discovery_max_batches_per_pass)
 
-    while sites < cfg.max_indexed_sites:
+    while sites < cfg.max_indexed_sites and int(report["batches"]) < max_batches:
         hosts = await orchestrator.frontier.next_batch(batch)
         if not hosts:
+            logger.info("discovery pass: queue empty, nothing to do")
             break
+
+        # A host that comes back in a later batch was not marked done; never let
+        # that turn the pass into a spin against the database.
+        fresh = [host for host in hosts if host not in seen_hosts]
+        if not fresh:
+            logger.warning(
+                "discovery pass: the same %d domains came back — closing them and stopping",
+                len(hosts),
+            )
+            for host in hosts:
+                await orchestrator.frontier.mark_done(host, status="processed")
+            break
+        seen_hosts.update(fresh)
+        hosts = fresh
 
         report["batches"] = int(report["batches"]) + 1
         outcome = await orchestrator.run_domains(hosts, settings=cfg)
@@ -367,6 +384,7 @@ async def run_discovery_pass(
             )
 
         sites = await index.count_documents()
+        stored_now = int(outcome.get("indexed_pages", 0))
         logger.info(
             "discovery batch %s done: %s attempted, %s pages stored, %s sites",
             report["batches"], report["attempted"], report["stored"], sites,
@@ -374,7 +392,13 @@ async def run_discovery_pass(
         if sites >= cfg.max_indexed_sites:
             report["ceiling"] = True
             break
-        await asyncio.sleep(max(0.0, cfg.discovery_batch_pause_seconds))
+        if stored_now:
+            await asyncio.sleep(max(0.0, cfg.discovery_batch_pause_seconds))
+        else:
+            # Nothing landed: back off properly instead of polling again at once.
+            backoff = max(1.0, cfg.worker_idle_backoff_seconds)
+            logger.info("discovery pass: no pages stored this batch, sleeping %.0fs", backoff)
+            await asyncio.sleep(backoff)
 
     return report
 
@@ -450,6 +474,12 @@ async def refill_frontier(
                     if await index.url_is_known(url):
                         continue
                     await index.queue_url(url, domain=host, reason="sitemap")
+                    # the discovery pass works in domains, so the host joins the
+                    # domain backlog too — otherwise the queue fills and nothing consumes it
+                    try:
+                        await index.enqueue_domain(host, reason="sitemap")
+                    except Exception:
+                        pass
                     harvested += 1
             harvested_total = harvested
             if harvested:
