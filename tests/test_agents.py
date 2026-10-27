@@ -333,3 +333,108 @@ async def test_run_discovery_pass_pulls_batches_from_the_frontier(temp_db, monke
     assert report["attempted"] == 3
     assert [len(batch) for batch in calls] == [2, 1]
     assert await store.pending_domain_count() == 0
+
+
+# --- bot-block resilience -------------------------------------------------
+
+def test_the_fetcher_rotates_realistic_browser_headers() -> None:
+    import importlib
+
+    headers_module = importlib.import_module("app.agents.02_fetcher_agent.headers")
+
+    chrome = headers_module.headers_for(0)
+    safari = headers_module.headers_for(1)
+
+    assert "Chrome/128" in chrome["User-Agent"]
+    assert chrome["Accept-Language"] == "en-US,en;q=0.9"
+    assert '"Google Chrome";v="128"' in chrome["Sec-Ch-Ua"]
+    assert chrome["Sec-Ch-Ua-Platform"] == '"Windows"'
+    assert "Safari/605" in safari["User-Agent"]
+    assert chrome["User-Agent"] != safari["User-Agent"], "attempts must not repeat a fingerprint"
+    assert headers_module.next_profile()["User-Agent"].startswith("Mozilla/5.0")
+
+
+def test_a_blocked_status_marks_the_host_restricted() -> None:
+    import importlib
+
+    restrictions = importlib.import_module("app.agents.02_fetcher_agent.restrictions")
+    restrictions.clear()
+
+    assert restrictions.is_restricting(403) is True
+    assert restrictions.is_restricting(202) is True
+    assert restrictions.is_restricting(429) is True
+    assert restrictions.is_restricting(200) is False
+    assert restrictions.is_restricting(404) is False
+
+    restrictions.mark_restricted("blocked.gov.in", 403)
+    assert restrictions.is_restricted("blocked.gov.in") is True
+    assert restrictions.is_restricted("www.blocked.gov.in") is True
+    assert restrictions.is_restricted("open.gov.in") is False
+    # a zero-length cooldown expires immediately
+    assert restrictions.is_restricted("blocked.gov.in", cooldown_seconds=0) is False
+    restrictions.clear()
+
+
+async def test_a_403_is_bypassed_immediately_without_a_second_request() -> None:
+    import importlib
+
+    restrictions = importlib.import_module("app.agents.02_fetcher_agent.restrictions")
+    restrictions.clear()
+
+    calls: list[str] = []
+
+    async def _blocked(client, url, settings, **kwargs):
+        calls.append(url)
+        return None, 403
+
+    agent = FetcherAgent(EngineSettings(), fetch_fn=_blocked)
+
+    first = await agent.fetch("https://blocked.gov.in/")
+    assert first.ok is False
+    assert first.restricted is True
+    assert first.attempts == 1
+
+    # the second call never reaches the network: the host is restricted
+    second = await agent.fetch("https://blocked.gov.in/notices")
+    assert second.restricted is True
+    assert second.attempts == 0
+    assert calls == ["https://blocked.gov.in/"]
+    restrictions.clear()
+
+
+async def test_a_202_challenge_is_treated_as_a_block() -> None:
+    import importlib
+
+    restrictions = importlib.import_module("app.agents.02_fetcher_agent.restrictions")
+    restrictions.clear()
+
+    async def _challenge(client, url, settings, **kwargs):
+        return None, 202
+
+    agent = FetcherAgent(EngineSettings(), fetch_fn=_challenge)
+    result = await agent.fetch("https://challenged.gov.in/")
+
+    assert result.restricted is True
+    assert restrictions.is_restricted("challenged.gov.in") is True
+    restrictions.clear()
+
+
+async def test_the_backlog_drops_a_query_after_repeated_blocks(temp_db, monkeypatch) -> None:
+    from app.indexer import backlog_worker
+
+    store = get_store()
+    await store.enqueue_backlog("a query that stays blocked", hits=1)
+
+    async def _nothing(query, *, store=None, settings=None, client=None):
+        return {"urls": 0, "inserted": 0, "skipped": 0, "reason": "blocked"}
+
+    monkeypatch.setattr(backlog_worker, "resolve_query", _nothing)
+    settings = EngineSettings(crawl_enabled=True, backlog_max_attempts=2)
+
+    first = await backlog_worker.run_backlog_once(store=store, settings=settings)
+    assert first["dropped"] == 0
+    assert await store.pending_backlog(5) == ["a query that stays blocked"]
+
+    second = await backlog_worker.run_backlog_once(store=store, settings=settings)
+    assert second["dropped"] == 1
+    assert await store.pending_backlog(5) == [], "a blocked query goes to history"
