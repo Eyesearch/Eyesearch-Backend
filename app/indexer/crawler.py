@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from dataclasses import dataclass, field
 
 import httpx
+from bs4 import BeautifulSoup
 
 from app.agents import FetcherAgent, IndexerAgent, ParserAgent, QualityAgent
 from app.crawler.crawler import RobotsCache, fetch_page, fetch_page_status
@@ -34,11 +35,23 @@ from app.database import execute_safe, get_client
 from app.engine.store import get_store
 from app.engine.text import (
     ExtractedDocument,
+    detect_language,
     extract_document_with_reason,
     extract_links,
     fallback_document,
+    normalise_whitespace,
+    strip_artefacts,
+    truncate,
+    url_terms,
 )
-from app.engine.urls import infer_category, is_authoritative_indian, is_indexable, normalise_url
+from app.engine.urls import (
+    domain_class,
+    infer_category,
+    is_authoritative_indian,
+    is_indexable,
+    normalise_url,
+    root_domain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +234,72 @@ async def crawl_seed(
     return report, documents
 
 
+def _basic_parse_document(
+    url: str, html: str, status: int, settings: EngineSettings
+) -> ExtractedDocument:
+    """Minimal HTML-to-row parser with no agent quality gate."""
+    if status >= 400:
+        raise ValueError(f"HTTP status {status}")
+    if not html or len(html.strip()) < 40:
+        raise ValueError("response body is empty or too short")
+
+    canonical = normalise_url(url)
+    if not is_indexable(canonical):
+        raise ValueError("URL is not indexable")
+    host = urlparse(canonical).netloc
+    if not host:
+        raise ValueError("URL has no hostname")
+
+    soup = BeautifulSoup(html, "html.parser")
+    for node in soup(["script", "style", "noscript", "svg", "template"]):
+        node.decompose()
+
+    title = normalise_whitespace(soup.title.get_text(" ", strip=True)) if soup.title else ""
+    if not title:
+        first_heading = soup.find("h1")
+        if first_heading is not None:
+            title = normalise_whitespace(first_heading.get_text(" ", strip=True))
+    title = truncate(strip_artefacts(title) or host.removeprefix("www."), settings.title_max_chars)
+
+    meta = soup.find("meta", attrs={"name": lambda value: str(value or "").lower() == "description"})
+    if meta is None:
+        meta = soup.find("meta", attrs={"property": lambda value: str(value or "").lower() == "og:description"})
+    description = strip_artefacts(str(meta.get("content") or "")) if meta else ""
+
+    body_text = normalise_whitespace(soup.get_text(" ", strip=True))
+    headings = normalise_whitespace(" ".join(
+        node.get_text(" ", strip=True) for node in soup.find_all(["h1", "h2", "h3"])
+    ))
+    # Bound each field before fitting the total payload. The store remains the
+    # authority on final per-page and per-domain limits.
+    body_text = truncate(body_text, min(1200, max(200, settings.max_payload_bytes // 3)))
+    headings = truncate(headings, 320)
+    snippet = truncate(description or body_text, 220)
+    category = infer_category(canonical)
+    root = root_domain(canonical)
+
+    document = ExtractedDocument(
+        url=canonical,
+        canonical_url=canonical,
+        domain=host,
+        root_domain=root,
+        domain_class=domain_class(canonical),
+        title=title,
+        snippet=snippet,
+        content=body_text,
+        language=detect_language(body_text),
+        favicon_url=f"https://{host}/favicon.ico",
+        category=category,
+        headings=headings or title,
+        body_text=body_text,
+        nav_terms="",
+        site_terms=truncate(f"{root.replace('.', ' ')} {title}", 120),
+        category_terms=category,
+        url_terms=url_terms(canonical),
+    )
+    return document.fit_to_budget(settings.max_payload_bytes)
+
+
 async def run_url_pass(
     *,
     batch_size: int = 10,
@@ -298,16 +377,9 @@ async def run_url_pass(
                         f"fetch returned no HTML (http_status={status!r})"
                     )
 
-                document, parse_reason = extract_document_with_reason(
-                    raw_url,
-                    html,
-                    http_status=int(status or 200),
-                    category=infer_category(raw_url),
+                document = _basic_parse_document(
+                    raw_url, html, int(status or 200), cfg
                 )
-                if document is None:
-                    raise ValueError(f"basic parse rejected page: {parse_reason}")
-
-                document.fit_to_budget(cfg.max_payload_bytes)
                 outcome = await active_store.replace_documents(
                     [document.as_row()],
                     queue_rowid=int(row_id),
