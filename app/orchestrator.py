@@ -313,6 +313,7 @@ class Orchestrator:
                         settings=cfg,
                         robots=robots,
                         max_pages=cfg.seed_crawl_pages_per_domain,
+                        fetcher=self.fetcher,
                     )
                 except Exception as exc:
                     logger.warning("domain worker failed for %s: %s", host, exc)
