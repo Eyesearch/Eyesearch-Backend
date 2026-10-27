@@ -239,7 +239,7 @@ async def run_url_pass(
 
     try:
         result = await execute_safe(
-            "SELECT id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT ?",
+            "SELECT rowid AS id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT ?",
             [limit],
         )
         rows = list(getattr(result, "rows", ()) or ())
@@ -260,7 +260,7 @@ async def run_url_pass(
 
     async def set_status(row_id: int, status: str) -> None:
         await execute_safe(
-            "UPDATE crawl_queue SET status = ? WHERE id = ?",
+            "UPDATE crawl_queue SET status = ? WHERE rowid = ?",
             [status, row_id],
         )
 
