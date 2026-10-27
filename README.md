@@ -430,6 +430,15 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**The domain queue re-arms itself.** A domain that finished (or failed) more
+than `DOMAIN_REARM_COOLDOWN_SECONDS` (6 h) ago returns to `pending` on the next
+refill, so the frontier keeps a real source once the registry is exhausted
+instead of refusing every known domain forever. `mark_domain_processed` now
+warns when its update matches no row — the silence there is what previously let
+a crawl spin. The backlog worker retries after **30 s** when a pass filled its
+batch (work clearly remains), 60 s after a partial batch, and only then uses
+`BACKLOG_INTERVAL_SECONDS` (900 s) when nothing was pending.
+
 **No worker polls in a tight loop.** Every background worker sleeps
 `WORKER_IDLE_BACKOFF_SECONDS` (15 s minimum) after a pass that found nothing, and
 says so — `discovery worker sleeping 15s (queue empty)` … `discovery worker
@@ -976,6 +985,15 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**The domain queue re-arms itself.** A domain that finished (or failed) more
+than `DOMAIN_REARM_COOLDOWN_SECONDS` (6 h) ago returns to `pending` on the next
+refill, so the frontier keeps a real source once the registry is exhausted
+instead of refusing every known domain forever. `mark_domain_processed` now
+warns when its update matches no row — the silence there is what previously let
+a crawl spin. The backlog worker retries after **30 s** when a pass filled its
+batch (work clearly remains), 60 s after a partial batch, and only then uses
+`BACKLOG_INTERVAL_SECONDS` (900 s) when nothing was pending.
 
 **No worker polls in a tight loop.** Every background worker sleeps
 `WORKER_IDLE_BACKOFF_SECONDS` (15 s minimum) after a pass that found nothing, and
