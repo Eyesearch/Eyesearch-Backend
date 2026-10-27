@@ -258,3 +258,78 @@ def test_the_report_counts_stage_failures() -> None:
     report.fail("fetch")
     report.fail("parse")
     assert report.as_dict()["errors"] == {"fetch": 2, "parse": 1}
+
+
+# --- the loops route through the orchestrator -----------------------------
+
+async def test_run_seed_pass_goes_through_the_frontier_and_orchestrator(temp_db, monkeypatch) -> None:
+    from app.indexer import crawler as pipeline
+    from app.engine.text import ExtractedDocument
+
+    enqueued: list[str] = []
+    ran: dict[str, list] = {}
+
+    async def _fake_enqueue(self, host, *, reason="discovered"):
+        enqueued.append(host)
+        return True
+
+    async def _fake_run_domains(self, domains, **kwargs):
+        ran["domains"] = list(domains)
+        return {
+            "domains": len(domains),
+            "indexed_pages": 2,
+            "sites": 1,
+            "accepted": 2,
+            "errors": {},
+            "reports": {
+                domains[0]: {"category": "government", "fetched": 1, "extracted": 2,
+                             "stored": 2, "skipped": 0, "reasons": {}},
+            },
+        }
+
+    from app.agents import FrontierAgent
+
+    monkeypatch.setattr(FrontierAgent, "enqueue", _fake_enqueue)
+    from app.orchestrator import Orchestrator
+
+    monkeypatch.setattr(Orchestrator, "run_domains", _fake_run_domains)
+
+    report = await pipeline.run_seed_pass(
+        seeds=[pipeline.CategorySeed("https://eci.gov.in", "Election Commission", "government")],
+        settings=EngineSettings(seed_crawl_enabled=True),
+        store=get_store(),
+    )
+
+    assert enqueued == ["eci.gov.in"], "the seed must enter the frontier"
+    assert ran["domains"] == ["eci.gov.in"], "and then flow through the orchestrator"
+    assert report["stored"] == 2
+    assert report["sitelinks"] == 1
+    assert "Election Commission" in report["categories"]
+
+
+async def test_run_discovery_pass_pulls_batches_from_the_frontier(temp_db, monkeypatch) -> None:
+    from app.indexer import crawler as pipeline
+    from app.orchestrator import Orchestrator
+
+    store = get_store()
+    for host in ("maharashtra.gov.in", "tn.gov.in", "up.gov.in"):
+        await store.enqueue_domain(host)
+
+    calls: list[list[str]] = []
+
+    async def _fake_run_domains(self, domains, **kwargs):
+        calls.append(list(domains))
+        return {"domains": len(domains), "indexed_pages": len(domains), "sites": len(domains),
+                "accepted": len(domains), "errors": {}, "reports": {}}
+
+    monkeypatch.setattr(Orchestrator, "run_domains", _fake_run_domains)
+
+    report = await pipeline.run_discovery_pass(
+        store=store, settings=EngineSettings(seed_crawl_enabled=True, discovery_batch_size=2,
+                                             discovery_batch_pause_seconds=0.0)
+    )
+
+    assert report["batches"] == 2            # two, then one
+    assert report["attempted"] == 3
+    assert [len(batch) for batch in calls] == [2, 1]
+    assert await store.pending_domain_count() == 0

@@ -118,6 +118,10 @@ async def test_autonomous_crawl_populates_an_empty_index(temp_db, monkeypatch) -
         return _html("Seed page"), 200
 
     monkeypatch.setattr(seed_crawler, "fetch_page_status", _fetch)
+    # three seeds are enough to prove the autonomous flow
+    monkeypatch.setattr(
+        seed_crawler, "seeds_for", lambda categories=None: seed_crawler.CATEGORY_SEEDS[:3]
+    )
     monkeypatch.setattr(
         seed_crawler,
         "get_engine_settings",
@@ -156,6 +160,9 @@ async def test_autonomous_crawl_survives_a_failing_seed(temp_db, monkeypatch) ->
         return _html("Surviving seed"), 200
 
     monkeypatch.setattr(seed_crawler, "fetch_page_status", _flaky)
+    monkeypatch.setattr(
+        seed_crawler, "seeds_for", lambda categories=None: seed_crawler.CATEGORY_SEEDS[:3]
+    )
     monkeypatch.setattr(
         seed_crawler,
         "get_engine_settings",
