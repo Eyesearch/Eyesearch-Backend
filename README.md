@@ -17,7 +17,7 @@ budgets for AI clients, and a grounded chat stream for the AI tab.
 app/
 ├── main.py                     FastAPI app, lifespan, CORS, every HTTP route
 ├── database.py                 Turso connection bootstrap, schema, write probe
-├── libsql_http.py              Turso HTTP client + ProcessRateLimiter (2 req/s)
+├── libsql_http.py              Turso HTTP client + configurable shared request limiter
 ├── orchestrator.py             Shared pooled httpx client, pipeline wiring
 ├── agents/
 │   ├── 01_frontier_agent.py    Queue depth, priority, seed refill
@@ -27,7 +27,7 @@ app/
 │   ├── 05_indexer_agent.py     Fail-closed storage guard, atomic persistence
 │   ├── 06_revalidation_agent.py Background stale-page revalidation
 │   ├── 07_classifier_agent.py  Ten-category tagging at ingestion
-│   └── 08_language_agent.py    Script detection: en / hi / kn
+│   └── 08_language_agent.py    Indian-script detection plus Arabic-script fallback
 ├── engine/
 │   ├── config.py               Pydantic BaseSettings — every knob
 │   └── store.py                IndexStore: atomic batches, FTS5 search, stats
@@ -48,6 +48,21 @@ The agent files are numbered because the brief names them that way. Python
 cannot import a module whose name begins with a digit using `import` syntax, so
 they are reached through `app.agents.load_agent("03_parser_agent")`. That is the
 one wart in the layout, and it is contained in `app/agents/__init__.py`.
+
+## Crawl throughput and diagnostics
+
+The default crawl batch is 80 URLs with up to 40 concurrent fetches. The shared
+Turso HTTP request limiter defaults to a 0.1-second interval (up to 10 requests
+per second) and can be tightened with `LIBSQL_MIN_INTERVAL_SECONDS` if the
+database plan or provider throttles require it. Startup logs print the effective
+settings; each batch logs fetch/parse/index counts, skip reasons, queue
+transitions, and whether sitemap domains were scheduled. Sitemap discovery runs
+in a bounded background task so slow sitemap endpoints do not block page
+persistence.
+
+The crawl is scoped to Indian domains and explicitly allowlisted Indian portals.
+The page-per-domain cap, 80-character quality floor, bounded body storage,
+SHA-256 deduplication, and 300,000-page storage guard remain in force.
 
 ## Endpoints
 
