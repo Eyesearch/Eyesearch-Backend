@@ -58,7 +58,7 @@ class EngineSettings:
     # Deep extraction: a page carries up to 1.2 KB of body text, so the row
     # budget is 8 KB while the domain budget stays at 10 KB.
     max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 8192))
-    body_max_chars: int = field(default_factory=lambda: _int("INDEX_BODY_MAX_CHARS", 1200))
+    body_max_chars: int = field(default_factory=lambda: min(1_000, max(1, _int("INDEX_BODY_MAX_CHARS", 1_000))))
     # How many failed resolutions before a backlog query goes to history.
     backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
     # How many already-crawled domains to inspect for a sitemap per refill pass.
@@ -75,7 +75,7 @@ class EngineSettings:
     frontier_low_water: int = field(default_factory=lambda: _int("FRONTIER_LOW_WATER", 20))
     # A single discovery pass never runs more batches than this.
     discovery_max_batches_per_pass: int = field(
-        default_factory=lambda: _int("DISCOVERY_MAX_BATCHES_PER_PASS", 20)
+        default_factory=lambda: min(5, max(1, _int("DISCOVERY_MAX_BATCHES_PER_PASS", 5)))
     )
 
     # Below this queue depth the refill harvests aggressively instead.
@@ -113,7 +113,7 @@ class EngineSettings:
     # Continuous discovery: batches of ten, a pause between batches, and a hard
     # ceiling on indexed sites (well inside the free Turso allowance).
     discovery_batch_size: int = field(default_factory=lambda: _int("DISCOVERY_BATCH_SIZE", 10))
-    discovery_batch_pause_seconds: float = field(default_factory=lambda: _float("DISCOVERY_BATCH_PAUSE_SECONDS", 0.5))
+    discovery_batch_pause_seconds: float = field(default_factory=lambda: max(2.0, _float("DISCOVERY_BATCH_PAUSE_SECONDS", 2.0)))
     # How often the discovery worker drains a batch, independently of the seeds.
     discovery_interval_seconds: int = field(default_factory=lambda: _int("DISCOVERY_INTERVAL_SECONDS", 300))
     max_indexed_sites: int = field(default_factory=lambda: _int("MAX_INDEXED_SITES", 50000))
