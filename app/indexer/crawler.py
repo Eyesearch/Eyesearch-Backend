@@ -134,10 +134,12 @@ async def crawl_seed(
     settings: EngineSettings,
     robots: RobotsCache,
     max_pages: int | None = None,
+    fetcher: FetcherAgent | None = None,
 ) -> tuple[SeedReport, list[ExtractedDocument]]:
     """Crawl one seed: its entry page, then same-host level-1 links."""
     report = SeedReport(category=seed.category)
     documents: list[ExtractedDocument] = []
+    active_fetcher = fetcher or _fetcher_agent
     budget = max_pages or settings.seed_crawl_pages_per_domain
 
     queue: list[str] = [normalise_url(seed.url)]
@@ -154,7 +156,7 @@ async def crawl_seed(
             report.skip(url, "robots_disallowed")
             continue
 
-        fetched = await _fetcher_agent.fetch(url)
+        fetched = await active_fetcher.fetch(url)
         html, status = fetched.html, fetched.status
         report.fetched += 1
         host = urlparse(url).netloc or url
@@ -217,6 +219,101 @@ async def crawl_seed(
         await asyncio.sleep(settings.crawl_delay_seconds)
 
     return report, documents
+
+
+async def run_url_pass(
+    *,
+    batch_size: int = 10,
+    settings: EngineSettings | None = None,
+    store: object | None = None,
+    fetcher: FetcherAgent | None = None,
+    parser: ParserAgent | None = None,
+    quality: QualityAgent | None = None,
+    indexer: IndexerAgent | None = None,
+) -> dict[str, object]:
+    """Drain pending URL rows through fetch, parse, quality and persistence."""
+    cfg = settings or get_engine_settings()
+    client = get_client()
+    limit = max(1, min(10, int(batch_size)))
+    report: dict[str, object] = {"attempted": 0, "processed": 0, "failed": 0}
+
+    try:
+        result = await execute_safe(
+            "SELECT rowid AS id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT ?",
+            [limit],
+        )
+        rows = list(getattr(result, "rows", ()) or ())
+    except Exception as exc:
+        logger.warning("URL queue poll failed: %s", exc)
+        report["error"] = str(exc)
+        return report
+
+    if not rows:
+        await asyncio.sleep(15)
+        report["empty"] = True
+        return report
+
+    active_fetcher = fetcher or FetcherAgent(cfg)
+    active_parser = parser or ParserAgent(cfg)
+    active_quality = quality or QualityAgent(cfg)
+    active_indexer = indexer or IndexerAgent(store=store, settings=cfg)
+
+    async def set_status(row_id: int, status: str) -> None:
+        await execute_safe(
+            "UPDATE crawl_queue SET status = ? WHERE rowid = ?",
+            [status, row_id],
+        )
+
+    async with active_fetcher:
+        for row in rows:
+            row_id, raw_url, raw_domain = row[0], str(row[1] or ""), str(row[2] or "")
+            report["attempted"] = int(report["attempted"]) + 1
+            verdict = None
+            try:
+                if not raw_url:
+                    raise ValueError("crawl_queue row has an empty URL")
+                fetched = await active_fetcher.fetch(raw_url)
+                if not fetched.ok:
+                    raise RuntimeError(fetched.error or f"fetch failed ({fetched.status})")
+
+                parsed = await active_parser.parse(
+                    raw_url, fetched.html, status=fetched.status
+                )
+                if not parsed.ok or parsed.document is None:
+                    raise ValueError(parsed.reason or "parser returned no document")
+
+                verdict = await active_quality.check(parsed.document)
+                if not verdict.ok:
+                    raise ValueError(verdict.reason or "quality gate rejected document")
+
+                outcome = await active_indexer.persist([parsed.document])
+                pages = int(outcome.get("pages", 0) or 0)
+                if outcome.get("error") or outcome.get("paused") or pages <= 0:
+                    if verdict.digest:
+                        active_quality.forget(verdict.digest)
+                    raise RuntimeError(
+                        "index persistence failed: "
+                        f"error={outcome.get('error', 0)}, "
+                        f"paused={outcome.get('paused', 0)}, pages={pages}"
+                    )
+
+                await set_status(row_id, "processed")
+                report["processed"] = int(report["processed"]) + 1
+                logger.debug("URL queue row %s processed (%s)", row_id, raw_url)
+            except Exception as exc:
+                if verdict is not None and verdict.digest:
+                    active_quality.forget(verdict.digest)
+                logger.warning(
+                    "URL queue row %s failed (%s, domain=%s): %s",
+                    row_id, raw_url, raw_domain, exc,
+                )
+                try:
+                    await set_status(row_id, "failed")
+                except Exception:
+                    logger.exception("could not mark URL queue row %s failed", row_id)
+                report["failed"] = int(report["failed"]) + 1
+
+    return report
 
 
 async def run_seed_pass(
@@ -720,5 +817,6 @@ __all__ = [
     "SeedReport",
     "seeds_for",
     "crawl_seed",
+    "run_url_pass",
     "run_seed_pass",
 ]

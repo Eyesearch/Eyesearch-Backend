@@ -203,8 +203,19 @@ class Orchestrator:
                     logger.warning("index stage error: %s", exc)
                     report.fail("index")
                     continue
-                report.indexed_pages += int(outcome.get("pages", 0))
-                report.sites += int(outcome.get("sites", 0))
+                pages = int(outcome.get("pages", 0) or 0)
+                if outcome.get("error"):
+                    report.fail("index")
+                    continue
+                if outcome.get("paused"):
+                    report.fail("storage")
+                    continue
+                if pages <= 0:
+                    report.fail("index")
+                    logger.warning("index stage persisted zero pages for %s", getattr(document, "url", "unknown"))
+                    continue
+                report.indexed_pages += pages
+                report.sites += int(outcome.get("sites", 0) or 0)
 
         try:
             async with self.fetcher:
@@ -222,8 +233,15 @@ class Orchestrator:
         if not hosts:
             return OrchestratorReport().as_dict()
         report = await self.run(hosts, limit=limit)
+        errors = report.get("errors") or {}
+        index_failed = bool(errors.get("index") or errors.get("storage"))
+        status = (
+            "processed"
+            if int(report.get("indexed_pages", 0) or 0) > 0 and not index_failed
+            else "failed"
+        )
         for host in hosts:
-            await self.frontier.mark_done(host, status="processed" if report.get("fetched") else "failed")
+            await self.frontier.mark_done(host, status=status)
         return report
 
     # -- whole domains, through the queue pipeline --------------------
@@ -295,6 +313,7 @@ class Orchestrator:
                         settings=cfg,
                         robots=robots,
                         max_pages=cfg.seed_crawl_pages_per_domain,
+                        fetcher=self.fetcher,
                     )
                 except Exception as exc:
                     logger.warning("domain worker failed for %s: %s", host, exc)
