@@ -206,12 +206,7 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
 
 
 async def _url_queue_loop(settings: EngineSettings) -> None:
-    """Continuously drain sitemap/frontier URLs independently of domain discovery.
-
-    The queue worker must start even when seed/discovery crawling is disabled:
-    sitemap harvesting can already have populated crawl_queue, and those rows
-    still need to pass through Agents 02–05 into pages.
-    """
+    """Continuously drain sitemap/frontier URLs with bounded polling frequency."""
     while True:
         try:
             from app.indexer.guard import storage_paused
@@ -222,32 +217,25 @@ async def _url_queue_loop(settings: EngineSettings) -> None:
                     "URL queue worker",
                     "storage paused",
                 )
-                continue
-
-            report = await run_url_pass(settings=settings)
-            attempted = int(report.get("attempted", 0) or 0)
-            processed = int(report.get("processed", 0) or 0)
-            failed = int(report.get("failed", 0) or 0)
-
-            if attempted or failed or report.get("error"):
-                logger.info("URL queue worker: %s", report)
-
-            if report.get("error") and not attempted:
-                # Poll failures do not sleep inside run_url_pass; avoid a DB-error spin.
-                await _sleep_logged(_idle_seconds(settings), "URL queue worker", "poll failed")
-            elif attempted:
-                # Keep draining promptly, but give the database/network a short breather.
-                await _sleep_logged(
-                    max(1.0, float(settings.discovery_batch_pause_seconds)),
-                    "URL queue worker",
-                    f"batch complete ({processed} processed, {failed} failed)",
-                )
-            # An empty queue is already handled by run_url_pass with a 15-second sleep.
+            else:
+                report = await run_url_pass(settings=settings)
+                attempted = int(report.get("attempted", 0) or 0)
+                processed = int(report.get("processed", 0) or 0)
+                failed = int(report.get("failed", 0) or 0)
+                if attempted or failed or report.get("error"):
+                    logger.info("URL queue worker: %s", report)
+                if report.get("error") and not attempted:
+                    # Poll failures need a longer cooldown before another Turso request.
+                    await asyncio.sleep(15.0)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            logger.warning("URL queue worker failed: %s", exc)
-            await _sleep_logged(_idle_seconds(settings), "URL queue worker", "worker error")
+        except Exception:
+            # Include traceback and exact exception; never retry in a tight loop.
+            logger.exception("URL queue worker iteration failed")
+            await asyncio.sleep(15.0)
+        finally:
+            # Mandatory throttle for every iteration, including empty and failed batches.
+            await asyncio.sleep(2.0)
 
 
 def start_url_queue_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
