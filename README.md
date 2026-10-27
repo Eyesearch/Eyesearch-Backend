@@ -430,6 +430,18 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**No worker polls in a tight loop.** Every background worker sleeps
+`WORKER_IDLE_BACKOFF_SECONDS` (15 s minimum) after a pass that found nothing, and
+says so — `discovery worker sleeping 15s (queue empty)` … `discovery worker
+awake` — so the log shows intent instead of a wall of `200 OK` lines. A discovery
+pass is capped at `DISCOVERY_MAX_BATCHES_PER_PASS` (20) batches, breaks if the
+same domains come back unmarked, and backs off when a batch stores nothing.
+Before each discovery pass the scheduler checks the queue and, below
+`FRONTIER_LOW_WATER` (20), awaits a refill and logs
+`INFO: Frontier refill completed: added N URLs to crawl_queue. Depth is now M`.
+Queued URLs also enter the domain backlog (and `next_batch` falls back to the URL
+queue), so a full queue is always consumable rather than decorative.
+
 **Gzipped sitemaps too.** Most large Indian portals publish `sitemap.xml.gz`, so
 the harvester accepts a gzip member wherever it accepts XML — detected by magic
 bytes, not just the file extension — and decompresses through
@@ -964,6 +976,18 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**No worker polls in a tight loop.** Every background worker sleeps
+`WORKER_IDLE_BACKOFF_SECONDS` (15 s minimum) after a pass that found nothing, and
+says so — `discovery worker sleeping 15s (queue empty)` … `discovery worker
+awake` — so the log shows intent instead of a wall of `200 OK` lines. A discovery
+pass is capped at `DISCOVERY_MAX_BATCHES_PER_PASS` (20) batches, breaks if the
+same domains come back unmarked, and backs off when a batch stores nothing.
+Before each discovery pass the scheduler checks the queue and, below
+`FRONTIER_LOW_WATER` (20), awaits a refill and logs
+`INFO: Frontier refill completed: added N URLs to crawl_queue. Depth is now M`.
+Queued URLs also enter the domain backlog (and `next_batch` falls back to the URL
+queue), so a full queue is always consumable rather than decorative.
 
 **Gzipped sitemaps too.** Most large Indian portals publish `sitemap.xml.gz`, so
 the harvester accepts a gzip member wherever it accepts XML — detected by magic
