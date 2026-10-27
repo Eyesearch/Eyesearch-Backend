@@ -226,6 +226,126 @@ class Orchestrator:
             await self.frontier.mark_done(host, status="processed" if report.get("fetched") else "failed")
         return report
 
+    # -- whole domains, through the queue pipeline --------------------
+    async def run_domains(
+        self,
+        domains: list[str],
+        *,
+        category: str | None = None,
+        labels: dict[str, str] | None = None,
+        seed_objects: dict[str, Any] | None = None,
+        settings: Any | None = None,
+        concurrency: int | None = None,
+        robots: Any | None = None,
+        client: Any | None = None,
+        domain_worker: Any | None = None,
+    ) -> dict[str, Any]:
+        """Crawl whole domains (root + sitelinks) as the pipeline's unit of work.
+
+        Each domain is fetched, parsed and written as it finishes, so a long pass
+        never holds its work in memory. The storage cap and the quota breaker are
+        checked before the first fetch and after every write.
+        """
+        report = OrchestratorReport()
+        targets = [d.strip().lower().removeprefix("www.") for d in domains if d and d.strip()]
+        if not targets:
+            return {**report.as_dict(), "domains": 0, "reports": {}}
+        if not await self.indexer.can_write():
+            logger.warning("crawl idle: storage safety threshold reached")
+            return {**report.as_dict(), "domains": 0, "reports": {}, "paused": True}
+
+        cfg = settings or self.settings
+        if cfg is None:
+            from app.engine.config import get_engine_settings
+
+            cfg = get_engine_settings()
+        self.settings = cfg
+
+        if domain_worker is None:
+            from app.indexer.crawler import crawl_seed  # imported here: no cycle
+
+            domain_worker = crawl_seed
+
+        labels = labels or {}
+        workers = max(1, concurrency or cfg.seed_crawl_concurrency)
+        queue: asyncio.Queue = asyncio.Queue()
+        results: dict[str, Any] = {}
+
+        for host in targets:
+            queue.put_nowait(host)
+
+        async def worker() -> None:
+            while True:
+                try:
+                    host = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                from app.indexer import crawler as pipeline
+
+                # The caller's own seed object is used when it has one: it carries
+                # the label and the category the registry assigned.
+                seed = (seed_objects or {}).get(host) or pipeline.CategorySeed(
+                    f"https://{host}/", labels.get(host, host), category or "government"
+                )
+                try:
+                    # the pooled client comes from the fetcher opened below
+                    seed_report, documents = await domain_worker(
+                        seed,
+                        client=client or self.fetcher.client,
+                        settings=cfg,
+                        robots=robots,
+                        max_pages=cfg.seed_crawl_pages_per_domain,
+                    )
+                except Exception as exc:
+                    logger.warning("domain worker failed for %s: %s", host, exc)
+                    report.fail("domain")
+                    results[host] = {"category": category or "government", "fetched": 0,
+                                     "extracted": 0, "stored": 0, "skipped": 0,
+                                     "reasons": {"worker_error": 1}}
+                    continue
+
+                results[host] = seed_report.as_dict()
+                report.attempted += 1
+                report.fetched += seed_report.fetched
+                report.parsed += seed_report.extracted
+
+                if not documents:
+                    report.rejected += 1
+                    continue
+
+                report.accepted += len(documents)
+                # Write this domain now, not at the end of the pass: a restart
+                # mid-crawl must not lose the work already done, and one failed
+                # write must not take another domain's pages with it.
+                try:
+                    outcome = await self.indexer.persist(documents)
+                except Exception as exc:
+                    logger.error("index stage failed for %s: %s", host, exc)
+                    report.fail("index")
+                    continue
+
+                report.indexed_pages += int(outcome.get("pages", 0))
+                report.sites += int(outcome.get("sites", 0))
+                results[host]["stored"] = int(outcome.get("pages", 0))
+                if outcome.get("paused"):
+                    report.fail("storage")
+                    return
+                logger.info(
+                    "DB COMMIT SUCCESS: Indexed %s with %d pages (Running total: %d)",
+                    host, int(outcome.get("pages", 0)), await self.indexer.count(),
+                )
+
+        try:
+            async with self.fetcher:
+                await asyncio.gather(*(worker() for _ in range(min(workers, len(targets)))))
+
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("domain pipeline failed: %s", exc)
+            report.fail("orchestrator")
+
+        logger.info("domain pipeline complete: %s", report.as_dict())
+        return {**report.as_dict(), "domains": len(results), "reports": results}
+
     # -- the semantic seam -------------------------------------------
     async def answer(self, question: str, documents: list[dict[str, str]] | None = None) -> Any:
         """Agent 6's hook: a grounded answer, with the model wired later."""

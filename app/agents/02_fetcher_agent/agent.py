@@ -73,6 +73,11 @@ class FetcherAgent:
     async def __aexit__(self, *exc_info: object) -> None:
         await self.aclose()
 
+    @property
+    def client(self) -> Any:
+        """The pooled client, opened by `async with agent`."""
+        return self._client
+
     async def aclose(self) -> None:
         if self._client is not None:
             await self._client.aclose()
