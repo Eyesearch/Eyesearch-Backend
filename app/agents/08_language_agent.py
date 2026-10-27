@@ -17,14 +17,35 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-#: Unicode blocks, inclusive.
+#: Unicode blocks, inclusive. One range per script, covering the major Indian
+#: languages plus the Arabic block that carries Urdu.
 SCRIPT_RANGES: dict[str, tuple[int, int]] = {
-    "kn": (0x0C80, 0x0CFF),
-    "hi": (0x0900, 0x097F),
+    "kn": (0x0C80, 0x0CFF),  # Kannada
+    "hi": (0x0900, 0x097F),  # Devanagari — Hindi, Marathi, Sanskrit, Nepali
+    "ta": (0x0B80, 0x0BFF),  # Tamil
+    "te": (0x0C00, 0x0C7F),  # Telugu
+    "ml": (0x0D00, 0x0D7F),  # Malayalam
+    "bn": (0x0980, 0x09FF),  # Bengali and Assamese
+    "gu": (0x0A80, 0x0AFF),  # Gujarati
+    "pa": (0x0A00, 0x0A7F),  # Gurmukhi — Punjabi
+    "or": (0x0B00, 0x0B7F),  # Odia
+    "ar": (0x0600, 0x06FF),  # Arabic — Urdu and Kashmiri
 }
 
 DEFAULT_LANGUAGE = "en"
-SUPPORTED_LANGUAGES: tuple[str, ...] = ("en", "hi", "kn")
+SUPPORTED_LANGUAGES: tuple[str, ...] = (
+    "en",
+    "hi",
+    "kn",
+    "ta",
+    "te",
+    "ml",
+    "bn",
+    "gu",
+    "pa",
+    "or",
+    "ar",
+)
 
 #: A script must be at least this share of the letters to be the language.
 MIN_SCRIPT_SHARE = 0.15
@@ -60,14 +81,21 @@ class LanguageAgent:
         letters = 0
 
         for character in text:
-            if not character.isalpha():
-                continue
-            letters += 1
             codepoint = ord(character)
+            matched = ""
             for language, (low, high) in SCRIPT_RANGES.items():
                 if low <= codepoint <= high:
-                    counts[language] += 1
+                    matched = language
                     break
+
+            if matched:
+                # Count the character even when it is a combining mark:
+                # `isalpha()` rejects vowel signs, so a short Bengali or Tamil
+                # word would otherwise never reach the minimum character count.
+                counts[matched] += 1
+                letters += 1
+            elif character.isalpha():
+                letters += 1
 
         if not letters:
             return Detection(language=DEFAULT_LANGUAGE, counts=counts, share=0.0)

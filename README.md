@@ -228,86 +228,36 @@ seeds. The work is split in two, and the split matters:
 | rule | value |
 | --- | --- |
 | scheme | `http` / `https` only |
-| host | the source host, any `.in` domain, a whitelisted portal, or (with `ALLOW_GLOBAL_DOMAINS`) any global TLD |
+| host | the source host, any Indian public suffix, or a whitelisted Indian portal (global TLDs only with `ALLOW_GLOBAL_DOMAINS=true`) |
 | path depth | ≤ `MAX_PATH_DEPTH` (6) — Indian portals nest real content several levels down |
 | extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
 | query | tracking keys (`utm_*`, `gclid`, `fbclid`, `ref`, …) dropped, keys sorted |
-| frontier size | capped at `MAX_PENDING_QUEUE` (10,000) pending rows |
+| frontier size | capped at `MAX_PENDING_QUEUE` (50,000) pending rows |
 | batch order | round-robin across domains, not plain `rowid` order |
 
-Crawl scope widens in three rings: the source host itself, then authoritative
-Indian domains, then — while `ALLOW_GLOBAL_DOMAINS` is true — any registrable
-domain under `GLOBAL_ALLOWED_TLDS` (`.org`, `.edu`, `.net`, `.com`, `.io`,
-`.dev`, `.gov`, `.int`).
+Crawl scope targets the Indian web. A link is in scope when it is the source
+host itself, any registrable domain under an Indian public suffix (`.in`,
+`.gov.in`, `.nic.in`, `.ac.in`, `.res.in`, `.edu.in`, `.org.in`, `.co.in`), or a
+whitelisted Indian portal — thehindu, indianexpress, prajavani, vijaykarnataka,
+indiankanoon, livelaw, barandbench, inc42, hasgeek, `data.gov.in`,
+`freejobalert.com`, `ncs.gov.in`.
 
-The middle ring is `WHITELISTED_DOMAINS`: Indian news, legal, startup and
-developer media on `.com` (thehindu, indianexpress, prajavani, vijaykarnataka,
-indiankanoon, livelaw, barandbench, inc42, hasgeek), `data.gov.in`,
-`freejobalert.com`, `ncs.gov.in`, plus high-value global reference and science
-(wikipedia, wikimedia, w3.org, ietf.org, github.com, archive.org, reuters,
-bbc.com, nature.com, sciencedirect, arxiv). Whitelisted domains sort with the
-authoritative ones and are eligible for sitemap harvesting.
+`is_authoritative()` already covers every Indian suffix because its first check
+is `endswith(PRIORITY_SUFFIXES)`, and that list includes `.in` — so `.org.in`,
+`.co.in` and `.edu.in` domains are authoritative without any extra rule, and
+their sitemaps are harvested.
 
-The outer ring is what stops the frontier starving once the Indian sources are
-exhausted, but it changes the character of the crawl: `.com` is the largest
-trap surface there is. The guardrails still apply to a global link — path depth,
-junk extensions, blocked paths, the 10-page-per-domain cap and the 10,000-row
-frontier cap — and `ALLOW_GLOBAL_DOMAINS=false` restores the India-only crawl
-per deployment without a code change.
+`ALLOW_GLOBAL_DOMAINS=true` adds a ring for ordinary global TLDs (`.org`, `.edu`,
+`.net`, `.com`, `.io`, `.dev`, `.gov`, `.int`). It is **off by default**: an open
+global ring makes this a general web crawler, dilutes the index with foreign
+pages, and re-opens the largest spider-trap surface there is. It stays behind a
+flag so the decision is reversible without a code change.
 
-Measured on a page carrying one of each: with the flag on, 4 links are queued
-(arxiv, bbc, python.org, karnataka.gov.in) and a `.xyz` domain, a depth-8 path,
-a `.png` and a `/login` are all still refused; with it off, 3 are queued —
-python.org drops, while the whitelisted arxiv and bbc stay.
-
-Batches are dealt round-robin. A plain `ORDER BY rowid` hands all ten slots to
-whichever domain was queued first — one portal with forty pending URLs takes
-every batch and every other domain waits behind it. `pending_batch()` numbers
-the pending rows per domain with `ROW_NUMBER() OVER (PARTITION BY domain …)` and
-orders by that number, so a batch takes one URL from each domain before taking a
-second from any. The row number is deliberately **not** capped: capping it at
-two per domain shrinks a batch below its configured size whenever few domains
-have work.
-
-### Registrable domains, not hosts
-
-`domain_of()` returns the **registrable root**, not the host. `python.fossee.in`,
-`arduino.fossee.in` and `om.fossee.in` are all `fossee.in`; `optica.iiita.ac.in`
-is `iiita.ac.in`; `sportstar.thehindu.com` is `thehindu.com`.
-
-The rule is the last two labels, or the last three under a two-part Indian
-public suffix (`TWO_PART_SUFFIXES`: `.gov.in`, `.nic.in`, `.ac.in`, `.edu.in`,
-`.res.in`, `.org.in`, `.co.in`). IP addresses and single-label hosts are returned
-unchanged, because there is no registrable domain to extract, and a trailing dot
-is stripped first.
-
-This matters in two places. The per-domain page cap counts a *site*, so a
-project that publishes one subdomain per module cannot claim ten pages for each
-one. And the round-robin dequeue partitions on the same value, so dozens of
-subdomains take one slot between them rather than crowding out every other
-source. Measured: eleven `*.fossee.in` subdomains and one news domain produce a
-batch of `[fossee.in, thehindu.com, fossee.in, …]`, and the eleven subdomains
-share one ten-page quota — 10 indexed, 1 skipped.
-
-The URL itself keeps its full host — only the grouping key is collapsed, so
-pages on different subdomains are still crawled and stored as themselves.
-
-Rows written before the collapse are folded in at startup by
-`normalize_legacy_subdomains()`: each group of subdomain `sites` rows keeps one
-row under the canonical domain, its pages are re-pointed to that row, and the
-redundant rows are deleted — in one transaction, pages before deletes so a
-foreign key is never left dangling, and idempotent so a second boot does nothing.
-`crawl_queue.domain` is normalised in the same pass.
-
-That migration is only safe on a consistent index, so `resync_fts()` runs
-first. `page_fts` is external content, and its triggers issue a `'delete'`
-command for every updated row; if the index never held those rows — a database
-whose `pages` predate the triggers — the command fails with
-`database disk image is malformed` and *any* update to `pages` breaks, while
-search quietly returns nothing. `COUNT(*)` on an external-content FTS table
-reads the content table and always matches, so the shadow `page_fts_docsize`
-table is what counts indexed documents; a mismatch triggers a `'rebuild'`.
+Measured on a page carrying one link of each kind: with the default, only the
+Indian domain is queued — a `.com`, a `.xyz`, a depth-8 path, a `.png` and a
+`/login` are all refused; with the flag on, the global `.com` links join them
+and the scope rules still apply.
 
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue

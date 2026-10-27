@@ -68,10 +68,11 @@ class Settings(BaseSettings):
     crawl_timeout_seconds: float = 10.0
     crawl_max_body_bytes: int = 512_000
     crawl_concurrency: int = 20
-    #: Follow links to ordinary global domains (.com, .org, .io, ...), not just
-    #: Indian public suffixes and the whitelist. Set ALLOW_GLOBAL_DOMAINS=false
-    #: to restore the India-only crawl without a code change.
-    allow_global_domains: bool = True
+    #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
+    #: as Indian ones. Off by default: the crawl targets the Indian web, and an
+    #: open global ring dilutes the index and re-opens the spider-trap surface.
+    #: ALLOW_GLOBAL_DOMAINS=true turns it back on.
+    allow_global_domains: bool = False
     # When the frontier runs dry and every seed is already indexed, the
     # stalest crawled URLs return to 'pending' after this cooldown.
     rearm_cooldown_seconds: int = 6 * 3600

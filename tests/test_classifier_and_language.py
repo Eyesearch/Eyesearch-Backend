@@ -196,9 +196,33 @@ def test_detection_reports_its_evidence():
     assert detail.share > 0
 
 
-def test_supported_languages_are_the_specified_three():
-    assert SUPPORTED_LANGUAGES == ("en", "hi", "kn")
+def test_supported_languages_cover_the_major_indian_scripts():
+    assert SUPPORTED_LANGUAGES == (
+        "en", "hi", "kn", "ta", "te", "ml", "bn", "gu", "pa", "or", "ar",
+    )
     assert DEFAULT_LANGUAGE == "en"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("தமிழ் மொழி", "ta"),
+        ("తెలుగు భాష", "te"),
+        ("മലയാളം ഭാഷ", "ml"),
+        ("বাংলা ভাষা", "bn"),
+        ("ગુજરાતી ભાષા", "gu"),
+        ("ਪੰਜਾਬੀ ਭਾਸ਼ਾ", "pa"),
+        ("ଓଡ଼ିଆ ଭାଷା", "or"),
+        ("اردو زبان", "ar"),
+    ],
+)
+def test_each_indian_script_is_detected(text, expected):
+    assert LanguageAgent().detect(text) == expected
+
+
+def test_a_short_bengali_word_is_not_mistaken_for_english():
+    """Combining marks are not `isalpha()`, so they must still count."""
+    assert LanguageAgent().detect("বাংলা") == "bn"
 
 
 # ---------------------------------------------------------------------------

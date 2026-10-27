@@ -36,9 +36,9 @@ PRIORITY_SUFFIXES: tuple[str, ...] = (
     ".in",
 )
 
-#: Domains worth crawling that are not on an Indian public suffix: Indian
-#: news, legal, startup and developer media, plus high-value global reference,
-#: science, open-source and news sources.
+#: Indian portals that are not on an Indian public suffix but are worth
+#: crawling: news, legal reporting, startup and developer media, jobs and open
+#: data. The crawl is India-focused, so this list holds no foreign domains.
 WHITELISTED_DOMAINS: tuple[str, ...] = (
     "thehindu.com",
     "indianexpress.com",
@@ -52,17 +52,6 @@ WHITELISTED_DOMAINS: tuple[str, ...] = (
     "data.gov.in",
     "freejobalert.com",
     "ncs.gov.in",
-    "wikipedia.org",
-    "wikimedia.org",
-    "w3.org",
-    "ietf.org",
-    "github.com",
-    "archive.org",
-    "reuters.com",
-    "bbc.com",
-    "nature.com",
-    "sciencedirect.com",
-    "arxiv.org",
 )
 
 #: Ordinary global TLDs. With `allow_global` on, a link to any registrable
@@ -109,8 +98,10 @@ TRACKING_PARAMS: frozenset[str] = frozenset(
 MAX_PATH_DEPTH = 6
 
 #: Stop queueing new links once this many are waiting, so discovery cannot
-#: grow the frontier faster than the workers drain it.
-MAX_PENDING_QUEUE = 10000
+#: grow the frontier faster than the workers drain it. This is a buffer, not a
+#: speed control: the crawl is limited by database round trips, so a deeper
+#: queue only means more work waits its turn.
+MAX_PENDING_QUEUE = 50000
 
 #: Sitemap locations tried, in order, for a newly encountered domain.
 SITEMAP_PATHS: tuple[str, ...] = ("/sitemap.xml", "/sitemap_index.xml")
@@ -273,18 +264,18 @@ def is_crawlable(url: str) -> bool:
     return True
 
 
-def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = True) -> bool:
+def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) -> bool:
     """Whether a link belongs to the crawl.
 
-    Three widening rings: the source host itself, an authoritative Indian
-    domain, and — when `allow_global` is on — any registrable domain under a
-    standard global TLD.
+    The crawl targets the Indian web: the source host itself, any registrable
+    domain under an Indian public suffix (`.in`, `.gov.in`, `.nic.in`, `.ac.in`,
+    `.res.in`, `.edu.in`, `.org.in`, `.co.in`), or a whitelisted Indian portal.
 
-    The outer ring is what keeps the frontier from starving once the Indian
-    sources are exhausted, but it is a real change of character: it makes this
-    a general web crawler rather than an India-focused one, and `.com` is the
-    largest trap surface there is. `allow_global=False` restores the previous
-    behaviour, and `ALLOW_GLOBAL_DOMAINS=false` does it per deployment.
+    `allow_global=True` adds a ring for ordinary global TLDs. It is off by
+    default — turning it on makes this a general web crawler, dilutes the index
+    with foreign pages, and opens the largest trap surface there is. It is kept
+    behind `ALLOW_GLOBAL_DOMAINS` so the decision stays reversible rather than
+    being a one-way code change.
     """
     host = domain_of(url)
     if not host:
@@ -325,7 +316,7 @@ async def discover_sitemap_urls(
     *,
     max_urls: int = SITEMAP_MAX_URLS_PER_DOMAIN,
     max_fetches: int = SITEMAP_MAX_FETCHES,
-    allow_global: bool = True,
+    allow_global: bool = False,
 ) -> list[str]:
     """Crawlable URLs from a domain's sitemap, bounded and in scope.
 
@@ -474,7 +465,7 @@ class FrontierAgent:
         links: list[str] | tuple[str, ...],
         source_url: str,
         *,
-        allow_global: bool = True,
+        allow_global: bool = False,
     ) -> list[str]:
         """The subset of a page's links that belongs in the frontier.
 
