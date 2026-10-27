@@ -61,12 +61,15 @@ TRACKING_PARAMS: frozenset[str] = frozenset(
     }
 )
 
-#: How deep below a host root the crawler follows links.
-MAX_PATH_DEPTH = 2
+#: How deep below a host root the crawler follows links. Indian portals nest
+#: real content several levels down (`/en/departments/health/services`), so a
+#: limit of 2 threw away valid pages; 6 keeps the useful depth and still
+#: bounds the crawl.
+MAX_PATH_DEPTH = 6
 
 #: Stop queueing new links once this many are waiting, so discovery cannot
 #: grow the frontier faster than the workers drain it.
-MAX_PENDING_QUEUE = 5000
+MAX_PENDING_QUEUE = 10000
 
 # Domains the crawler starts from when the queue is empty.
 SEED_URLS: tuple[str, ...] = (
@@ -77,6 +80,11 @@ SEED_URLS: tuple[str, ...] = (
     "https://www.irctc.co.in/",
     "https://www.iisc.ac.in/",
     "https://www.ugc.gov.in/",
+    "https://www.isro.gov.in/",
+    "https://dst.gov.in/",
+    "https://www.digitalindia.gov.in/",
+    "https://data.gov.in/",
+    "https://www.meity.gov.in/",
     "https://en.wikipedia.org/wiki/Karnataka",
 )
 
@@ -272,10 +280,37 @@ class FrontierAgent:
         return await self._store.queue_depth()
 
     async def refill(self, minimum: int = 1) -> int:
-        """Top the frontier back up from the seed list when it runs dry."""
+        """Keep the frontier alive when it runs dry.
+
+        Two stages, in order:
+
+        1. queue any seed that has not been seen yet;
+        2. if every seed is already indexed, return the stalest crawled URLs to
+           `pending` once their cooldown has elapsed.
+
+        Stage 2 is what stops the stall: with only stage 1, an exhausted seed
+        list means `enqueue()` rejects every URL as already known, the queue
+        stays empty, and the worker idles for good.
+        """
         if await self.depth() >= minimum:
             return 0
-        return await self.enqueue(SEED_URLS)
+
+        added = await self.enqueue(SEED_URLS)
+        if added:
+            return added
+
+        rearmed = await self._store.rearm_processed(
+            limit=self._settings.rearm_batch_size,
+            cooldown_seconds=self._settings.rearm_cooldown_seconds,
+        )
+        if rearmed:
+            logger.info(
+                "frontier re-armed: %d previously crawled URLs returned to pending "
+                "after a %ds cooldown",
+                rearmed,
+                self._settings.rearm_cooldown_seconds,
+            )
+        return rearmed
 
 
 __all__ = [

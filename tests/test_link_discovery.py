@@ -29,6 +29,7 @@ is_crawlable = frontier_module.is_crawlable
 normalise_url = frontier_module.normalise_url
 
 SEED = "https://karnataka.gov.in/"
+SEED_URLS = frontier_module.SEED_URLS
 
 PAGE = """
 <html><head><title>Karnataka State Portal</title>
@@ -66,7 +67,7 @@ def test_the_parser_extracts_absolute_links_and_drops_non_navigable_hrefs():
     kept = FrontierAgent.filter_links(None, parsed.links, SEED)
     assert SEED + "logo.png" not in kept
     assert SEED + "login" not in kept
-    assert SEED + "a/b/c/d/e" not in kept
+    assert SEED + "a/b/c/d/e/f/g/h" not in kept
     assert "https://facebook.com/karnataka" not in kept
 
 
@@ -98,10 +99,13 @@ def test_is_crawlable_rejects_junk_extensions_and_deep_paths():
     assert is_crawlable("https://karnataka.gov.in/about") is True
     assert is_crawlable("https://karnataka.gov.in/departments/health") is True
 
+    assert is_crawlable("https://karnataka.gov.in/en/departments/health/services") is True
+
     assert is_crawlable("https://karnataka.gov.in/logo.png") is False
     assert is_crawlable("https://karnataka.gov.in/report.pdf") is False
-    assert is_crawlable("https://karnataka.gov.in/a/b/c/d/e") is False
     assert is_crawlable("https://karnataka.gov.in/login") is False
+    # Deeper than MAX_PATH_DEPTH (6) is still out of scope.
+    assert is_crawlable("https://karnataka.gov.in/a/b/c/d/e/f/g/h") is False
 
 
 def test_crawl_scope_is_the_same_host_or_an_indian_public_domain():
@@ -116,7 +120,7 @@ def test_filter_links_keeps_only_what_is_in_scope():
         SEED + "about",
         SEED + "about#history",
         SEED + "logo.png",
-        SEED + "a/b/c/d/e",
+        SEED + "a/b/c/d/e/f/g/h",
         SEED + "login",
         "https://india.gov.in/services",
         "https://facebook.com/karnataka",
@@ -194,3 +198,75 @@ async def test_discovery_stops_when_the_frontier_is_full(store, client):
         assert added == 0
     finally:
         await orchestrator.close()
+
+
+async def _mark_all_seeds_crawled(client, *, hours_ago: int) -> None:
+    """Put every seed in the queue as processed, `hours_ago` hours back."""
+    for seed in SEED_URLS:
+        domain = seed.split("//", 1)[1].split("/", 1)[0].replace("www.", "")
+        await client.execute(
+            "INSERT OR REPLACE INTO crawl_queue (url, domain, status, processed_at) "
+            f"VALUES (?, ?, 'processed', datetime('now', '-{hours_ago} hours'))",
+            (seed, domain),
+        )
+
+
+async def test_refill_queues_an_unseen_seed_before_rearming(store, settings):
+    frontier = FrontierAgent(store, settings)
+
+    added = await frontier.refill(minimum=1)
+
+    assert added == len(SEED_URLS)
+    assert await frontier.depth() == len(SEED_URLS)
+
+
+async def test_refill_rearms_crawled_urls_once_the_cooldown_has_elapsed(store, client, settings):
+    """The stall: with every seed indexed, stage 1 finds nothing new."""
+    await _mark_all_seeds_crawled(client, hours_ago=7)
+    frontier = FrontierAgent(store, settings)
+
+    added = await frontier.refill(minimum=1)
+
+    assert added > 0
+    assert await frontier.depth() == added
+    pending = await client.execute("SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'")
+    assert int(pending.scalar(0)) == added
+
+
+async def test_refill_does_not_rearm_before_the_cooldown(store, client, settings):
+    await _mark_all_seeds_crawled(client, hours_ago=0)
+    frontier = FrontierAgent(store, settings)
+
+    added = await frontier.refill(minimum=1)
+
+    assert added == 0
+    assert await frontier.depth() == 0
+
+
+async def test_rearm_takes_the_stalest_rows_first(store, client, settings):
+    await _mark_all_seeds_crawled(client, hours_ago=7)
+    await client.execute(
+        "UPDATE crawl_queue SET processed_at = datetime('now', '-30 hours') WHERE url = ?",
+        (SEED_URLS[0],),
+    )
+    frontier = FrontierAgent(store, settings)
+
+    await frontier.refill(minimum=1)
+
+    first = await client.execute(
+        "SELECT url FROM crawl_queue WHERE status = 'pending' ORDER BY processed_at IS NULL DESC LIMIT 1"
+    )
+    assert str(first.scalar("")) == SEED_URLS[0]
+
+
+async def test_a_crawled_url_is_stamped_with_its_processed_time(store, client):
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, 'pending')",
+        (SEED, "karnataka.gov.in"),
+    )
+    rowid = int((await client.execute("SELECT rowid FROM crawl_queue WHERE url = ?", (SEED,))).scalar(0))
+
+    await store.persist_batch([], [rowid])
+
+    stamped = await client.execute("SELECT processed_at FROM crawl_queue WHERE rowid = ?", (rowid,))
+    assert stamped.scalar(None) is not None

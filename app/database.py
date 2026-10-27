@@ -59,7 +59,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         domain TEXT NOT NULL,
         status TEXT DEFAULT 'pending',
         retry_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        processed_at TIMESTAMP
     )
     """,
     # --- Triggers that make external-content FTS5 actually work -------------
@@ -93,6 +94,17 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_pages_indexed_at ON pages(indexed_at)",
     "CREATE INDEX IF NOT EXISTS idx_queue_status ON crawl_queue(status, rowid)",
     "CREATE INDEX IF NOT EXISTS idx_queue_domain ON crawl_queue(domain)",
+)
+
+#: Columns added after their table was first created. Applied with ALTER, so a
+#: database created by an earlier build picks them up without a rebuild.
+COLUMN_ADDITIONS: tuple[tuple[str, str, str], ...] = (
+    ("crawl_queue", "processed_at", "TIMESTAMP"),
+)
+
+#: Statements that need a column from COLUMN_ADDITIONS to exist first.
+POST_COLUMN_STATEMENTS: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_queue_processed ON crawl_queue(status, processed_at)",
 )
 
 COUNT_STATEMENTS: tuple[str, ...] = (
@@ -224,6 +236,8 @@ async def initialize_database(
         await migrate_legacy_schema(client, allow_drop=allow_legacy_drop)
 
     await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
+    await ensure_columns(client)
+    await client.batch([(sql, ()) for sql in POST_COLUMN_STATEMENTS])
     counts = await read_counts(client)
     logger.info(
         "schema ready: %d sites, %d pages, %d queued",
@@ -232,6 +246,22 @@ async def initialize_database(
         counts["queued"],
     )
     return counts
+
+
+async def ensure_columns(client: LibsqlClient) -> list[str]:
+    """Add any column a later build introduced to an existing table."""
+    added: list[str] = []
+
+    for table, column, declaration in COLUMN_ADDITIONS:
+        columns = await _table_columns(client, table)
+        if not columns or column in columns:
+            continue
+        await client.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        added.append(f"{table}.{column}")
+
+    if added:
+        logger.info("migration applied: %s", ", ".join(added))
+    return added
 
 
 async def read_counts(client: LibsqlClient) -> dict[str, int]:

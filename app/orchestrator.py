@@ -27,6 +27,11 @@ from app.libsql_http import LibsqlClient
 
 logger = logging.getLogger(__name__)
 
+#: When the frontier is dry and nothing can be re-armed yet, back off longer
+#: than the ordinary idle sleep so the worker is not polling the database
+#: every 15 seconds for the whole of a six-hour cooldown.
+IDLE_REFILL_FAILED_BACKOFF_SECONDS = 60.0
+
 _frontier_module = load_agent("01_frontier_agent")
 _fetcher_module = load_agent("02_fetcher_agent")
 _parser_module = load_agent("03_parser_agent")
@@ -260,13 +265,15 @@ class Orchestrator:
                 await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
                 continue
 
+            delay = self._settings.crawl_empty_backoff_seconds
             if outcome is not None and outcome.empty:
-                await self._frontier.refill(minimum=1)
+                added = await self._frontier.refill(minimum=1)
+                if not added:
+                    # Nothing to crawl and nothing past its cooldown yet.
+                    delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
 
-            logger.debug(
-                "crawl worker sleeping %.1fs (queue empty)", self._settings.crawl_empty_backoff_seconds
-            )
-            await asyncio.sleep(self._settings.crawl_empty_backoff_seconds)
+            logger.debug("crawl worker sleeping %.1fs (queue empty)", delay)
+            await asyncio.sleep(delay)
 
     async def run_domains(self, domains: Sequence[str]) -> BatchOutcome:
         """Seed specific domains and process exactly one batch of them."""

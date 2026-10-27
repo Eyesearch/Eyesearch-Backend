@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     crawl_timeout_seconds: float = 15.0
     crawl_max_body_bytes: int = 512_000
     crawl_concurrency: int = 5
+    # When the frontier runs dry and every seed is already indexed, the
+    # stalest crawled URLs return to 'pending' after this cooldown.
+    rearm_cooldown_seconds: int = 6 * 3600
+    rearm_batch_size: int = 25
     crawl_user_agent: str = DESKTOP_USER_AGENT
 
     # --- Revalidation -------------------------------------------------------

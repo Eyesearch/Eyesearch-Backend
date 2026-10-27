@@ -219,7 +219,8 @@ class IndexStore:
         for rowid in queue_ids:
             statements.append(
                 (
-                    "UPDATE crawl_queue SET status = 'processed' WHERE rowid = ?",
+                    "UPDATE crawl_queue SET status = 'processed', "
+                    "processed_at = CURRENT_TIMESTAMP WHERE rowid = ?",
                     (rowid,),
                 )
             )
@@ -298,6 +299,27 @@ class IndexStore:
             ]
         )
         return sum(1 for result in results if result.rows_affected > 0)
+
+    async def rearm_processed(self, limit: int = 25, cooldown_seconds: int = 6 * 3600) -> int:
+        """Return the stalest crawled URLs to `pending` once their cooldown ends.
+
+        Without this the frontier starves: once every seed is in `pages`, no
+        new seed can be enqueued and the worker idles forever. Re-arming keeps
+        the crawl alive and the index fresh, bounded by a cooldown so a URL is
+        not re-fetched on every pass.
+        """
+        result = await self._client.execute(
+            "UPDATE crawl_queue SET status = 'pending', processed_at = NULL "
+            "WHERE rowid IN ("
+            "  SELECT rowid FROM crawl_queue"
+            "  WHERE status = 'processed'"
+            "    AND (processed_at IS NULL OR processed_at <= datetime('now', ?))"
+            "  ORDER BY COALESCE(processed_at, '1970-01-01 00:00:00') ASC"
+            "  LIMIT ?"
+            ")",
+            (f"-{int(cooldown_seconds)} seconds", int(limit)),
+        )
+        return result.rows_affected
 
     async def update_page(self, document: PageDocument) -> bool:
         """Refresh an existing row in place — the revalidation path."""

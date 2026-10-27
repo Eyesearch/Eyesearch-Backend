@@ -217,11 +217,11 @@ seeds. The work is split in two, and the split matters:
 | --- | --- |
 | scheme | `http` / `https` only |
 | host | the source host, or an authoritative Indian public suffix |
-| path depth | ≤ `MAX_PATH_DEPTH` (2) |
+| path depth | ≤ `MAX_PATH_DEPTH` (6) — Indian portals nest real content several levels down |
 | extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
 | query | tracking keys (`utm_*`, `gclid`, `fbclid`, `ref`, …) dropped, keys sorted |
-| frontier size | capped at `MAX_PENDING_QUEUE` (5,000) pending rows |
+| frontier size | capped at `MAX_PENDING_QUEUE` (10,000) pending rows |
 
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue
@@ -235,6 +235,29 @@ reports how many were added.
 Verified with a stubbed site: batch 1 queues 3 links, batch 2 queues 5, batch 3
 indexes the rest and the frontier empties at the depth limit — 9 pages indexed,
 9 queue rows `processed`, none stranded.
+
+### Frontier re-arm — why the crawl does not stop at the seeds
+
+Discovery alone is not enough. `enqueue()` rejects any URL already in `pages`
+or `crawl_queue`, so once every seed has been crawled the seed list yields
+nothing, the queue stays empty and the worker idles permanently. That is the
+stall this section exists to prevent.
+
+`FrontierAgent.refill()` therefore runs in two stages:
+
+1. queue any seed not seen yet;
+2. if nothing new was added, return the stalest crawled URLs to `pending`.
+
+Stage 2 is bounded by two settings: `REARM_COOLDOWN_SECONDS` (6 h) so a URL is
+not re-fetched on every pass, and `REARM_BATCH_SIZE` (25) so the frontier
+refills gradually. `crawl_queue.processed_at` records when a URL was finished;
+it is added to an existing table by `ensure_columns()` in `app/database.py`,
+which is how a column introduced after a table was first created gets applied
+without a rebuild.
+
+When the frontier is dry and nothing is past its cooldown, the worker backs off
+60 s instead of 15 s, so a six-hour cooldown costs 360 wake-ups rather than
+1,440.
 
 ## Upgrading an existing database
 
