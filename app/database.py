@@ -110,8 +110,119 @@ def _scalar(result: ResultSet, default: int = 0) -> int:
         return default
 
 
-async def initialize_database(client: LibsqlClient) -> dict[str, int]:
+#: Tables only the pre-rebuild backend created. Any of these present means the
+#: database predates this schema.
+LEGACY_TABLES: tuple[str, ...] = (
+    "documents_fts",
+    "documents",
+    "search_records",
+    "crawl_backlog",
+    "page_fts",
+    "pages",
+    "sites",
+    "crawl_queue",
+)
+
+class LegacySchemaError(RuntimeError):
+    """The database holds a pre-rebuild schema and dropping it was not allowed."""
+
+
+async def _table_columns(client: LibsqlClient, table: str) -> set[str]:
+    """The column names of a table, or an empty set when it does not exist."""
+    try:
+        result = await client.execute(f"PRAGMA table_info({table})")
+    except LibsqlError:
+        return set()
+    return {str(row[1]) for row in result.rows if len(row) > 1}
+
+
+async def detect_legacy_schema(client: LibsqlClient) -> list[str]:
+    """Name the legacy artefacts this database still holds, if any.
+
+    `sites` and `crawl_queue` exist in both schemas, so their presence proves
+    nothing on its own. The signals that do are a `pages` table without
+    `body_text`, and the tables only the previous backend created.
+    """
+    found: list[str] = []
+
+    page_columns = await _table_columns(client, "pages")
+    legacy_pages = bool(page_columns) and "body_text" not in page_columns
+    if legacy_pages:
+        found.append("pages (pre-rebuild columns)")
+
+    for table in ("documents", "documents_fts", "search_records", "crawl_backlog"):
+        if await _table_columns(client, table):
+            found.append(table)
+
+    # These three belong to the old schema too, but only count as evidence
+    # once the old `pages` shape or an old-only table has confirmed it.
+    if legacy_pages:
+        for table in ("page_fts", "sites", "crawl_queue"):
+            if await _table_columns(client, table):
+                found.append(table)
+
+    return found
+
+
+async def migrate_legacy_schema(
+    client: LibsqlClient,
+    *,
+    allow_drop: bool = True,
+) -> list[str]:
+    """Clear a pre-rebuild schema so the new one can be created.
+
+    `CREATE TABLE IF NOT EXISTS` cannot change an existing table, so a database
+    left over from the previous backend would keep its old columns and every
+    write would fail with a missing-column error. The old rows are a crawl
+    cache in a shape this code cannot read, so they are dropped rather than
+    migrated, and what was removed is logged.
+    """
+    found = await detect_legacy_schema(client)
+    if not found:
+        return []
+
+    if not allow_drop:
+        raise LegacySchemaError(
+            "the database still holds the pre-rebuild schema ("
+            + ", ".join(found)
+            + "). Set MIGRATE_LEGACY_SCHEMA=true to drop it, or point the app at "
+            "an empty database."
+        )
+
+    logger.warning(
+        "pre-rebuild schema detected (%s) — dropping it so the new schema can be created",
+        ", ".join(found),
+    )
+
+    statements: list[tuple[str, tuple]] = [("BEGIN IMMEDIATE", ())]
+    for table in LEGACY_TABLES:
+        statements.append((f"DROP TABLE IF EXISTS {table}", ()))
+    statements.append(("COMMIT", ()))
+
+    try:
+        await client.batch(statements)
+    except LibsqlError as error:
+        logger.error("legacy schema drop failed: %s", error)
+        try:
+            await client.execute("ROLLBACK")
+        except LibsqlError:
+            pass
+        raise
+
+    logger.warning("legacy schema dropped: %s", ", ".join(found))
+    return found
+
+
+async def initialize_database(
+    client: LibsqlClient,
+    *,
+    migrate: bool = True,
+    allow_legacy_drop: bool = True,
+) -> dict[str, int]:
     """Create every table, trigger and index; return what the index holds."""
+    if migrate:
+        await migrate_legacy_schema(client, allow_drop=allow_legacy_drop)
+
     await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
     counts = await read_counts(client)
     logger.info(

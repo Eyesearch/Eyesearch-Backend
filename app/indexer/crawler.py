@@ -58,7 +58,7 @@ async def _main(argv: list[str]) -> int:
 
     client = build_client(settings)
     try:
-        await initialize_database(client)
+        await initialize_database(client, allow_legacy_drop=settings.migrate_legacy_schema)
 
         if args.probe:
             return await _probe(client)

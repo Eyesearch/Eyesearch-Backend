@@ -198,6 +198,27 @@ exists to keep that true.
    milliseconds while the crawl runs behind it. A batch iteration sleeps 2.0 s;
    an empty queue backs off 15.0 s.
 
+## Upgrading an existing database
+
+The rebuild uses the same table names as the previous backend — `sites`,
+`pages`, `crawl_queue` — with different columns. `CREATE TABLE IF NOT EXISTS`
+cannot change a table that already exists, so a warm database would keep the old
+shape and every write would fail on a missing column, once per crawl batch.
+
+`app/database.py` therefore checks the schema before the DDL batch runs:
+
+- a `pages` table without `body_text`, or any of `documents`, `documents_fts`,
+  `search_records`, `crawl_backlog`, means the database predates this schema;
+- with `MIGRATE_LEGACY_SCHEMA=true` (the default) those tables are dropped in one
+  transaction and the new schema is created — logged at WARNING with exactly
+  what was removed;
+- with `MIGRATE_LEGACY_SCHEMA=false` the app refuses to boot and names the
+  tables it found, so nothing is dropped by surprise.
+
+The dropped rows are a crawl cache in a shape this code cannot read, so they are
+cleared rather than migrated. If those pages matter, point the app at an empty
+database and let the crawler refill it.
+
 ## Running it
 
 ```bash

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     turso_auth_token: str = ""
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
+    # Drop a pre-rebuild schema on startup. Without this a warm database keeps
+    # its old columns and every write fails on a missing column.
+    migrate_legacy_schema: bool = True
 
     # --- Server -------------------------------------------------------------
     environment: str = "development"

@@ -29,6 +29,8 @@ services:
         value: "true"
       - key: STORAGE_PAGE_LIMIT
         value: "300000"
+      - key: MIGRATE_LEGACY_SCHEMA
+        value: "true"
       - key: TURSO_DB_URL
         sync: false
       - key: TURSO_AUTH_TOKEN

@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
     logger.info("database target: %s", describe_database_target(settings))
 
     client: LibsqlClient = build_client(settings)
-    await initialize_database(client)
+    await initialize_database(client, allow_legacy_drop=settings.migrate_legacy_schema)
     writable = await verify_writable(client)
     if not writable:
         logger.error("database rejected the write probe — crawling will stay paused")
