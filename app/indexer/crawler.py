@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from app.agents import FetcherAgent, IndexerAgent, ParserAgent, QualityAgent
 from app.crawler.crawler import RobotsCache, fetch_page, fetch_page_status
 from app.indexer.discovery import discover_domains, is_indian_authoritative
 from app.indexer.guard import storage_paused
@@ -39,6 +40,18 @@ from app.engine.text import (
 from app.engine.urls import infer_category, is_authoritative_indian, is_indexable, normalise_url
 
 logger = logging.getLogger(__name__)
+
+# The agents are the live path for every page: fetch, parse and quality all run
+# through them, so the modular architecture is what actually executes.
+def _low_level_fetch(client: Any, url: str, settings: Any) -> Any:
+    """The pipeline's own fetch, resolved at call time so it stays stubbable."""
+    return fetch_page_status(client, url, settings)
+
+
+_fetcher_agent = FetcherAgent(fetch_fn=_low_level_fetch)
+_parser_agent = ParserAgent()
+_quality_agent = QualityAgent()
+_indexer_agent = IndexerAgent()
 
 # Wikipedia entry points for the knowledge category.
 WIKI_ARTICLES: tuple[tuple[str, str], ...] = (
@@ -140,7 +153,8 @@ async def crawl_seed(
             report.skip(url, "robots_disallowed")
             continue
 
-        html, status = await fetch_page_status(client, url, settings)
+        fetched = await _fetcher_agent.fetch(url)
+        html, status = fetched.html, fetched.status
         report.fetched += 1
         host = urlparse(url).netloc or url
         logger.debug("fetched %s -> %s", host, status or "no response")
@@ -165,9 +179,8 @@ async def crawl_seed(
                     )
                     documents.append(document)
             continue
-        document, reason = extract_document_with_reason(
-            url, html, http_status=status or 200, category=seed.category
-        )
+        parsed = await _parser_agent.parse(url, html, status=status, category=seed.category)
+        document, reason = parsed.document, parsed.reason
         if document is None:
             report.skip(url, reason or "not_extracted")
             logger.debug("skipped: %s (%s)", reason or "not_extracted", url)
