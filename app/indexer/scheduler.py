@@ -15,7 +15,7 @@ import random
 
 from app.engine.config import EngineSettings, get_engine_settings
 from app.indexer.backlog_worker import run_backlog_once
-from app.indexer.crawler import run_autonomous_seed_crawl, run_discovery_pass
+from app.indexer.crawler import run_autonomous_seed_crawl, run_discovery_pass, run_url_pass
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
@@ -212,6 +212,7 @@ async def _discovery_loop(settings: EngineSettings) -> None:
     """
     while True:
         await _refill_if_low(settings)
+        report: dict = {}
         try:
             report = await run_discovery_pass(settings=settings)
             if report.get("attempted"):
@@ -220,6 +221,17 @@ async def _discovery_loop(settings: EngineSettings) -> None:
             raise
         except Exception as exc:
             logger.warning("discovery worker failed: %s", exc)
+
+        # The domain discovery pass and the URL queue are separate sources of
+        # work. Drain pending URLs every cycle so sitemap URLs do not starve.
+        try:
+            url_report = await run_url_pass(settings=settings)
+            if url_report.get("attempted") or url_report.get("failed"):
+                logger.info("URL queue worker: %s", url_report)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("URL queue pass failed: %s", exc)
         from app.indexer.guard import storage_paused
 
         if await storage_paused():
