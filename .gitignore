@@ -10,3 +10,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Generated code dump (see README)
+full_repo_code.txt
