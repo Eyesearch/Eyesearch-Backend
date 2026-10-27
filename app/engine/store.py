@@ -24,7 +24,7 @@ from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
 from app.engine.relevance import is_relevant
 from app.engine.schema import BM25_WEIGHTS
-from app.engine.text import detect_language, truncate
+from app.engine.text import detect_language, rich_snippet, truncate
 from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 from app.errors import DatabaseError, StorageQuotaError
 
@@ -549,11 +549,18 @@ class IndexStore:
             # take it from that page rather than losing the match.
             if not primary.get("content"):
                 primary["content"] = bodies.get(str(primary.get("url") or ""), "")
+            title = str(primary["title"] or "")
+            body = str(primary.get("content") or "")
             documents.append(
                 RankedDocument(
                     url=str(primary["url"]),
-                    title=str(primary["title"] or ""),
-                    snippet=str(primary["description"] or ""),
+                    title=title,
+                    # never repeat the domain back at the reader: a boilerplate
+                    # description is replaced by the opening of the body text
+                    snippet=rich_snippet(
+                        str(primary["description"] or ""), body, title,
+                        limit=self.settings.snippet_max_chars,
+                    ),
                     language=detect_language(f"{primary['title']} {primary['description'] or ''}"),
                     updated_at=str(primary["crawled"] or "") or None,
                     bm25=float(matched.get("lexical_score") or 0.0),

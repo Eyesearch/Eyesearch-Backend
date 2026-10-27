@@ -255,6 +255,76 @@ def summarise(text: str, *, max_sentences: int = 4, max_chars: int = 1500) -> st
     return summary
 
 
+# Descriptions that say nothing about the page itself.
+_BOILERPLATE_ENDINGS = (
+    "— official website",
+    "- official website",
+    "official website",
+    "official portal",
+)
+
+SNIPPET_TARGET_CHARS = 200
+SNIPPET_MIN_CHARS = 60
+
+
+def _is_boilerplate(description: str, title: str) -> bool:
+    """True when a description is just the title plus "official website"."""
+    value = description.strip().lower()
+    if not value:
+        return True
+    if len(value) < SNIPPET_MIN_CHARS:
+        return True
+    stripped = value
+    for ending in _BOILERPLATE_ENDINGS:
+        if stripped.endswith(ending):
+            stripped = stripped[: -len(ending)].strip(" -—·|")
+    return stripped in {title.strip().lower(), ""}
+
+
+def rich_snippet(
+    description: str,
+    body: str = "",
+    title: str = "",
+    *,
+    limit: int = SNIPPET_TARGET_CHARS,
+) -> str:
+    """The most informative ~200 characters we can show under a title.
+
+    A real meta description wins. A boilerplate one ("Karnataka — official
+    website") is replaced by the opening of the extracted body, cut on a word
+    boundary with an ellipsis, so a card never repeats the domain back at the
+    reader.
+    """
+    description = strip_artefacts(description or "")
+    body = strip_artefacts(body or "")
+
+    if description and not _is_boilerplate(description, title):
+        return truncate(description, limit)
+
+    if body:
+        opening = body
+        if title and opening.lower().startswith(title.lower()):
+            opening = opening[len(title) :].lstrip(" .:-—|")
+        else:
+            # a short leading token that repeats the title's first word ("BWSSB The
+            # Board supplies…") adds nothing above a title that already says it
+            first, _, rest = opening.partition(" ")
+            if first and rest and title and len(first) <= 12:
+                stop = {"and", "of", "the", "for", "in", "at", "on", "to"}
+                initials = "".join(
+                    word[0] for word in title.split()
+                    if word[:1].isalpha() and word.lower() not in stop
+                ).lower()
+                if first.lower() == initials or first.lower() == title.split()[0].lower():
+                    opening = rest.lstrip(" .:-—|")
+        snippet = truncate(opening, limit)
+        if len(opening) > limit:
+            snippet = snippet.rstrip(" ,;:-—") + "…"
+        return snippet or truncate(body, limit)
+
+    return truncate(description, limit)
+
+
 def truncate(text: str, limit: int) -> str:
     """Cut at a word boundary, never mid-word, and never over `limit` characters."""
     value = normalise_whitespace(text)
@@ -544,6 +614,7 @@ def extract_links(html: str, base_url: str) -> Iterable[str]:
 
 
 __all__ = [
+    "rich_snippet",
     "fallback_document",
     "extract_document_with_reason",
     "SKIP_TOO_SHORT",
