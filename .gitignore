@@ -11,5 +11,5 @@ venv/
 .ruff_cache/
 .DS_Store
 
-# Generated code dump (see README)
-full_repo_code.txt
+# Generated code dumps - concatenations of the tree, never source.
+*_repo_code.txt
