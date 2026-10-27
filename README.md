@@ -353,6 +353,25 @@ Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
 
+**Six agents, one pipeline.** The crawl is split into decoupled modules under
+`app/agents/`, each with a standard async entry point, wired together by
+`app/orchestrator.py` over `asyncio` queues:
+
+| agent | entry point | responsibility |
+| --- | --- | --- |
+| `01_frontier_agent` | `next_batch()`, `enqueue()` | URL queueing, `.gov.in`/`.nic.in` priority, per-domain limits |
+| `02_fetcher_agent` | `fetch(url)` | pooled async HTTP, timeouts, backoff, TLS policy |
+| `03_parser_agent` | `parse(url, html)` | body text capped at 1,200 chars, h1/h2, up to five sitelinks |
+| `04_quality_agent` | `check(document)` | 80-char density, boilerplate/spam filtering, dedupe hash |
+| `05_indexer_agent` | `persist(documents)` | Turso writes, FTS sync, 300k ceiling and quota breaker |
+| `06_semantic_ai_agent` | `answer()`, `stream()` | plug-in seam for Indoone AI; grounded answers until wired |
+
+A failure in any stage is caught, counted in the run report and logged — the
+orchestrator and the search API keep serving. The crawler routes every page
+through the fetcher, parser and quality agents, so this is the live path rather
+than a parallel copy. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
+`{attempted, fetched, parsed, accepted, rejected, indexed_pages, sites, errors}`.
+
 **The crawl is an audit, not a download.** Each seed root is fetched as desktop
 Chrome — the plain `Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36` agent plus the
 matching `Accept`, `Accept-Language`, `Sec-Fetch-*` and
@@ -824,6 +843,25 @@ national digital services — plus banking, sports, e-commerce and software.
 Domains are crawled with `SEED_CRAWL_CONCURRENCY` (5) in flight, one shared HTTP
 client and the single Turso connection, and every domain is stored as **one root
 page plus at most five sitelinks** inside the 10 KB domain budget.
+
+**Six agents, one pipeline.** The crawl is split into decoupled modules under
+`app/agents/`, each with a standard async entry point, wired together by
+`app/orchestrator.py` over `asyncio` queues:
+
+| agent | entry point | responsibility |
+| --- | --- | --- |
+| `01_frontier_agent` | `next_batch()`, `enqueue()` | URL queueing, `.gov.in`/`.nic.in` priority, per-domain limits |
+| `02_fetcher_agent` | `fetch(url)` | pooled async HTTP, timeouts, backoff, TLS policy |
+| `03_parser_agent` | `parse(url, html)` | body text capped at 1,200 chars, h1/h2, up to five sitelinks |
+| `04_quality_agent` | `check(document)` | 80-char density, boilerplate/spam filtering, dedupe hash |
+| `05_indexer_agent` | `persist(documents)` | Turso writes, FTS sync, 300k ceiling and quota breaker |
+| `06_semantic_ai_agent` | `answer()`, `stream()` | plug-in seam for Indoone AI; grounded answers until wired |
+
+A failure in any stage is caught, counted in the run report and logged — the
+orchestrator and the search API keep serving. The crawler routes every page
+through the fetcher, parser and quality agents, so this is the live path rather
+than a parallel copy. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
+`{attempted, fetched, parsed, accepted, rejected, indexed_pages, sites, errors}`.
 
 **The crawl is an audit, not a download.** Each seed root is fetched as desktop
 Chrome — the plain `Mozilla/5.0 … Chrome/128.0.0.0 Safari/537.36` agent plus the
