@@ -807,6 +807,27 @@ class IndexStore:
             logger.debug("backlog probe failed for %r: %s", query, exc)
             return False
 
+    async def note_backlog_attempt(self, query: str, *, reason: str = "") -> int:
+        """Record one failed resolution and return the running attempt count."""
+        await execute_safe(
+            "UPDATE crawl_backlog SET attempts = COALESCE(attempts, 0) + 1, "
+            "last_error = ? WHERE query = ? AND COALESCE(kind, 'query') = 'query'",
+            [reason[:200], query],
+        )
+        result = await execute_safe(
+            "SELECT COALESCE(attempts, 0) FROM crawl_backlog WHERE query = ? LIMIT 1", [query]
+        )
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def mark_backlog_dropped(self, query: str, *, reason: str = "") -> None:
+        """Move a query out of the queue and into history."""
+        await execute_safe(
+            "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP, "
+            "last_error = ? WHERE query = ? AND COALESCE(kind, 'query') = 'query'",
+            [reason[:200] or "dropped", query],
+        )
+
     async def pending_backlog(self, limit: int = 20) -> list[str]:
         client = get_client()
         clause = await self._kind_clause("query")

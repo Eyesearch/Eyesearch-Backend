@@ -33,7 +33,7 @@ class BacklogReport(dict):
     """Counters for one pass."""
 
     def __init__(self) -> None:
-        super().__init__(queries=0, resolved=0, urls=0, inserted=0, skipped=0)
+        super().__init__(queries=0, resolved=0, urls=0, inserted=0, skipped=0, dropped=0)
 
 
 def _authority_key(url: str) -> tuple[int, int]:
@@ -170,9 +170,25 @@ async def run_backlog_once(
                 report["resolved"] += 1
                 await index.mark_backlog_processed(query)
                 logger.info("backlog resolved %r → %d documents", query, outcome["inserted"])
+                continue
+
+            # Nothing indexed this time. Count the attempt; once a query has been
+            # blocked or empty too many times it goes to history instead of
+            # stalling the queue on every pass.
+            attempts = await index.note_backlog_attempt(
+                query, reason=str(outcome.get("reason") or "unresolved")
+            )
+            limit = max(1, cfg.backlog_max_attempts)
+            if attempts >= limit:
+                await index.mark_backlog_dropped(query, reason="attempts exhausted")
+                report["dropped"] = int(report.get("dropped", 0)) + 1
+                logger.info(
+                    "backlog query %r dropped after %d attempts (blocked or empty)", query, attempts
+                )
             else:
-                # Nothing indexed: leave it pending so a later pass can retry.
-                logger.info("backlog query %r still unresolved", query)
+                logger.info(
+                    "backlog query %r unresolved (attempt %d of %d)", query, attempts, limit
+                )
     finally:
         if owned_client:
             await http.aclose()

@@ -110,6 +110,8 @@ CRAWL_TABLES: tuple[str, ...] = (
         reason TEXT,
         hits INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         processed_at TIMESTAMP
     )
@@ -162,6 +164,8 @@ LEGACY_TRIGGERS: tuple[str, ...] = (
 ENGINE_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("crawl_backlog", "kind TEXT NOT NULL DEFAULT 'query'"),
     ("crawl_backlog", "reason TEXT"),
+    ("crawl_backlog", "attempts INTEGER NOT NULL DEFAULT 0"),
+    ("crawl_backlog", "last_error TEXT"),
     ("pages", "content TEXT NOT NULL DEFAULT ''"),
 )
 
