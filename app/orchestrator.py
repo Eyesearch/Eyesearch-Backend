@@ -176,6 +176,7 @@ class Orchestrator:
         documents: list[PageDocument] = []
         queue_ids: list[int] = []
         failed_ids: list[int] = []
+        retryable_failures: dict[str, list[int]] = {}
         skipped_ids: list[int] = []
         discovered: list[str] = []
 
@@ -205,8 +206,16 @@ class Orchestrator:
 
             if not result.ok:
                 outcome.rejected += 1
-                self._tally(outcome.skip_reasons, result.reason or "fetch_failed")
-                failed_ids.append(item.rowid)
+                reason = result.reason or "fetch_failed"
+                self._tally(outcome.skip_reasons, reason)
+                if (
+                    reason == "timeout"
+                    or reason.startswith("http_error:")
+                    or reason.startswith("http_status:5")
+                ):
+                    retryable_failures.setdefault(reason, []).append(item.rowid)
+                else:
+                    failed_ids.append(item.rowid)
                 continue
 
             outcome.fetched += 1
@@ -265,9 +274,12 @@ class Orchestrator:
 
         outcome.accepted = len(documents)
 
+        for reason, rowids in retryable_failures.items():
+            outcome.queue_failed += await self._store.mark_retryable_failed(rowids, reason)
+
         if failed_ids or skipped_ids:
             failed, _skipped = await self._indexer.park(failed_ids, skipped_ids)
-            outcome.queue_failed = failed
+            outcome.queue_failed += failed
             # Park the rest of the backlog for those domains too, so the depth
             # reflects real work and new domains are not dropped at the cap.
             for domain in {item.domain for item in queue if item.rowid in set(skipped_ids)}:
@@ -388,6 +400,10 @@ class Orchestrator:
                     continue
 
                 delay = self._settings.crawl_empty_backoff_seconds
+
+                rearmed = await self._store.rearm_retryable_failed(limit=25)
+                if rearmed:
+                    logger.info("re-armed %d transient crawler failures", rearmed)
 
                 # Every pass, not only an empty one: the queue can be full of
                 # work from a single domain while every authoritative one sits
