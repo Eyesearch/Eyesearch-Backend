@@ -24,6 +24,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Iterable, Protocol, Sequence
 
 import httpx
@@ -130,7 +131,15 @@ _NULL = {"type": "null"}
 
 
 def encode_arg(value: Any) -> dict[str, Any]:
-    """Encode a Python value as a Hrana typed value."""
+    """Encode a Python value as a Hrana typed value.
+
+    The wire format is asymmetric and getting it wrong is fatal: an `integer`
+    carries a **decimal string** (`{"type": "integer", "value": "42"}`) while
+    a `float` carries a **JSON number** (`{"type": "float", "value": 0.999}`).
+    Sending a float as `"0.999"` makes Turso reject the whole pipeline with
+    `JSON parse error: invalid type: string "0.999", expected f64`, which is
+    what happened to every `quality_score` write before this was fixed.
+    """
     if value is None:
         return dict(_NULL)
     if isinstance(value, bool):
@@ -138,7 +147,9 @@ def encode_arg(value: Any) -> dict[str, Any]:
     if isinstance(value, int):
         return {"type": "integer", "value": str(value)}
     if isinstance(value, float):
-        return {"type": "float", "value": repr(value)}
+        return {"type": "float", "value": float(value)}
+    if isinstance(value, Decimal):
+        return {"type": "float", "value": float(value)}
     if isinstance(value, (bytes, bytearray, memoryview)):
         return {"type": "blob", "base64": base64.b64encode(bytes(value)).decode("ascii")}
     return {"type": "text", "value": str(value)}

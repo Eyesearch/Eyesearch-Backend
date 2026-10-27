@@ -41,14 +41,20 @@ class PageDocument:
     digest: str = ""
 
     def as_row(self) -> tuple[Any, ...]:
-        """The seven bound values the page insert expects, in SQL order."""
+        """The seven bound values the page insert expects, in SQL order.
+
+        `quality_score` is cast to `float` here rather than trusted from the
+        caller: it is a REAL column, and an `int` reaching the encoder would be
+        sent as an integer while a `Decimal` would be sent as text. Turso
+        rejects both for a REAL column.
+        """
         return (
             self.domain,
             self.url,
             self.title,
             self.description,
             self.body_text,
-            self.quality_score,
+            float(self.quality_score),
             self.digest,
         )
 
