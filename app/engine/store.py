@@ -417,7 +417,20 @@ class IndexStore:
         )
         return sum(1 for result in results if result.rows_affected > 0)
 
-    async def rearm_processed(self, limit: int = 25, cooldown_seconds: int = 6 * 3600) -> int:
+    async def pending_domains(self, limit: int = 200) -> list[str]:
+        """Which domains currently have work waiting."""
+        result = await self._client.execute(
+            "SELECT DISTINCT domain FROM crawl_queue WHERE status = 'pending' LIMIT ?",
+            (limit,),
+        )
+        return [str(row[0]) for row in result.rows]
+
+    async def rearm_processed(
+        self,
+        limit: int = 25,
+        cooldown_seconds: int = 6 * 3600,
+        domains: Sequence[str] | None = None,
+    ) -> int:
         """Return the stalest crawled URLs to `pending` once their cooldown ends.
 
         Without this the frontier starves: once every seed is in `pages`, no
@@ -425,16 +438,24 @@ class IndexStore:
         the crawl alive and the index fresh, bounded by a cooldown so a URL is
         not re-fetched on every pass.
         """
+        domain_clause = ""
+        domain_args: list[Any] = []
+        if domains:
+            placeholders = ", ".join("?" for _ in domains)
+            domain_clause = f" AND domain IN ({placeholders})"
+            domain_args = list(domains)
+
         result = await self._client.execute(
             "UPDATE crawl_queue SET status = 'pending', processed_at = NULL "
             "WHERE rowid IN ("
             "  SELECT rowid FROM crawl_queue"
             "  WHERE status = 'processed'"
             "    AND (processed_at IS NULL OR processed_at <= datetime('now', ?))"
+            f"{domain_clause}"
             "  ORDER BY COALESCE(processed_at, '1970-01-01 00:00:00') ASC"
             "  LIMIT ?"
             ")",
-            (f"-{int(cooldown_seconds)} seconds", int(limit)),
+            (f"-{int(cooldown_seconds)} seconds", *domain_args, int(limit)),
         )
         return result.rows_affected
 
@@ -469,10 +490,23 @@ class IndexStore:
     # -- queue reads -------------------------------------------------------
 
     async def pending_batch(self, limit: int = 10) -> list[QueuedUrl]:
-        """The next `limit` pending URLs, oldest first."""
+        """The next `limit` pending URLs, interleaved across domains.
+
+        A plain `ORDER BY rowid` hands the whole batch to whichever domain was
+        queued first: one portal with 40 pending URLs takes all ten slots and
+        every other domain waits behind it. Numbering the rows per domain and
+        ordering by that number gives round-robin — one URL from each domain,
+        then a second from each — so a batch always spreads across the frontier.
+
+        The row number is not capped: capping it (say at two per domain) would
+        shrink a batch below the configured size whenever few domains have work.
+        """
         result = await self._client.execute(
-            "SELECT rowid AS id, url, domain, retry_count FROM crawl_queue "
-            "WHERE status = 'pending' ORDER BY rowid LIMIT ?",
+            "SELECT id, url, domain, retry_count FROM ("
+            "  SELECT rowid AS id, url, domain, retry_count,"
+            "         ROW_NUMBER() OVER (PARTITION BY domain ORDER BY rowid ASC) AS rn "
+            "  FROM crawl_queue WHERE status = 'pending'"
+            ") ORDER BY rn ASC, id ASC LIMIT ?",
             (limit,),
         )
         return [

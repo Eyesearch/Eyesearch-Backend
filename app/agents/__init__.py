@@ -1,7 +1,7 @@
-"""The six pipeline agents.
+"""The pipeline agents.
 
-Each agent is a numbered module — `01_frontier_agent` … `06_revalidation_agent`
-— matching the brief's file names. Python cannot import a module whose name
+Each agent is a numbered module — `01_frontier_agent` … `08_language_agent` —
+matching the brief's file names. Python cannot import a module whose name
 starts with a digit using `import` syntax, so the modules are reached through
 `load_agent()` here, which uses the import machinery's string form.
 

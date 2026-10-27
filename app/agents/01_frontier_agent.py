@@ -204,6 +204,13 @@ def is_authoritative(host: str) -> bool:
     return any(host == domain or host.endswith(f".{domain}") for domain in WHITELISTED_DOMAINS)
 
 
+#: Domains the frontier must never let go quiet: every seed root plus the
+#: whitelisted portals.
+AUTHORITATIVE_DOMAINS: tuple[str, ...] = tuple(
+    dict.fromkeys([domain_of(url) for url in SEED_URLS] + list(WHITELISTED_DOMAINS))
+)
+
+
 def priority_of(url: str) -> int:
     """Lower sorts first: official public domains, then everything else."""
     return 0 if is_authoritative(domain_of(url)) else 1
@@ -312,20 +319,29 @@ class FrontierAgent:
         return await self._store.queue_depth()
 
     async def refill(self, minimum: int = 1) -> int:
-        """Keep the frontier alive when it runs dry.
+        """Keep the frontier alive, and keep it diverse.
 
-        Two stages, in order:
+        Three stages, in order:
 
         1. queue any seed that has not been seen yet;
         2. if every seed is already indexed, return the stalest crawled URLs to
-           `pending` once their cooldown has elapsed.
+           `pending` once their cooldown has elapsed;
+        3. if the queue has work but none of it comes from an authoritative
+           domain, re-arm the stalest crawled authoritative URLs.
 
         Stage 2 is what stops the stall: with only stage 1, an exhausted seed
         list means `enqueue()` rejects every URL as already known, the queue
-        stays empty, and the worker idles for good.
+        stays empty, and the worker idles for good. Stage 3 is what stops the
+        frontier drifting into nothing but one niche domain.
+
+        Every stage respects the cooldown — re-enqueueing a seed that is
+        already `processed` does nothing, because `enqueue()` rejects known
+        URLs, so "force" has to mean "re-arm", not "insert again".
         """
         if await self.depth() >= minimum:
-            return 0
+            if await self.has_authoritative_pending():
+                return 0
+            return await self._rearm_authoritative()
 
         added = await self.enqueue(SEED_URLS)
         if added:
@@ -344,8 +360,28 @@ class FrontierAgent:
             )
         return rearmed
 
+    async def has_authoritative_pending(self) -> bool:
+        """Is any authoritative domain waiting to be crawled?"""
+        domains = await self._store.pending_domains()
+        return any(is_authoritative(domain) for domain in domains)
+
+    async def _rearm_authoritative(self) -> int:
+        rearmed = await self._store.rearm_processed(
+            limit=self._settings.rearm_batch_size,
+            cooldown_seconds=self._settings.rearm_cooldown_seconds,
+            domains=AUTHORITATIVE_DOMAINS,
+        )
+        if rearmed:
+            logger.info(
+                "frontier re-armed %d authoritative URLs (no seed or whitelisted "
+                "domain had work waiting)",
+                rearmed,
+            )
+        return rearmed
+
 
 __all__ = [
+    "AUTHORITATIVE_DOMAINS",
     "BLOCKED_PATH_MARKERS",
     "FrontierAgent",
     "FrontierItem",

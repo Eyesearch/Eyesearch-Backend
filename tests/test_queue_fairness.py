@@ -1,0 +1,198 @@
+"""Queue fairness: round-robin dequeue and frontier diversity.
+
+A queue ordered purely by rowid hands every slot in a batch to whichever domain
+was queued first. One portal with forty pending URLs takes all ten, and every
+other domain waits behind it — the crawl looks busy while it explores one site.
+
+These tests pin the dequeue interleaving, the domain-scoped re-arm, and the
+frontier stage that pulls authoritative domains back in when the queue has
+drifted elsewhere.
+"""
+
+from __future__ import annotations
+
+from app.agents import load_agent
+from app.database import initialize_database, verify_writable
+from app.libsql_http import LocalSqliteClient
+
+FrontierAgent = load_agent("01_frontier_agent").FrontierAgent
+
+
+async def _queue(client, rows: list[tuple[str, str]], status: str = "pending") -> None:
+    await client.batch(
+        [
+            (
+                "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, ?)",
+                (url, domain, status),
+            )
+            for url, domain in rows
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-robin dequeue
+# ---------------------------------------------------------------------------
+
+
+async def test_the_batch_is_interleaved_across_domains(store, client):
+    await _queue(client, [(f"https://busy.gov.in/p{i}", "busy.gov.in") for i in range(40)])
+    await _queue(
+        client,
+        [("https://a.gov.in/x", "a.gov.in"), ("https://a.gov.in/y", "a.gov.in")],
+    )
+    await _queue(
+        client,
+        [("https://b.gov.in/x", "b.gov.in"), ("https://b.gov.in/y", "b.gov.in")],
+    )
+
+    batch = await store.pending_batch(10)
+
+    domains = [item.domain for item in batch]
+    assert len(set(domains[:3])) == 3, f"first three should be three domains, got {domains}"
+    assert "a.gov.in" in domains
+    assert "b.gov.in" in domains
+
+
+async def test_the_batch_still_fills_to_its_limit(store, client):
+    """A per-domain cap on the row number would shrink the batch."""
+    await _queue(client, [(f"https://busy.gov.in/p{i}", "busy.gov.in") for i in range(40)])
+    await _queue(client, [("https://a.gov.in/x", "a.gov.in")])
+    await _queue(client, [("https://b.gov.in/x", "b.gov.in")])
+
+    batch = await store.pending_batch(10)
+
+    assert len(batch) == 10
+
+
+async def test_a_single_domain_batch_is_unchanged(store, client):
+    await _queue(client, [(f"https://one.gov.in/p{i}", "one.gov.in") for i in range(5)])
+
+    batch = await store.pending_batch(10)
+
+    assert len(batch) == 5
+    assert [item.url for item in batch] == [f"https://one.gov.in/p{i}" for i in range(5)]
+
+
+async def test_only_pending_rows_are_returned(store, client):
+    await _queue(client, [("https://a.gov.in/1", "a.gov.in")], status="pending")
+    await _queue(client, [("https://a.gov.in/2", "a.gov.in")], status="processed")
+    await _queue(client, [("https://a.gov.in/3", "a.gov.in")], status="failed")
+
+    batch = await store.pending_batch(10)
+
+    assert [item.url for item in batch] == ["https://a.gov.in/1"]
+
+
+async def test_the_batch_is_stable_across_calls(store, client):
+    await _queue(client, [(f"https://a.gov.in/p{i}", "a.gov.in") for i in range(3)])
+
+    first = await store.pending_batch(2)
+    second = await store.pending_batch(2)
+
+    assert [item.url for item in first] == [item.url for item in second]
+
+
+# ---------------------------------------------------------------------------
+# Domain-scoped re-arm and frontier diversity
+# ---------------------------------------------------------------------------
+
+
+async def test_rearm_can_be_limited_to_named_domains(store, client):
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
+        "('https://www.thehindu.com/a', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+    )
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
+        "('https://randomshop.com/a', 'randomshop.com', 'processed', datetime('now','-7 hours'))"
+    )
+
+    rearmed = await store.rearm_processed(limit=10, cooldown_seconds=0, domains=["thehindu.com"])
+
+    assert rearmed == 1
+    pending = await store.pending_domains()
+    assert pending == ["thehindu.com"]
+
+
+async def test_pending_domains_lists_what_is_waiting(store, client):
+    await _queue(client, [("https://a.gov.in/1", "a.gov.in"), ("https://b.gov.in/1", "b.gov.in")])
+
+    domains = await store.pending_domains()
+
+    assert sorted(domains) == ["a.gov.in", "b.gov.in"]
+
+
+async def test_refill_pulls_authoritative_domains_back_in(store, client, settings):
+    """The queue is busy, but only with domains nobody asked for."""
+    await _queue(client, [("https://randomshop.com/a", "randomshop.com")])
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
+        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+    )
+    frontier = FrontierAgent(store, settings)
+
+    added = await frontier.refill(minimum=1)
+
+    assert added == 1
+    assert "thehindu.com" in await store.pending_domains()
+
+
+async def test_refill_leaves_a_healthy_queue_alone(store, client, settings):
+    await _queue(client, [("https://karnataka.gov.in/a", "karnataka.gov.in")])
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
+        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+    )
+    frontier = FrontierAgent(store, settings)
+
+    added = await frontier.refill(minimum=1)
+
+    assert added == 0
+
+
+async def test_an_authoritative_domain_counts_even_without_a_public_suffix(store, client, settings):
+    await _queue(client, [("https://indiankanoon.org/doc/1", "indiankanoon.org")])
+    frontier = FrontierAgent(store, settings)
+
+    assert await frontier.has_authoritative_pending() is True
+
+
+async def test_a_non_authoritative_queue_reports_no_authoritative_work(store, client, settings):
+    await _queue(client, [("https://randomshop.com/a", "randomshop.com")])
+    frontier = FrontierAgent(store, settings)
+
+    assert await frontier.has_authoritative_pending() is False
+
+
+# ---------------------------------------------------------------------------
+# The write probe
+# ---------------------------------------------------------------------------
+
+
+async def test_the_write_probe_passes_and_leaves_nothing_behind():
+    """Five placeholders, five arguments — this was reported as a mismatch."""
+    client = LocalSqliteClient(":memory:")
+    try:
+        await initialize_database(client)
+
+        assert await verify_writable(client) is True
+
+        rows = await client.execute("SELECT COUNT(*) FROM pages")
+        assert int(rows.scalar(0)) == 0
+    finally:
+        await client.close()
+
+
+async def test_the_write_probe_is_repeatable():
+    client = LocalSqliteClient(":memory:")
+    try:
+        await initialize_database(client)
+
+        assert await verify_writable(client) is True
+        assert await verify_writable(client) is True
+
+        rows = await client.execute("SELECT COUNT(*) FROM pages")
+        assert int(rows.scalar(0)) == 0
+    finally:
+        await client.close()

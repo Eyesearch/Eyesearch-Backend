@@ -323,11 +323,13 @@ class Orchestrator:
                 continue
 
             delay = self._settings.crawl_empty_backoff_seconds
-            if outcome is not None and outcome.empty:
-                added = await self._frontier.refill(minimum=1)
-                if not added:
-                    # Nothing to crawl and nothing past its cooldown yet.
-                    delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
+
+            # Every pass, not only an empty one: the queue can be full of work
+            # from a single domain while every authoritative one sits idle.
+            added = await self._frontier.refill(minimum=1)
+            if outcome is not None and outcome.empty and not added:
+                # Nothing to crawl and nothing past its cooldown yet.
+                delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
 
             logger.debug("crawl worker sleeping %.1fs (queue empty)", delay)
             await asyncio.sleep(delay)

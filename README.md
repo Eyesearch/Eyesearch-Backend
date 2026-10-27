@@ -226,6 +226,7 @@ seeds. The work is split in two, and the split matters:
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
 | query | tracking keys (`utm_*`, `gclid`, `fbclid`, `ref`, …) dropped, keys sorted |
 | frontier size | capped at `MAX_PENDING_QUEUE` (10,000) pending rows |
+| batch order | round-robin across domains, not plain `rowid` order |
 
 Crawl scope is not limited to public suffixes: `WHITELISTED_DOMAINS` adds
 Indian news, legal, startup and developer media that sit on `.com` — thehindu,
@@ -233,6 +234,15 @@ indianexpress, prajavani, vijaykarnataka, indiankanoon, livelaw, barandbench,
 inc42, hasgeek — alongside `data.gov.in`, `freejobalert.com` and `ncs.gov.in`.
 The seed list is 21 roots chosen to span categories rather than to favour
 government alone.
+
+Batches are dealt round-robin. A plain `ORDER BY rowid` hands all ten slots to
+whichever domain was queued first — one portal with forty pending URLs takes
+every batch and every other domain waits behind it. `pending_batch()` numbers
+the pending rows per domain with `ROW_NUMBER() OVER (PARTITION BY domain …)` and
+orders by that number, so a batch takes one URL from each domain before taking a
+second from any. The row number is deliberately **not** capped: capping it at
+two per domain shrinks a batch below its configured size whenever few domains
+have work.
 
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue
@@ -259,9 +269,18 @@ stall this section exists to prevent.
 1. queue any seed not seen yet;
 2. if nothing new was added, return the stalest crawled URLs to `pending`.
 
-Stage 2 is bounded by two settings: `REARM_COOLDOWN_SECONDS` (6 h) so a URL is
-not re-fetched on every pass, and `REARM_BATCH_SIZE` (25) so the frontier
-refills gradually. `crawl_queue.processed_at` records when a URL was finished;
+There is a third stage. A queue can be full and still be useless: if every
+pending URL belongs to one niche domain, the crawl looks busy while the
+authoritative sources sit idle. When `pending_domains()` reports no seed or
+whitelisted domain, `refill()` re-arms the stalest crawled URLs **from those
+domains only** (`rearm_processed(..., domains=AUTHORITATIVE_DOMAINS)`). `refill()`
+runs on every pass, not only an empty one, so this is checked continuously.
+
+All three stages are bounded by two settings: `REARM_COOLDOWN_SECONDS` (6 h) so
+a URL is not re-fetched on every pass, and `REARM_BATCH_SIZE` (25) so the
+frontier refills gradually. Note that "force re-enqueue the seeds" cannot work
+as written — `enqueue()` rejects URLs already in `pages` or `crawl_queue`, so a
+crawled seed has to be *re-armed*, not inserted again. `crawl_queue.processed_at` records when a URL was finished;
 it is added to an existing table by `ensure_columns()` in `app/database.py`,
 which is how a column introduced after a table was first created gets applied
 without a rebuild.
@@ -456,6 +475,7 @@ and atomic batches are under test. Nothing touches the network.
 | `test_domain_cap_and_description.py` | per-domain cap, page-specific descriptions |
 | `test_classifier_and_language.py` | category and language tagging, search filters |
 | `test_search_ranking.py` | match snippets, title boost, score ordering |
+| `test_queue_fairness.py` | round-robin dequeue, domain-scoped re-arm, write probe |
 
 ## What is not here
 
