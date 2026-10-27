@@ -198,6 +198,44 @@ exists to keep that true.
    milliseconds while the crawl runs behind it. A batch iteration sleeps 2.0 s;
    an empty queue backs off 15.0 s.
 
+## Link discovery
+
+The crawl is recursive: every page that parses feeds its own outbound links
+back into `crawl_queue`, so the frontier refills instead of draining after the
+seeds. The work is split in two, and the split matters:
+
+- **`03_parser_agent.py` extracts.** `extract_links()` returns absolute URLs
+  from `<a href>`, resolving relative hrefs against the page URL, stripping
+  fragments, and dropping `mailto:`, `tel:`, `javascript:`, `data:` and `ftp:`
+  hrefs. It returns at most `MAX_LINKS_PER_PAGE` (40) per page. It does **not**
+  judge crawl scope.
+- **`01_frontier_agent.py` decides.** `filter_links()` applies the one
+  definition of crawl scope, and `normalise_url()` collapses variants of the
+  same page:
+
+| rule | value |
+| --- | --- |
+| scheme | `http` / `https` only |
+| host | the source host, or an authoritative Indian public suffix |
+| path depth | ≤ `MAX_PATH_DEPTH` (2) |
+| extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
+| paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
+| query | tracking keys (`utm_*`, `gclid`, `fbclid`, `ref`, …) dropped, keys sorted |
+| frontier size | capped at `MAX_PENDING_QUEUE` (5,000) pending rows |
+
+`normalise_url()` also removes the fragment, the trailing slash and `www.`, so
+`/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue
+row rather than four.
+
+The orchestrator collects links from every page that parsed — a thin page can
+still point at good ones — and enqueues the aggregate **after** the batch
+commits, so a failed write never grows the frontier. `BatchOutcome.discovered`
+reports how many were added.
+
+Verified with a stubbed site: batch 1 queues 3 links, batch 2 queues 5, batch 3
+indexes the rest and the frontier empties at the depth limit — 9 pages indexed,
+9 queue rows `processed`, none stranded.
+
 ## Upgrading an existing database
 
 The rebuild uses the same table names as the previous backend — `sites`,

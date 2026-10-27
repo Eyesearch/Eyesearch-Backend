@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
+import httpx
+
 from app.agents import load_agent
 from app.engine.config import Settings, get_settings
 from app.engine.store import IndexStore, PageDocument, QueuedUrl
@@ -52,6 +54,7 @@ class BatchOutcome:
     indexed_pages: int = 0
     queue_closed: int = 0
     queue_failed: int = 0
+    discovered: int = 0
     paused: bool = False
     skip_reasons: dict[str, int] = field(default_factory=dict)
     elapsed_ms: int = 0
@@ -70,6 +73,7 @@ class BatchOutcome:
             "indexed_pages": self.indexed_pages,
             "queue_closed": self.queue_closed,
             "queue_failed": self.queue_failed,
+            "discovered": self.discovered,
             "paused": self.paused,
             "skip_reasons": dict(self.skip_reasons),
             "elapsed_ms": self.elapsed_ms,
@@ -79,7 +83,12 @@ class BatchOutcome:
 class Orchestrator:
     """Wires the agents together over one client and one store."""
 
-    def __init__(self, client: LibsqlClient, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        client: LibsqlClient,
+        settings: Settings | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._settings = settings or get_settings()
         self._store = IndexStore(client, self._settings)
         self._guard = StorageGuard(
@@ -87,7 +96,7 @@ class Orchestrator:
             limit=self._settings.storage_page_limit,
             ttl_seconds=self._settings.storage_count_ttl_seconds,
         )
-        self._fetcher = FetcherAgent(self._settings)
+        self._fetcher = FetcherAgent(self._settings, transport=transport)
         self._parser = ParserAgent()
         self._quality = QualityAgent()
         self._indexer = IndexerAgent(self._store, self._guard)
@@ -146,6 +155,7 @@ class Orchestrator:
         documents: list[PageDocument] = []
         queue_ids: list[int] = []
         failed_ids: list[int] = []
+        discovered: list[str] = []
 
         self._quality.reset()
         results = await self._fetcher.fetch_many([item.url for item in queue])
@@ -166,6 +176,12 @@ class Orchestrator:
                 continue
 
             outcome.parsed += 1
+
+            # Every page that parsed contributes its outbound links, whether
+            # or not it passed the gate: a thin page can still point at good
+            # ones. The frontier applies the crawl-scope rules.
+            discovered.extend(self._frontier.filter_links(parsed.links, item.url))
+
             document = PageDocument(
                 url=item.url,
                 domain=item.domain,
@@ -204,14 +220,20 @@ class Orchestrator:
                 outcome.paused = index_outcome.paused
                 logger.warning("batch not persisted: %s", index_outcome.reason)
 
+        if discovered and not outcome.paused:
+            # Queue after the commit, so a failed write never grows the frontier.
+            outcome.discovered = await self._frontier.enqueue(discovered)
+
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
-            "batch done: %d queued, %d fetched, %d accepted, %d rejected, %d indexed (%dms)",
+            "batch done: %d queued, %d fetched, %d accepted, %d rejected, "
+            "%d indexed, %d discovered (%dms)",
             outcome.attempted,
             outcome.fetched,
             outcome.accepted,
             outcome.rejected,
             outcome.indexed_pages,
+            outcome.discovered,
             outcome.elapsed_ms,
         )
         return outcome

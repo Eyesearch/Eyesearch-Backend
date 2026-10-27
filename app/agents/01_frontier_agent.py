@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from app.engine.config import Settings, get_settings
 from app.engine.store import IndexStore, QueuedUrl
@@ -30,6 +30,43 @@ PRIORITY_SUFFIXES: tuple[str, ...] = (
     ".org.in",
     ".co.in",
 )
+
+#: Extensions that are never a page to index.
+JUNK_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tif", ".tiff",
+        ".css", ".js", ".mjs", ".json", ".xml", ".rss", ".atom", ".txt",
+        ".zip", ".gz", ".tar", ".rar", ".7z", ".bz2", ".xz",
+        ".mp3", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".mkv",
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".exe", ".dmg", ".apk", ".msi", ".deb", ".rpm", ".iso",
+        ".map", ".manifest",
+    }
+)
+
+#: Paths that are a form or a session, not a page.
+BLOCKED_PATH_MARKERS: tuple[str, ...] = (
+    "/login", "/signin", "/sign-in", "/signup", "/sign-up", "/logout", "/signout",
+    "/cart", "/checkout", "/basket", "/account", "/wp-admin", "/wp-login",
+    "/search", "/print", "/share", "/rss", "/feed",
+)
+
+#: Query keys that identify a campaign, never a different page.
+TRACKING_PARAMS: frozenset[str] = frozenset(
+    {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "gclid", "fbclid", "mc_cid", "mc_eid", "ref", "referrer", "source",
+        "campaign", "spm", "share", "fbclid", "igshid", "s_kwcid",
+    }
+)
+
+#: How deep below a host root the crawler follows links.
+MAX_PATH_DEPTH = 2
+
+#: Stop queueing new links once this many are waiting, so discovery cannot
+#: grow the frontier faster than the workers drain it.
+MAX_PENDING_QUEUE = 5000
 
 # Domains the crawler starts from when the queue is empty.
 SEED_URLS: tuple[str, ...] = (
@@ -57,6 +94,73 @@ def domain_of(url: str) -> str:
     """The registrable host of a URL, lower-cased and without `www.`."""
     host = (urlparse(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
+
+
+def normalise_url(url: str) -> str | None:
+    """One canonical form per page, or `None` when it is not a page.
+
+    Lower-case host, no `www.`, no fragment, no trailing slash, sorted query
+    keys, tracking parameters removed. Two links that address the same page
+    therefore collapse to one queue row, which is what stops the frontier
+    filling with `?utm_source=` variants of the same URL.
+    """
+    if not url:
+        return None
+
+    parts = urlparse(url.strip())
+    if parts.scheme not in ("http", "https"):
+        return None
+
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+
+    path = parts.path or "/"
+    if len(path) > 1:
+        path = path.rstrip("/")
+
+    query = "&".join(
+        f"{key}={value}"
+        for key, value in sorted(parse_qsl(parts.query, keep_blank_values=True))
+        if key.lower() not in TRACKING_PARAMS
+    )
+
+    port = f":{parts.port}" if parts.port and parts.port not in (80, 443) else ""
+    return urlunparse((parts.scheme, f"{host}{port}", path, "", query, ""))
+
+
+def is_crawlable(url: str) -> bool:
+    """Crawl-scope rules: depth, extension, and form/session paths."""
+    parts = urlparse(url)
+    path = (parts.path or "/").lower()
+
+    if path.endswith(tuple(JUNK_EXTENSIONS)):
+        return False
+
+    depth = len([segment for segment in path.split("/") if segment])
+    if depth > MAX_PATH_DEPTH:
+        return False
+
+    if any(marker in path for marker in BLOCKED_PATH_MARKERS):
+        return False
+
+    # A single unbroken key longer than a URL segment is a session id.
+    if any(len(segment) > 80 for segment in path.split("/")):
+        return False
+
+    return True
+
+
+def in_crawl_scope(url: str, source_host: str) -> bool:
+    """Same host, or an authoritative Indian public domain."""
+    host = domain_of(url)
+    if not host:
+        return False
+    if host == source_host:
+        return True
+    return any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES)
 
 
 def priority_of(url: str) -> int:
@@ -95,6 +199,27 @@ class FrontierAgent:
         if not candidates:
             return 0
 
+        pending = await self.depth()
+        if pending >= MAX_PENDING_QUEUE:
+            logger.debug(
+                "frontier full (%d pending >= %d), dropping %d new URLs",
+                pending,
+                MAX_PENDING_QUEUE,
+                len(candidates),
+            )
+            return 0
+
+        # One call must not overshoot the cap: trim to the room that is left.
+        capacity = MAX_PENDING_QUEUE - pending
+        if len(candidates) > capacity:
+            logger.debug(
+                "frontier near capacity (%d left), keeping %d of %d URLs",
+                capacity,
+                capacity,
+                len(candidates),
+            )
+            candidates = candidates[:capacity]
+
         candidates.sort(key=lambda item: (item.priority, len(item.url), item.url))
         known = await self._store.known_urls([item.url for item in candidates])
         fresh = [item for item in candidates if item.url not in known]
@@ -105,6 +230,38 @@ class FrontierAgent:
         if added:
             logger.info("frontier: queued %d new URLs (depth now %d)", added, await self.depth())
         return added
+
+    def filter_links(self, links: list[str] | tuple[str, ...], source_url: str) -> list[str]:
+        """The subset of a page's links that belongs in the frontier.
+
+        Pure and synchronous: no database, no network. The orchestrator calls
+        this per page and enqueues the aggregate once per batch.
+        """
+        source_host = domain_of(source_url)
+        accepted: list[str] = []
+        seen: set[str] = set()
+
+        for link in links:
+            normalised = normalise_url(link)
+            if not normalised or normalised in seen:
+                continue
+            if normalised == normalise_url(source_url):
+                continue
+            if not is_crawlable(normalised):
+                continue
+            if not in_crawl_scope(normalised, source_host):
+                continue
+            seen.add(normalised)
+            accepted.append(normalised)
+
+        return accepted
+
+    async def discover(self, links: list[str] | tuple[str, ...], source_url: str) -> int:
+        """Filter a page's links and queue the survivors."""
+        candidates = self.filter_links(links, source_url)
+        if not candidates:
+            return 0
+        return await self.enqueue(candidates)
 
     async def next_batch(self, limit: int | None = None) -> list[QueuedUrl]:
         """The next batch of pending URLs, in the order the plan specifies."""
@@ -122,10 +279,18 @@ class FrontierAgent:
 
 
 __all__ = [
+    "BLOCKED_PATH_MARKERS",
     "FrontierAgent",
     "FrontierItem",
+    "JUNK_EXTENSIONS",
+    "MAX_PATH_DEPTH",
+    "MAX_PENDING_QUEUE",
     "PRIORITY_SUFFIXES",
     "SEED_URLS",
+    "TRACKING_PARAMS",
     "domain_of",
+    "in_crawl_scope",
+    "is_crawlable",
+    "normalise_url",
     "priority_of",
 ]
