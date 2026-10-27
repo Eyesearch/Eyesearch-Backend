@@ -288,6 +288,13 @@ async def search(
         description="restrict to one category, e.g. government, education_exams",
     ),
     lang: str | None = Query(default=None, description="restrict to en, hi or kn"),
+    highlight: bool = Query(
+        default=False,
+        description=(
+            "wrap query terms in <b> tags inside snippets; off by default because "
+            "both shipped clients render snippets as plain text and highlight locally"
+        ),
+    ),
 ) -> JSONResponse:
     query = require_query(q)
     service = get_service(request)
@@ -305,6 +312,7 @@ async def search(
                 limit=limit,
                 category=category_filter,
                 language=language_filter,
+                highlight=highlight,
             )
         else:
             payload = await service.search(
@@ -313,6 +321,7 @@ async def search(
                 page=page,
                 category=category_filter,
                 language=language_filter,
+                highlight=highlight,
             )
     except LibsqlError:
         raise

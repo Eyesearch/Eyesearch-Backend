@@ -14,16 +14,19 @@ snippets passed off as our own extract.
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 from app.engine.config import Settings, get_settings
 from app.agents import load_agent
-from app.engine.store import IndexStore, SearchHit
+from app.engine.store import IndexStore, SearchHit, fts_tokens, highlight_terms
 
 CATEGORIES = load_agent("07_classifier_agent").CATEGORIES
 SUPPORTED_LANGUAGES = load_agent("08_language_agent").SUPPORTED_LANGUAGES
@@ -38,6 +41,68 @@ _NEWS_HOSTS = ("thehindu.com", "deccanherald.com", "prajavani.net", "ndtv.com", 
 
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "m.youtube.com")
 _YOUTUBE_ID = re.compile(r"(?:v=|/)([A-Za-z0-9_-]{11})(?:[&?/]|$)")
+
+
+#: How long a search result stays usable, and how many are kept.
+CACHE_TTL_SECONDS = 120.0
+CACHE_MAX_ENTRIES = 1000
+
+
+class SearchCache:
+    """A small TTL cache for search payloads.
+
+    Keyed on everything that changes the answer — query, limit, page, filters,
+    format and whether snippets were highlighted. Entries expire after
+    `ttl_seconds`, and the oldest is dropped once `max_entries` is reached.
+
+    The lock makes this safe if a caller ever runs it off the event loop; under
+    asyncio's single-threaded model it is uncontended and costs a lock acquire.
+    Payloads are copied in and out so a caller mutating a response cannot
+    corrupt the cached copy.
+    """
+
+    def __init__(
+        self,
+        ttl_seconds: float = CACHE_TTL_SECONDS,
+        max_entries: int = CACHE_MAX_ENTRIES,
+        clock=time.monotonic,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._max = max_entries
+        self._clock = clock
+        self._entries: "OrderedDict[tuple, tuple[float, dict[str, Any]]]" = OrderedDict()
+        self._lock = threading.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple) -> dict[str, Any] | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                self.misses += 1
+                return None
+            expires_at, payload = entry
+            if expires_at <= self._clock():
+                del self._entries[key]
+                self.misses += 1
+                return None
+            self.hits += 1
+            return copy.deepcopy(payload)
+
+    def set(self, key: tuple, payload: dict[str, Any]) -> None:
+        with self._lock:
+            self._entries[key] = (self._clock() + self._ttl, copy.deepcopy(payload))
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
 
 
 @dataclass
@@ -118,9 +183,15 @@ def to_result(hit: SearchHit) -> SearchResult:
 class SearchService:
     """Search, suggest and retrieve over the index."""
 
-    def __init__(self, store: IndexStore, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        store: IndexStore,
+        settings: Settings | None = None,
+        cache: SearchCache | None = None,
+    ) -> None:
         self._store = store
         self._settings = settings or get_settings()
+        self.cache = cache if cache is not None else SearchCache()
 
     async def search(
         self,
@@ -129,12 +200,20 @@ class SearchService:
         page: int = 1,
         category: str | None = None,
         language: str | None = None,
+        highlight: bool = False,
     ) -> dict[str, Any]:
         """The `GET /v1/search` payload."""
         started = time.perf_counter()
         size = self._clamp_limit(limit)
         page_number = max(1, min(page, self._settings.search_max_page))
         offset = (page_number - 1) * size
+
+        key = ("cards", query, size, page_number, category, language, highlight)
+        cached = self.cache.get(key)
+        if cached is not None:
+            cached["cache_hit"] = True
+            cached["took_ms"] = 0
+            return cached
 
         hits = await self._store.search(
             query,
@@ -144,21 +223,29 @@ class SearchService:
             language=language,
         )
         results = [to_result(hit).as_dict() for hit in hits]
+
+        if highlight:
+            tokens = fts_tokens(query)
+            for result in results:
+                result["snippet"] = highlight_terms(result["snippet"], tokens)
+
         took_ms = int((time.perf_counter() - started) * 1000)
 
-        return {
+        payload = {
             "query": query,
             "page": page_number,
             "limit": size,
             "total_estimate": len(results),
             "took_ms": took_ms,
             "degraded": False,
-            "cache_hit": True,
+            "cache_hit": False,
             "providers": {SOURCE_LABEL: len(results)},
             "failed_providers": [],
             "filters": {"category": category, "language": language},
             "results": results,
         }
+        self.cache.set(key, payload)
+        return payload
 
     async def search_flat(
         self,
@@ -166,28 +253,42 @@ class SearchService:
         limit: int | None = None,
         category: str | None = None,
         language: str | None = None,
+        highlight: bool = False,
     ) -> dict[str, Any]:
         """The meta-search contract (`format=json`), shaped like the README."""
         started = time.perf_counter()
         size = self._clamp_limit(limit)
+
+        key = ("json", query, size, category, language, highlight)
+        cached = self.cache.get(key)
+        if cached is not None:
+            cached["cache_hit"] = True
+            cached["took_ms"] = 0
+            return cached
+
         hits = await self._store.search(
             query, limit=size, category=category, language=language
         )
-        return {
+        tokens = fts_tokens(query) if highlight else []
+
+        payload = {
             "query": query,
             "total_hits": len(hits),
             "took_ms": int((time.perf_counter() - started) * 1000),
             "source": SOURCE_LABEL,
+            "cache_hit": False,
             "results": [
                 {
                     "title": hit.title or hit.url,
                     "url": hit.url,
-                    "snippet": hit.snippet,
+                    "snippet": highlight_terms(hit.snippet, tokens) if highlight else hit.snippet,
                     "favicon": self._favicon(hit.url),
                 }
                 for hit in hits
             ],
         }
+        self.cache.set(key, payload)
+        return payload
 
     async def suggest(self, query: str, limit: int = 6) -> list[Any]:
         """The OpenSearch suggestions shape: `[query, [completions]]`."""
@@ -274,7 +375,10 @@ class SearchService:
 
 
 __all__ = [
+    "CACHE_MAX_ENTRIES",
+    "CACHE_TTL_SECONDS",
     "CATEGORIES",
+    "SearchCache",
     "SOURCE_LABEL",
     "SUPPORTED_LANGUAGES",
     "SearchResult",

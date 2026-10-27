@@ -15,7 +15,9 @@ number the database confirmed, not a number the caller hoped for.
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
@@ -228,6 +230,42 @@ def passage_around_match(text: str, tokens: Sequence[str], window: int = SNIPPET
     if end < len(cleaned):
         passage = passage + "…"
     return passage
+
+
+def highlight_terms(text: str, tokens: Sequence[str]) -> str:
+    """Wrap query terms in `<b>…</b>`, escaping everything else.
+
+    Both shipped clients render a snippet as plain text and do their own
+    highlighting — the web UI with `<mark>` by splitting text nodes, the Android
+    app with a Spanned string. So this is **off by default** and only applied
+    when a caller asks for it (`?highlight=1`); sending markup unasked would
+    show literal `<b>` tags in both apps.
+
+    The text is untrusted page content, so every segment is HTML-escaped on the
+    way out and only the tags added here are real markup. The scan runs over the
+    original text and escapes as it builds, so a token can never match inside an
+    escaped entity like `&amp;`.
+    """
+    if not text:
+        return text
+
+    unique = sorted({token for token in tokens if token}, key=len, reverse=True)
+    if not unique:
+        return html.escape(text, quote=False)
+
+    pattern = re.compile(
+        r"\b(" + "|".join(re.escape(token) for token in unique) + r")\b",
+        re.IGNORECASE,
+    )
+
+    parts: list[str] = []
+    cursor = 0
+    for match in pattern.finditer(text):
+        parts.append(html.escape(text[cursor : match.start()], quote=False))
+        parts.append(f"<b>{html.escape(match.group(0), quote=False)}</b>")
+        cursor = match.end()
+    parts.append(html.escape(text[cursor:], quote=False))
+    return "".join(parts)
 
 
 def normalise_score(raw: float) -> float:
@@ -707,6 +745,7 @@ __all__ = [
     "MAX_TITLE_TOKENS",
     "SNIPPET_CHAR_CAP",
     "TITLE_MATCH_BOOST",
+    "highlight_terms",
     "passage_around_match",
     "IndexStore",
     "PageDocument",

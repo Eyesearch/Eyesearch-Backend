@@ -356,6 +356,49 @@ correctly and `snippet()` does not. Turso runs a different SQLite that cannot
 be exercised from here, so the window is computed in Python
 (`passage_around_match`) instead: portable, deterministic and covered by tests.
 
+## Sitemap discovery
+
+Waiting to rediscover a domain one link at a time is slow. When the frontier
+falls below `FRONTIER_LOW_WATER` (20 pending), `FrontierAgent.harvest_sitemap()`
+asks one authoritative domain what it publishes: `/sitemap.xml`, then
+`/sitemap_index.xml`.
+
+- A `<loc>` pointing at an `.xml` document is a nested sitemap, not a page, so
+  it is followed once — `SITEMAP_MAX_FETCHES` (3) bounds a whole harvest.
+- Every URL goes through the same `normalise_url()` / `is_crawlable()` /
+  `in_crawl_scope()` rules as a discovered link, capped at
+  `SITEMAP_MAX_URLS_PER_DOMAIN` (100).
+- A missing, blocked, gzipped or malformed sitemap yields an empty list, never
+  an exception; the frontier simply falls back to link discovery.
+- A domain is marked as attempted *before* its sitemap is fetched and is not
+  retried for `SITEMAP_COOLDOWN_SECONDS` (1 h), so a domain without a sitemap
+  costs one request an hour rather than one per pass.
+
+Parsing is a `<loc>` regex rather than a full XML parser: it is the only element
+needed, and it cannot be made to allocate on an unbounded document.
+
+## Search cache
+
+`SearchService` keeps a TTL cache in front of the index: 120 seconds, 1,000
+entries, keyed on `(format, query, limit, page, category, language, highlight)`.
+A hit returns the stored payload with `cache_hit: true` and `took_ms: 0`; a miss
+queries the database and stores the result. Payloads are copied in and out, so a
+caller mutating a response cannot corrupt the cached copy.
+
+Two consequences worth knowing. A newly indexed page can take up to two minutes
+to appear in a repeated query. And the cache is per process — with more than one
+Render instance, each keeps its own.
+
+## Snippet highlighting
+
+`highlight_terms()` wraps query terms in `<b>…</b>`, escaping every other
+segment on the way out so crawled text can never inject markup.
+
+It is **off by default** and enabled with `?highlight=1`. Both shipped clients
+render a snippet as plain text and highlight locally — the web UI wraps terms in
+`<mark>` by splitting text nodes, the Android app uses a Spanned string — so
+server-side tags sent unasked would appear literally as `<b>` in both apps.
+
 ## Classification and language
 
 Both agents run at ingestion, so a query can be narrowed without a backfill of
@@ -476,6 +519,7 @@ and atomic batches are under test. Nothing touches the network.
 | `test_classifier_and_language.py` | category and language tagging, search filters |
 | `test_search_ranking.py` | match snippets, title boost, score ordering |
 | `test_queue_fairness.py` | round-robin dequeue, domain-scoped re-arm, write probe |
+| `test_sitemap_cache_highlight.py` | sitemap discovery, search cache, snippet highlighting |
 
 ## What is not here
 

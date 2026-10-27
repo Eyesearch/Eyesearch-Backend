@@ -113,7 +113,9 @@ class Orchestrator:
         self._classifier = ClassifierAgent()
         self._language = LanguageAgent()
         self._indexer = IndexerAgent(self._store, self._guard)
-        self._frontier = FrontierAgent(self._store, self._settings)
+        self._frontier = FrontierAgent(
+            self._store, self._settings, client=self._fetcher.client
+        )
         self._revalidation = RevalidationAgent(
             self._store,
             self._fetcher,

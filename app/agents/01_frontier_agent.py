@@ -12,8 +12,11 @@ else, and the dequeue query stays a plain `ORDER BY rowid`.
 from __future__ import annotations
 
 import logging
+import re
+import time
 from dataclasses import dataclass
-from urllib.parse import parse_qsl, urlparse, urlunparse
+from typing import Any
+from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from app.engine.config import Settings, get_settings
 from app.engine.store import IndexStore, QueuedUrl
@@ -88,6 +91,27 @@ MAX_PATH_DEPTH = 6
 #: Stop queueing new links once this many are waiting, so discovery cannot
 #: grow the frontier faster than the workers drain it.
 MAX_PENDING_QUEUE = 10000
+
+#: Sitemap locations tried, in order, for a newly encountered domain.
+SITEMAP_PATHS: tuple[str, ...] = ("/sitemap.xml", "/sitemap_index.xml")
+
+#: Never take more than this many URLs from one domain's sitemaps.
+SITEMAP_MAX_URLS_PER_DOMAIN = 100
+
+#: How many documents one harvest may fetch: the sitemap itself plus a couple
+#: of nested sitemaps from an index.
+SITEMAP_MAX_FETCHES = 3
+
+#: Do not re-harvest a domain within this window.
+SITEMAP_COOLDOWN_SECONDS = 3600
+
+#: Harvest a sitemap only when the frontier is below this depth.
+FRONTIER_LOW_WATER = 20
+
+#: `<loc>` is the only element a sitemap or sitemap index needs here, so a
+#: small regex is used rather than pulling in an XML parser for untrusted
+#: documents of unbounded size.
+LOC_PATTERN = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE | re.DOTALL)
 
 # Domains the crawler starts from when the queue is empty.
 SEED_URLS: tuple[str, ...] = (
@@ -211,6 +235,86 @@ AUTHORITATIVE_DOMAINS: tuple[str, ...] = tuple(
 )
 
 
+def parse_sitemap_locs(document: str) -> list[str]:
+    """Every `<loc>` in a sitemap or sitemap index, in document order."""
+    if not document:
+        return []
+    return [match.group(1).strip() for match in LOC_PATTERN.finditer(document)]
+
+
+async def discover_sitemap_urls(
+    base_url: str,
+    client: Any,
+    *,
+    max_urls: int = SITEMAP_MAX_URLS_PER_DOMAIN,
+    max_fetches: int = SITEMAP_MAX_FETCHES,
+) -> list[str]:
+    """Crawlable URLs from a domain's sitemap, bounded and in scope.
+
+    A `sitemap_index.xml` does not list pages, it lists other sitemaps, so a
+    `<loc>` that points at an `.xml` document is followed once (up to
+    `max_fetches` in total) rather than being treated as a page.
+
+    Everything here degrades to an empty list: a missing, blocked, gzipped or
+    malformed sitemap is not an error, it just yields nothing and the frontier
+    falls back to link discovery.
+    """
+    domain = domain_of(base_url)
+    if not domain or client is None:
+        return []
+
+    candidates: list[str] = []
+    fetches = 0
+
+    for path in SITEMAP_PATHS:
+        if fetches >= max_fetches:
+            break
+        try:
+            response = await client.get(urljoin(base_url, path))
+            fetches += 1
+        except Exception as error:  # network shape is the fetcher's problem
+            logger.debug("sitemap fetch failed for %s%s: %s", domain, path, error)
+            continue
+
+        if response.status_code != 200 or not response.text:
+            continue
+
+        for loc in parse_sitemap_locs(response.text):
+            if loc.lower().endswith((".xml", ".xml.gz")):
+                if fetches >= max_fetches:
+                    continue
+                try:
+                    nested = await client.get(loc)
+                    fetches += 1
+                except Exception as error:
+                    logger.debug("nested sitemap fetch failed for %s: %s", loc, error)
+                    continue
+                if nested.status_code == 200 and nested.text:
+                    candidates.extend(parse_sitemap_locs(nested.text))
+            else:
+                candidates.append(loc)
+
+        if candidates:
+            break
+
+    accepted: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalised = normalise_url(candidate)
+        if not normalised or normalised in seen:
+            continue
+        if not is_crawlable(normalised):
+            continue
+        if not in_crawl_scope(normalised, domain):
+            continue
+        seen.add(normalised)
+        accepted.append(normalised)
+        if len(accepted) >= max_urls:
+            break
+
+    return accepted
+
+
 def priority_of(url: str) -> int:
     """Lower sorts first: official public domains, then everything else."""
     return 0 if is_authoritative(domain_of(url)) else 1
@@ -219,9 +323,18 @@ def priority_of(url: str) -> int:
 class FrontierAgent:
     """Reads and writes the crawl frontier."""
 
-    def __init__(self, store: IndexStore, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        store: IndexStore,
+        settings: Settings | None = None,
+        client: Any | None = None,
+    ) -> None:
         self._store = store
         self._settings = settings or get_settings()
+        #: Shared httpx client for sitemap harvesting. Optional so the frontier
+        #: can be exercised without a network.
+        self._client = client
+        self._harvested_at: dict[str, float] = {}
 
     async def enqueue(self, urls: list[str] | tuple[str, ...] | set[str]) -> int:
         """Queue URLs, priority first, skipping anything already known.
@@ -343,6 +456,12 @@ class FrontierAgent:
                 return 0
             return await self._rearm_authoritative()
 
+        # A thin frontier is the moment to ask a domain what it publishes,
+        # rather than waiting to rediscover it one link at a time.
+        harvested = await self.harvest_sitemap()
+        if harvested:
+            return harvested
+
         added = await self.enqueue(SEED_URLS)
         if added:
             return added
@@ -359,6 +478,41 @@ class FrontierAgent:
                 self._settings.rearm_cooldown_seconds,
             )
         return rearmed
+
+    async def harvest_sitemap(self, domains: tuple[str, ...] | None = None) -> int:
+        """Queue URLs from the sitemap of an authoritative domain, once an hour.
+
+        Only runs when the frontier is below `FRONTIER_LOW_WATER` and a client
+        is available. A domain is marked as attempted before its sitemap is
+        fetched, so a domain without one is not retried on every pass.
+        """
+        if self._client is None:
+            return 0
+        if await self.depth() >= FRONTIER_LOW_WATER:
+            return 0
+
+        now = time.monotonic()
+        for domain in domains or AUTHORITATIVE_DOMAINS:
+            # Membership, not a 0.0 default: on a host whose monotonic clock
+            # reads less than the cooldown, every domain would look freshly
+            # harvested and no sitemap would ever be fetched.
+            last = self._harvested_at.get(domain)
+            if last is not None and now - last < SITEMAP_COOLDOWN_SECONDS:
+                continue
+            self._harvested_at[domain] = now
+
+            urls = await discover_sitemap_urls(f"https://{domain}/", self._client)
+            if not urls:
+                logger.debug("sitemap harvest %s: nothing usable", domain)
+                continue
+
+            added = await self.enqueue(urls)
+            if added:
+                logger.info(
+                    "sitemap harvest %s: %d URLs found, %d queued", domain, len(urls), added
+                )
+                return added
+        return 0
 
     async def has_authoritative_pending(self) -> bool:
         """Is any authoritative domain waiting to be crawled?"""
@@ -382,6 +536,14 @@ class FrontierAgent:
 
 __all__ = [
     "AUTHORITATIVE_DOMAINS",
+    "FRONTIER_LOW_WATER",
+    "LOC_PATTERN",
+    "SITEMAP_COOLDOWN_SECONDS",
+    "SITEMAP_MAX_FETCHES",
+    "SITEMAP_MAX_URLS_PER_DOMAIN",
+    "SITEMAP_PATHS",
+    "discover_sitemap_urls",
+    "parse_sitemap_locs",
     "BLOCKED_PATH_MARKERS",
     "FrontierAgent",
     "FrontierItem",
