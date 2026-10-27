@@ -79,5 +79,8 @@ class IndexerAgent:
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
         return await self._store.mark_failed(queue_ids, reason)
 
+    async def mark_skipped(self, queue_ids: Sequence[int], reason: str = "") -> int:
+        return await self._store.mark_skipped(queue_ids, reason)
+
 
 __all__ = ["IndexOutcome", "IndexerAgent"]

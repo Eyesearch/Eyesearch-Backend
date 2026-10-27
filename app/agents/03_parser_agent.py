@@ -24,6 +24,25 @@ BODY_CHAR_CAP = 1000
 TITLE_CHAR_CAP = 200
 DESCRIPTION_CHAR_CAP = 400
 
+#: A meta description shorter than this says nothing useful.
+MIN_DESCRIPTION_CHARS = 20
+
+#: How much body text a rebuilt description borrows.
+DESCRIPTION_SNIPPET_CHARS = 180
+
+#: Openings that mean the description is the site's boilerplate, repeated
+#: verbatim on every subpage — so it identifies nothing about this page.
+GENERIC_DESCRIPTION_PREFIXES: tuple[str, ...] = (
+    "official portal",
+    "official website",
+    "official web site",
+    "welcome to",
+    "home page",
+    "homepage",
+    "this is the official",
+    "government of india",
+)
+
 ELLIPSIS = "…"
 
 #: How many outbound links one page may contribute to the frontier.
@@ -62,6 +81,56 @@ WHITESPACE = re.compile(r"\s+")
 def collapse(text: str) -> str:
     """Collapse every run of whitespace to one space and trim."""
     return WHITESPACE.sub(" ", (text or "").replace("\u00a0", " ")).strip()
+
+
+def snippet_from(text: str, limit: int = DESCRIPTION_SNIPPET_CHARS) -> str:
+    """The first `limit` characters of `text`, cut at a word boundary.
+
+    The ellipsis is only appended when something was actually removed, so a
+    short page does not advertise a truncation that did not happen.
+    """
+    cleaned = collapse(text)
+    if len(cleaned) <= limit:
+        return cleaned
+
+    window = cleaned[:limit]
+    boundary = window.rsplit(" ", 1)[0].rstrip(" ,;:-—")
+    return (boundary or window) + ELLIPSIS
+
+
+def is_generic_description(description: str, title: str) -> bool:
+    """True when the meta description cannot distinguish this page."""
+    cleaned = collapse(description)
+    if len(cleaned) < MIN_DESCRIPTION_CHARS:
+        return True
+
+    lowered = cleaned.lower()
+    if lowered.startswith(GENERIC_DESCRIPTION_PREFIXES):
+        return True
+
+    # A description that only repeats the title adds nothing to it.
+    if title and lowered == collapse(title).lower():
+        return True
+
+    return False
+
+
+def build_description(title: str, meta_description: str, body_text: str) -> str:
+    """A description that is specific to this page.
+
+    Portals often ship one boilerplate meta description across hundreds of
+    subpages, which makes every result card read identically. When the meta
+    description is missing, too short, or generic, the title is combined with
+    the opening of the page's own body text instead.
+    """
+    meta = collapse(meta_description)
+    if meta and not is_generic_description(meta, title):
+        return meta[:DESCRIPTION_CHAR_CAP]
+
+    snippet = snippet_from(body_text)
+    if title and snippet:
+        return f"{title} — {snippet}"[:DESCRIPTION_CHAR_CAP]
+    return (snippet or meta or collapse(title))[:DESCRIPTION_CHAR_CAP]
 
 
 def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
@@ -119,8 +188,8 @@ class ParserAgent:
             tag.decompose()
 
         title = self._title(soup)
-        description = self._description(soup)
         body_text = truncate_body(soup.get_text(" "), self.body_char_cap)
+        description = build_description(title, self._description(soup), body_text)
         links = self.extract_links(soup, url)
 
         if not title and not body_text:
@@ -208,6 +277,12 @@ class ParserAgent:
 __all__ = [
     "BODY_CHAR_CAP",
     "DESCRIPTION_CHAR_CAP",
+    "DESCRIPTION_SNIPPET_CHARS",
+    "GENERIC_DESCRIPTION_PREFIXES",
+    "MIN_DESCRIPTION_CHARS",
+    "build_description",
+    "is_generic_description",
+    "snippet_from",
     "ELLIPSIS",
     "MAX_LINKS_PER_PAGE",
     "SKIP_HREF_PREFIXES",

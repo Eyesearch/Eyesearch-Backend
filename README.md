@@ -259,6 +259,47 @@ When the frontier is dry and nothing is past its cooldown, the worker backs off
 60 s instead of 15 s, so a six-hour cooldown costs 360 wake-ups rather than
 1,440.
 
+## Per-domain page cap
+
+One large portal must not crowd out the rest of the index. `MAX_PAGES_PER_DOMAIN`
+(10 by default) is enforced in `Orchestrator.run_batch`:
+
+- the counts for every domain in the batch are read in **one** query —
+  `SELECT s.domain, COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id
+  WHERE s.domain IN (…) GROUP BY s.domain` — never one per URL;
+- URLs on a domain that is already full are parked as `skipped` **before** any
+  fetch, so a capped domain costs no network request;
+- the count is incremented as pages are accepted, so a domain that fills up
+  part-way through a batch stops at the cap rather than overshooting;
+- discovered links for a capped domain are not added to the frontier at all.
+
+`skipped` is deliberately distinct from `failed`: it is a policy decision, not
+an error, and `rearm_processed()` never revives it. If you raise the cap later,
+those rows stay skipped — clear them deliberately if you want them retried.
+
+Note that `pages` has no `domain` column; the domain is reached through
+`sites`, which is why the count is a join rather than a filter on `pages`.
+
+## Page-specific descriptions
+
+Portals ship one boilerplate meta description across hundreds of subpages, so
+every result card read identically. `build_description()` in
+`03_parser_agent.py` keeps a meta description only when it can distinguish the
+page. It is treated as generic when it is:
+
+- shorter than 20 characters,
+- opening with boilerplate (`official portal`, `official website`, `welcome to`,
+  `home page`, `government of india`, …), or
+- identical to the page title.
+
+Otherwise the description becomes `<title> — <first 180 chars of body>`, cut at
+a word boundary and capped at 400 characters. The ellipsis is appended only
+when text was actually removed, so a short page does not advertise a truncation
+that never happened.
+
+Measured on a stubbed portal whose every subpage carried the same meta
+description: 10 pages indexed, 10 distinct descriptions.
+
 ## Upgrading an existing database
 
 The rebuild uses the same table names as the previous backend — `sites`,

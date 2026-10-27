@@ -265,6 +265,45 @@ class IndexStore:
         )
         return outcome
 
+    async def domain_page_counts(self, domains: Sequence[str]) -> dict[str, int]:
+        """Indexed pages per domain, for the whole batch in one query.
+
+        `pages` has no `domain` column — it is reached through `sites` — and the
+        count is deliberately batched: one query per batch, never one per URL,
+        because a per-URL count would put a database round trip in front of
+        every fetch.
+        """
+        unique = [domain for domain in dict.fromkeys(domains) if domain]
+        if not unique:
+            return {}
+        placeholders = ", ".join("?" for _ in unique)
+        result = await self._client.execute(
+            "SELECT s.domain, COUNT(*) FROM pages p "
+            "JOIN sites s ON s.site_id = p.site_id "
+            f"WHERE s.domain IN ({placeholders}) GROUP BY s.domain",
+            tuple(unique),
+        )
+        return {str(row[0]): int(row[1]) for row in result.rows}
+
+    async def mark_skipped(self, queue_ids: Sequence[int], reason: str = "") -> int:
+        """Park queue rows that are deliberately not crawled.
+
+        Distinct from `failed`: a skipped row is a policy decision (the domain
+        is at its page cap), not an error, and re-arming never revives it.
+        """
+        if not queue_ids:
+            return 0
+        results = await self._client.batch(
+            [
+                ("UPDATE crawl_queue SET status = 'skipped' WHERE rowid = ?", (rowid,))
+                for rowid in queue_ids
+            ]
+        )
+        skipped = sum(1 for result in results if result.rows_affected > 0)
+        if reason:
+            logger.info("marked %d queue rows skipped: %s", skipped, reason)
+        return skipped
+
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
         """Park queue rows that cannot be indexed, so the batch can move on."""
         if not queue_ids:

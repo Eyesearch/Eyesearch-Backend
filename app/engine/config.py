@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     revalidation_stale_after_seconds: int = 7 * 24 * 3600
 
     # --- Search -------------------------------------------------------------
+    #: No domain may hold more than this many indexed pages, so a single
+    #: large portal cannot crowd out the rest of the index.
+    max_pages_per_domain: int = 10
+
     search_default_limit: int = 10
     search_max_limit: int = 50
     search_max_page: int = 20

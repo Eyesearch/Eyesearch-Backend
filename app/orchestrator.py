@@ -59,6 +59,7 @@ class BatchOutcome:
     indexed_pages: int = 0
     queue_closed: int = 0
     queue_failed: int = 0
+    skipped: int = 0
     discovered: int = 0
     paused: bool = False
     skip_reasons: dict[str, int] = field(default_factory=dict)
@@ -78,6 +79,7 @@ class BatchOutcome:
             "indexed_pages": self.indexed_pages,
             "queue_closed": self.queue_closed,
             "queue_failed": self.queue_failed,
+            "skipped": self.skipped,
             "discovered": self.discovered,
             "paused": self.paused,
             "skip_reasons": dict(self.skip_reasons),
@@ -160,12 +162,33 @@ class Orchestrator:
         documents: list[PageDocument] = []
         queue_ids: list[int] = []
         failed_ids: list[int] = []
+        skipped_ids: list[int] = []
         discovered: list[str] = []
 
-        self._quality.reset()
-        results = await self._fetcher.fetch_many([item.url for item in queue])
+        # Per-domain page cap: one count query for the whole batch, and URLs on
+        # a domain that is already full are parked before any fetch happens.
+        cap = self._settings.max_pages_per_domain
+        counts = await self._store.domain_page_counts([item.domain for item in queue])
+        eligible: list[QueuedUrl] = []
+        for item in queue:
+            if counts.get(item.domain, 0) >= cap:
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "domain_cap")
+                skipped_ids.append(item.rowid)
+            else:
+                eligible.append(item)
 
-        for item, result in zip(queue, results):
+        self._quality.reset()
+        results = await self._fetcher.fetch_many([item.url for item in eligible])
+
+        for item, result in zip(eligible, results):
+            # A domain can fill up part-way through a batch.
+            if counts.get(item.domain, 0) >= cap:
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "domain_cap")
+                skipped_ids.append(item.rowid)
+                continue
+
             if not result.ok:
                 outcome.rejected += 1
                 self._tally(outcome.skip_reasons, result.reason or "fetch_failed")
@@ -205,12 +228,18 @@ class Orchestrator:
             document.quality_score = verdict.score
             documents.append(document)
             queue_ids.append(item.rowid)
+            counts[item.domain] = counts.get(item.domain, 0) + 1
 
         outcome.accepted = len(documents)
 
         if failed_ids:
             outcome.queue_failed = await self._indexer.mark_failed(
                 failed_ids, reason="fetch, parse or quality gate rejected the page"
+            )
+
+        if skipped_ids:
+            await self._indexer.mark_skipped(
+                skipped_ids, reason=f"domain reached its {cap}-page cap"
             )
 
         if documents:
@@ -226,17 +255,26 @@ class Orchestrator:
                 logger.warning("batch not persisted: %s", index_outcome.reason)
 
         if discovered and not outcome.paused:
+            # Do not grow the frontier with URLs whose domain is already full.
+            discovered = [
+                url
+                for url in discovered
+                if counts.get(_frontier_module.domain_of(url), 0) < cap
+            ]
+
+        if discovered and not outcome.paused:
             # Queue after the commit, so a failed write never grows the frontier.
             outcome.discovered = await self._frontier.enqueue(discovered)
 
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "batch done: %d queued, %d fetched, %d accepted, %d rejected, "
-            "%d indexed, %d discovered (%dms)",
+            "%d skipped, %d indexed, %d discovered (%dms)",
             outcome.attempted,
             outcome.fetched,
             outcome.accepted,
             outcome.rejected,
+            outcome.skipped,
             outcome.indexed_pages,
             outcome.discovered,
             outcome.elapsed_ms,
