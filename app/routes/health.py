@@ -1,45 +1,30 @@
-"""GET /health and GET /healthz — liveness and dependency status. Never raises."""
+"""GET /health and GET /healthz — fast liveness probe, never touches the database."""
 
 from __future__ import annotations
 
-import logging
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app import database
 from app.config import get_settings
 from app.schemas import HealthResponse
-from app.engine.store import get_store
 from app.services.live_retrieval import provider_states
 
-logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
-
 _STARTED_AT = time.monotonic()
 
 
-def _app():  # pragma: no cover - trivial accessor for request-time state
-    from app.main import app
-
-    return app
-
-
-async def _health() -> HealthResponse:
+def _health_response(request: Request) -> HealthResponse:
+    """Return only cached process state; do not await Turso or worker tasks."""
     cfg = get_settings()
-    try:
-        db_up = await database.ping()
-    except Exception as exc:  # ping already swallows, this is belt and braces
-        logger.warning("health ping error: %s", exc)
-        db_up = False
+    state = request.app.state
+    db_up = bool(getattr(state, "db_ready", False))
     try:
         providers = provider_states()
-    except Exception:  # pragma: no cover - defensive
+    except Exception:
         providers = {}
-    try:
-        index_stats = await get_store().stats() if db_up else {"documents": 0, "backlog": 0}
-    except Exception:  # pragma: no cover - defensive
-        index_stats = {"documents": 0, "backlog": 0}
+    index_stats = getattr(state, "index_stats", None) or {"documents": 0, "backlog": 0}
     target = database.describe_target(cfg)
     return HealthResponse(
         ok=db_up,
@@ -54,22 +39,21 @@ async def _health() -> HealthResponse:
 
 
 @router.get("/health", response_model=HealthResponse, summary="Liveness probe")
-async def health() -> HealthResponse:
-    return await _health()
+async def health(request: Request) -> HealthResponse:
+    return _health_response(request)
 
 
 @router.get("/v1/stats", summary="Live index statistics")
 async def stats() -> dict[str, object]:
-    """Counts read straight from the database on every call — never cached.
+    """Counts read straight from the database on every call — never cached."""
+    from app.engine.store import get_store
 
-    The frontend's "indexed sites" number comes from here, so a stale figure here
-    would hide a stalled ingestion pipeline.
-    """
+    from app.main import app
+
     store = get_store()
     try:
         live = await store.stats()
-    except Exception as exc:
-        logger.warning("stats read failed: %s", exc)
+    except Exception:
         live = {"documents": 0, "sites": 0, "pages": 0, "backlog": 0, "max_payload_bytes": 0}
     try:
         pending_domains = await store.pending_domain_count()
@@ -82,7 +66,7 @@ async def stats() -> dict[str, object]:
     except Exception:
         storage = {"paused": False}
     return {
-        "writable": getattr(app.state, "db_writable", None) if (app := _app()) else None,
+        "writable": getattr(app.state, "db_writable", None),
         "sites": live.get("sites", live.get("documents", 0)),
         "pages": live.get("pages", 0),
         "indexed": live.get("pages", 0),
@@ -101,5 +85,5 @@ async def stats() -> dict[str, object]:
 
 
 @router.get("/healthz", response_model=HealthResponse, summary="Liveness probe (alias)")
-async def healthz() -> HealthResponse:
-    return await _health()
+async def healthz(request: Request) -> HealthResponse:
+    return _health_response(request)

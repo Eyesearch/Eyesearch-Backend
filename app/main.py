@@ -8,6 +8,7 @@ retrieval.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -66,6 +67,102 @@ def _build_http_client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
+async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str, str]) -> None:
+    """Initialize dependencies and workers off the ASGI startup critical path."""
+    if settings.requires_remote_db and not settings.is_remote_db:
+        message = (
+            f"refusing database initialization: environment={settings.environment} but the "
+            f"database is a local file ({target['url']}). Set TURSO_DB_URL/TURSO_DATABASE_URL "
+            "and TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true if intended."
+        )
+        app.state.db_error = message
+        logger.critical(message)
+        return
+
+    # A database outage must not prevent Uvicorn from binding its port. Retry
+    # asynchronously while /health remains a fast liveness response.
+    while not app.state.db_ready:
+        try:
+            await database.connect(settings)
+            await database.initialize_schema()
+            await database.probe()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            app.state.db_error = str(exc)
+            logger.error("database initialization failed; retrying in 15s: %s", exc)
+            await asyncio.sleep(15)
+            continue
+        app.state.db_ready = True
+        app.state.db_error = ""
+        logger.info("database ready (%s): %s", target["kind"], target["url"])
+
+    try:
+        from app.engine.store import get_store
+
+        stats = await get_store().stats()
+        app.state.index_stats = {
+            "documents": int(stats.get("documents", 0)),
+            "backlog": int(stats.get("backlog", 0)),
+        }
+        logger.info(
+            "index: %d documents, %d queued queries (%s)",
+            stats.get("documents", 0), stats.get("backlog", 0), target["url"],
+        )
+    except Exception as exc:
+        logger.warning("index stats unavailable during initialization: %s", exc)
+
+    # These maintenance probes may involve several remote database requests;
+    # they run only after the server is already serving HTTP.
+    try:
+        purged = await database.execute_safe(
+            "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
+            "WHERE COALESCE(kind, 'query') = 'query' AND status = 'pending' "
+            "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
+        )
+        logger.info("startup: blocked backlog queries purged (%s)", type(purged).__name__)
+    except Exception as exc:
+        logger.warning("startup backlog purge failed: %s", exc)
+
+    try:
+        refill = await seed_crawler.refill_frontier()
+        app.state.queue_depth = refill["after"]
+    except Exception as exc:
+        logger.warning("startup frontier refill failed: %s", exc)
+
+    try:
+        probe = await database.verify_database()
+        app.state.db_writable = bool(probe.get("writable"))
+        app.state.db_counts = probe.get("counts", {})
+        if not app.state.db_writable:
+            logger.error(
+                "database is NOT writable (%s) — crawler persistence is unavailable",
+                probe.get("error") or "unknown reason",
+            )
+    except Exception as exc:
+        app.state.db_writable = False
+        logger.error("startup write probe failed: %s", exc)
+
+    try:
+        state = await seed_crawler.coverage()
+        app.state.seed_coverage = state
+        logger.info(
+            "seed coverage: %s sites, %s/%s seed domains; sufficient=%s",
+            state.get("sites"), state.get("covered"), state.get("seed_domains"),
+            state.get("sufficient"),
+        )
+    except Exception as exc:
+        logger.warning("seed coverage check failed: %s", exc)
+
+    # Workers are scheduled only after the ASGI lifespan has yielded and the
+    # database has initialized successfully.
+    revalidate_scheduler.start()
+    revalidate_scheduler.start_backlog_worker()
+    revalidate_scheduler.start_url_queue_worker()
+    revalidate_scheduler.start_seed_crawler(initial_pass=True)
+    revalidate_scheduler.start_discovery_worker()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -73,129 +170,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     target = database.describe_target(settings)
     logger.info(
         "starting %s v%s (%s, db=%s %s)",
-        settings.app_name,
-        settings.app_version,
-        settings.environment,
-        target["kind"],
-        target["url"],
+        settings.app_name, settings.app_version, settings.environment,
+        target["kind"], target["url"],
     )
-
-    # Production must write to Turso. A silent fall back to a local file is the
-    # exact failure this check exists to prevent: search keeps working from the
-    # live providers while the cloud database sees no reads and no writes.
-    if settings.requires_remote_db and not settings.is_remote_db:
-        message = (
-            f"refusing to start: environment={settings.environment} but the database is a "
-            f"local file ({target['url']}). Set TURSO_DB_URL/TURSO_DATABASE_URL and "
-            "TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true if that is genuinely intended."
-        )
-        logger.critical(message)
-        raise RuntimeError(message)
 
     http_client = _build_http_client(settings)
     app.state.http = http_client
     app.state.db_ready = False
     app.state.db_error = ""
-
-    try:
-        await database.connect(settings)
-        await database.initialize_schema()
-        await database.probe()
-        app.state.db_ready = True
-        logger.info("database ready (%s): %s", target["kind"], target["url"])
-    except DatabaseError as exc:
-        app.state.db_error = str(exc)
-        logger.error("database unavailable at startup: %s", exc)
-        if settings.requires_remote_db:
-            # In production, booting without the database means every write is
-            # lost. Fail instead of serving results that are never indexed.
-            raise RuntimeError(f"database unavailable in production: {exc}") from exc
-
-    if app.state.db_ready:
-        try:
-            from app.engine.store import get_store
-
-            stats = await get_store().stats()
-            logger.info(
-                "index: %d documents, %d queued queries (%s)",
-                stats.get("documents", 0),
-                stats.get("backlog", 0),
-                target["url"],
-            )
-        except Exception as exc:
-            logger.warning("index stats unavailable at startup: %s", exc)
-
+    app.state.db_writable = False
+    app.state.db_counts = {}
+    app.state.index_stats = {"documents": 0, "backlog": 0}
+    app.state.queue_depth = 0
+    app.state.seed_coverage = {}
 
     search_service.configure(http_client, settings)
 
-    # Both workers run off the request path, one pass at a time:
-    #   - revalidation keeps indexed pages fresh
-    #   - the backlog worker turns missed queries into indexed documents
-    revalidate_scheduler.start()
-    revalidate_scheduler.start_backlog_worker()
-    # Sitemap URLs must drain even when domain discovery/seed crawling is disabled.
-    revalidate_scheduler.start_url_queue_worker()
-
-    # Autonomous ingestion: the crawler decides for itself whether the index is
-    # covered, and runs in the background. Startup never waits for it, so the
-    # port is bound and /health answers immediately.
-    if app.state.db_ready:
-        # Clear queries that only ever got blocked, then make sure the discovery
-        # queue has work before the workers start.
-        try:
-            purged = await database.execute_safe(
-                "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
-                "WHERE COALESCE(kind, 'query') = 'query' AND status = 'pending' "
-                "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
-            )
-            logger.info("startup: blocked backlog queries purged (%s)", type(purged).__name__)
-        except Exception as exc:
-            logger.warning("startup backlog purge failed: %s", exc)
-
-        try:
-            from app.indexer import crawler as seed_crawler
-
-            refill = await seed_crawler.refill_frontier()
-            app.state.queue_depth = refill["after"]
-        except Exception as exc:
-            logger.warning("startup frontier refill failed: %s", exc)
-
-        # Prove the database is the right one and writable before anything crawls.
-        try:
-            probe = await database.verify_database()
-            app.state.db_writable = bool(probe.get("writable"))
-            app.state.db_counts = probe.get("counts", {})
-            if not app.state.db_writable:
-                logger.error(
-                    "database is NOT writable (%s) — the crawler will run but nothing will "
-                    "persist until TURSO_AUTH_TOKEN/TURSO_DB_URL are corrected",
-                    probe.get("error") or "unknown reason",
-                )
-        except Exception as exc:
-            app.state.db_writable = False
-            logger.error("startup write probe crashed: %s", exc)
-        try:
-            state = await seed_crawler.coverage()
-            app.state.seed_coverage = state
-            if state.get("sufficient"):
-                logger.info(
-                    "seed coverage sufficient: %s sites (threshold %s) — background crawl idle",
-                    state.get("sites"), state.get("threshold"),
-                )
-            else:
-                logger.info(
-                    "seed coverage low: %s sites, %s/%s seed domains — launching background crawl",
-                    state.get("sites"), state.get("covered"), state.get("seed_domains"),
-                )
-        except Exception as exc:
-            logger.warning("seed coverage check failed: %s", exc)
-    revalidate_scheduler.start_seed_crawler(initial_pass=app.state.db_ready)
-    # The discovered-domain queue drains on its own cadence.
-    revalidate_scheduler.start_discovery_worker()
-
+    # Do not await Turso, schema migrations, storage checks, or queue refill
+    # before yielding. Uvicorn can bind the port and Render can probe /health.
+    initializer = asyncio.create_task(
+        _initialize_runtime(app, settings, target), name="eyesearch-runtime-initializer"
+    )
     try:
         yield
     finally:
+        if not initializer.done():
+            initializer.cancel()
+        try:
+            await initializer
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("runtime initializer stopped with an error")
+
         await revalidate_scheduler.stop_discovery_worker()
         await revalidate_scheduler.stop_seed_crawler()
         await revalidate_scheduler.stop_backlog_worker()
@@ -205,7 +212,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await http_client.aclose()
         await database.close()
         logger.info("shutdown complete")
-
 
 def create_app() -> FastAPI:
     settings = get_settings()
