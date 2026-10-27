@@ -129,6 +129,11 @@ class FetcherAgent:
                         )
                     if response.status_code >= 400:
                         last_error = f"http_status:{response.status_code}"
+                        # Missing/invalid pages are not transient. Avoid spending
+                        # another timeout on ordinary 4xx responses, but retry
+                        # server-side 5xx responses once when attempts > 1.
+                        if 400 <= response.status_code < 500:
+                            break
                     else:
                         html = self._read_capped(response)
                         return FetchResult(
@@ -159,11 +164,19 @@ class FetcherAgent:
         except (LookupError, UnicodeDecodeError):
             return raw.decode("utf-8", errors="replace")
 
-    async def fetch_many(self, urls: list[str]) -> list[FetchResult]:
-        """Fetch a batch concurrently, bounded by the semaphore."""
+    async def fetch_many(
+        self, urls: list[str], *, attempts: int = 2
+    ) -> list[FetchResult]:
+        """Fetch a batch concurrently, retrying transient failures once by default.
+
+        Timeouts, connection errors and 5xx responses get one bounded retry.
+        Ordinary 4xx responses and blocked hosts do not.
+        """
         if not urls:
             return []
-        return list(await asyncio.gather(*(self.fetch(url) for url in urls)))
+        return list(
+            await asyncio.gather(*(self.fetch(url, attempts=attempts) for url in urls))
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
