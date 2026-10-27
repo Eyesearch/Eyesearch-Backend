@@ -207,35 +207,32 @@ def start_seed_crawler(settings: EngineSettings | None = None, *, initial_pass: 
 
 
 async def _url_queue_loop(settings: EngineSettings) -> None:
-    """Continuously drain sitemap/frontier URLs with bounded polling frequency."""
+    """Drain crawl_queue using the baseline fetch -> parse -> direct-store path.
+
+    The storage guard is intentionally bypassed in baseline mode: its cached
+    fail-closed state previously could park this worker for minutes without
+    attempting a page write. Actual Turso write/quota errors are logged by the
+    store path and each affected queue row is transitioned to failed.
+    """
     while True:
         try:
-            from app.indexer.guard import storage_paused
-
-            if await storage_paused():
-                await _sleep_logged(
-                    max(300, settings.storage_pause_seconds),
-                    "URL queue worker",
-                    "storage paused",
+            report = await run_url_pass(settings=settings)
+            attempted = int(report.get("attempted", 0) or 0)
+            processed = int(report.get("processed", 0) or 0)
+            failed = int(report.get("failed", 0) or 0)
+            if attempted or failed or report.get("error"):
+                logger.info(
+                    "BASELINE URL queue worker: attempted=%d processed=%d failed=%d error=%s",
+                    attempted, processed, failed, report.get("error", ""),
                 )
-            else:
-                report = await run_url_pass(settings=settings)
-                attempted = int(report.get("attempted", 0) or 0)
-                processed = int(report.get("processed", 0) or 0)
-                failed = int(report.get("failed", 0) or 0)
-                if attempted or failed or report.get("error"):
-                    logger.info("URL queue worker: %s", report)
-                if report.get("error") and not attempted:
-                    # Poll failures need a longer cooldown before another Turso request.
-                    await asyncio.sleep(15.0)
+            if report.get("error") and not attempted:
+                await asyncio.sleep(15.0)
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Include traceback and exact exception; never retry in a tight loop.
-            logger.exception("URL queue worker iteration failed")
+            logger.exception("BASELINE URL queue worker iteration failed")
             await asyncio.sleep(15.0)
         finally:
-            # Mandatory throttle for every iteration, including empty and failed batches.
             await asyncio.sleep(URL_BATCH_THROTTLE_SECONDS)
 
 
