@@ -13,6 +13,7 @@ import time
 import httpx
 import pytest
 
+from app.engine.config import Settings
 from app.engine.store import IndexStore, PageDocument
 
 from app.libsql_http import (
@@ -52,6 +53,11 @@ async def test_limiter_serialises_concurrent_callers():
 async def test_limiter_default_is_two_requests_per_second():
     limiter = ProcessRateLimiter()
     assert limiter.interval_seconds == 0.5
+
+
+def test_runtime_settings_use_a_ten_requests_per_second_default():
+    settings = Settings(_env_file=None, environment="test")
+    assert settings.libsql_min_interval_seconds == 0.1
 
 
 def test_limiter_rejects_a_negative_interval():
