@@ -133,6 +133,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     #   - the backlog worker turns missed queries into indexed documents
     revalidate_scheduler.start()
     revalidate_scheduler.start_backlog_worker()
+    # Sitemap URLs must drain even when domain discovery/seed crawling is disabled.
+    revalidate_scheduler.start_url_queue_worker()
 
     # Autonomous ingestion: the crawler decides for itself whether the index is
     # covered, and runs in the background. Startup never waits for it, so the
@@ -197,6 +199,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await revalidate_scheduler.stop_discovery_worker()
         await revalidate_scheduler.stop_seed_crawler()
         await revalidate_scheduler.stop_backlog_worker()
+        await revalidate_scheduler.stop_url_queue_worker()
         await revalidate_scheduler.stop()
         await search_service.drain_background_writes()
         await http_client.aclose()
