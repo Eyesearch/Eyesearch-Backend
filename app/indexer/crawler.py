@@ -36,7 +36,6 @@ from app.engine.store import get_store
 from app.engine.text import (
     ExtractedDocument,
     detect_language,
-    extract_document_with_reason,
     extract_links,
     fallback_document,
     normalise_whitespace,
@@ -393,23 +392,32 @@ async def run_url_pass(
 
                 # replace_documents marks the queue row processed in the same
                 # Turso batch as the page write. Confirm it instead of assuming.
-                check = database._normalise_result(
-                    await database._execute(
-                        "SELECT status FROM crawl_queue WHERE rowid = ?",
-                        [row_id],
+                try:
+                    check = database._normalise_result(
+                        await database._execute(
+                            "SELECT status FROM crawl_queue WHERE rowid = ?",
+                            [row_id],
+                        )
                     )
-                )
-                check_rows = list(getattr(check, "rows", ()) or ())
-                queue_status = str(check_rows[0][0]) if check_rows else "missing"
-                if queue_status != "processed":
+                    check_rows = list(getattr(check, "rows", ()) or ())
+                    queue_status = str(check_rows[0][0]) if check_rows else "missing"
+                except Exception:
+                    # The page write and processed transition were in one atomic
+                    # batch. A failed follow-up read must not reverse that success.
+                    queue_status = "verification-unavailable"
+                    logger.exception(
+                        "page write committed for rowid=%s but queue status verification failed",
+                        row_id,
+                    )
+                if queue_status not in ("processed", "verification-unavailable"):
                     raise RuntimeError(
                         f"page write returned {pages} but queue status is {queue_status!r}"
                     )
 
                 report["processed"] = int(report["processed"]) + 1
                 logger.info(
-                    "BASELINE DB COMMIT SUCCESS rowid=%s url=%s pages=%s queue_status=processed",
-                    row_id, raw_url, pages,
+                    "BASELINE DB COMMIT SUCCESS rowid=%s url=%s pages=%s queue_status=%s",
+                    row_id, raw_url, pages, queue_status,
                 )
             except asyncio.CancelledError:
                 raise
