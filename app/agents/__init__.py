@@ -1,62 +1,33 @@
-"""The six pipeline agents, addressed by number.
+"""The six pipeline agents.
 
-The directories are numbered for reading order, which makes them awkward to
-import with normal syntax; this module resolves them with `importlib` so callers
-can simply write `from app.agents import FrontierAgent`.
+Each agent is a numbered module — `01_frontier_agent` … `06_revalidation_agent`
+— matching the brief's file names. Python cannot import a module whose name
+starts with a digit using `import` syntax, so the modules are reached through
+`load_agent()` here, which uses the import machinery's string form.
+
+Nothing in this package imports the agents at import time: that keeps
+`from app.agents import load_agent` free of circular imports, since every agent
+module can then import this package safely.
 """
 
 from __future__ import annotations
 
 from importlib import import_module
+from types import ModuleType
 
-_frontier = import_module("app.agents.01_frontier_agent.agent")
-_frontier_config = import_module("app.agents.01_frontier_agent.config")
-_fetcher = import_module("app.agents.02_fetcher_agent.agent")
-_parser = import_module("app.agents.03_parser_agent.agent")
-_quality = import_module("app.agents.04_quality_agent.agent")
-_indexer = import_module("app.agents.05_indexer_agent.agent")
-_semantic = import_module("app.agents.06_semantic_ai_agent.agent")
-_restrictions = import_module("app.agents.02_fetcher_agent.restrictions")
-_headers = import_module("app.agents.02_fetcher_agent.headers")
+__all__ = ["AGENT_MODULES", "load_agent"]
 
-FrontierAgent = _frontier.FrontierAgent
-FrontierConfig = _frontier_config.FrontierConfig
-FetcherAgent = _fetcher.FetcherAgent
-FetchResult = _fetcher.FetchResult
-ParserAgent = _parser.ParserAgent
-ParseResult = _parser.ParseResult
-QualityAgent = _quality.QualityAgent
-QualityVerdict = _quality.QualityVerdict
-IndexerAgent = _indexer.IndexerAgent
-SemanticAIAgent = _semantic.SemanticAIAgent
-SemanticResult = _semantic.SemanticResult
-is_restricted_host = _restrictions.is_restricted
-mark_restricted_host = _restrictions.mark_restricted
-browser_headers_for = _headers.headers_for
-
-AGENTS = (
-    "frontier",
-    "fetcher",
-    "parser",
-    "quality",
-    "indexer",
-    "semantic",
+#: Every agent module, in pipeline order.
+AGENT_MODULES: tuple[str, ...] = (
+    "01_frontier_agent",
+    "02_fetcher_agent",
+    "03_parser_agent",
+    "04_quality_agent",
+    "05_indexer_agent",
+    "06_revalidation_agent",
 )
 
-__all__ = [
-    "AGENTS",
-    "FrontierAgent",
-    "FrontierConfig",
-    "FetcherAgent",
-    "FetchResult",
-    "ParserAgent",
-    "ParseResult",
-    "QualityAgent",
-    "QualityVerdict",
-    "IndexerAgent",
-    "SemanticAIAgent",
-    "SemanticResult",
-    "browser_headers_for",
-    "is_restricted_host",
-    "mark_restricted_host",
-]
+
+def load_agent(name: str) -> ModuleType:
+    """Import one numbered agent module by its file name."""
+    return import_module(f"{__name__}.{name}")

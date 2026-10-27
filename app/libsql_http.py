@@ -1,395 +1,398 @@
-"""A Turso/LibSQL HTTP client with parsing we control.
+"""The one path to the database.
 
-`libsql_client`'s HTTP backend indexes the parsed JSON with `response["result"]`.
-Turso answers the pipeline endpoint with `{"results": [...]}` — a list of step
-objects — so that index raises `KeyError: 'result'` and every read and write to
-`crawl_backlog` silently returned nothing.
+Two things live here:
 
-This module speaks the v2 pipeline protocol directly and normalises every shape
-we have seen in the wild:
+* `ProcessRateLimiter` — a single process-wide throttle so the crawler, the
+  revalidation worker and the search path together never exceed two Turso
+  requests per second. Turso bills and throttles per request; without one
+  shared limiter each worker keeps its own idea of "politeness" and the sum of
+  them is a request storm.
+* `TursoHttpClient` — a small client for Turso's `/v2/pipeline` endpoint that
+  checks every step. Turso answers HTTP 200 with a per-step error object, so a
+  client that only looks at the status code reports success for a write that
+  never happened.
 
-    {"results": [{"type": "ok", "response": {"type": "execute", "result": {...}}}]}
-    {"result": {"cols": [...], "rows": [...]}}          # single execute
-    {"results": [{"cols": [...], "rows": [...]}]}       # plain list
-    {"type": "ok", "response": {"type": "execute", "result": {...}}}   # one step
-
-Rows arrive as `{"type": "text", "value": "..."}` cells, which are decoded to
-Python values. A statement with no rows (INSERT, UPDATE) simply yields an empty
-result — success is not an error.
+A `LocalSqliteClient` with the same interface backs `file:` URLs and the test
+suite, so the whole application can run without a network.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import sqlite3
 import time
-from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Protocol, Sequence
 
 import httpx
 
-from app.errors import DatabaseError
+from app.engine.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
+# A statement plus its bound arguments, in the shape both clients accept.
+Statement = tuple[str, Sequence[Any]]
+
+
+class LibsqlError(RuntimeError):
+    """A statement the database refused.
+
+    The message always carries the failing SQL, because "constraint failed"
+    without the statement is not something an operator can act on.
+    """
+
+
+class DatabaseUnavailable(LibsqlError):
+    """The database could not be reached at all."""
+
+
+@dataclass
+class ResultSet:
+    """One statement's outcome."""
+
+    columns: list[str] = field(default_factory=list)
+    rows: list[list[Any]] = field(default_factory=list)
+    rows_affected: int = 0
+
+    def first(self) -> list[Any] | None:
+        return self.rows[0] if self.rows else None
+
+    def scalar(self, default: Any = None) -> Any:
+        row = self.first()
+        if row is None or not row:
+            return default
+        return row[0]
+
+    def dicts(self) -> list[dict[str, Any]]:
+        return [dict(zip(self.columns, row)) for row in self.rows]
+
+
+class LibsqlClient(Protocol):
+    """What the rest of the application is allowed to assume about a database."""
+
+    async def execute(self, sql: str, args: Sequence[Any] = ()) -> ResultSet: ...
+
+    async def batch(self, statements: Sequence[Statement]) -> list[ResultSet]: ...
+
+    async def close(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+
 
 class ProcessRateLimiter:
-    """Process-wide minimum interval between outbound HTTP request starts."""
+    """Serialises every database call to at most `1 / interval` per second.
+
+    A single lock and a single timestamp, shared by everything that touches the
+    database, so the limit is a property of the process rather than of each
+    caller. `interval_seconds=0.5` is the two-requests-per-second ceiling.
+    """
 
     def __init__(self, interval_seconds: float = 0.5) -> None:
-        if interval_seconds <= 0:
-            raise ValueError("interval_seconds must be positive")
+        if interval_seconds < 0:
+            raise ValueError("interval_seconds must not be negative")
         self.interval_seconds = float(interval_seconds)
         self._lock = asyncio.Lock()
-        self._next_start = 0.0
+        self._last_call = 0.0
+        self._calls = 0
+
+    @property
+    def calls(self) -> int:
+        """How many calls have passed through this limiter."""
+        return self._calls
 
     async def acquire(self) -> None:
+        """Wait until the next call is allowed, then claim the slot."""
         async with self._lock:
-            delay = self._next_start - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            self._next_start = time.monotonic() + self.interval_seconds
+            now = time.monotonic()
+            if self._last_call:
+                wait_for = self.interval_seconds - (now - self._last_call)
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
+                    now = time.monotonic()
+            self._last_call = now
+            self._calls += 1
+
+    # `wait` is the name used at the call sites; keep both spellings working.
+    async def wait(self) -> None:
+        await self.acquire()
 
 
-_HTTP_RATE_LIMITER = ProcessRateLimiter(interval_seconds=0.5)
+# ---------------------------------------------------------------------------
+# Turso over HTTP
+# ---------------------------------------------------------------------------
+
+_NULL = {"type": "null"}
 
 
-def _iter_pipeline_errors(payload: Any):
-    """Yield nested Hrana step errors, including errors inside batch results."""
-    if isinstance(payload, dict):
-        if payload.get("type") == "error":
-            yield payload
-            return
-        for value in payload.values():
-            yield from _iter_pipeline_errors(value)
-    elif isinstance(payload, (list, tuple)):
-        for value in payload:
-            yield from _iter_pipeline_errors(value)
-
-
-@dataclass(slots=True)
-class ResultSet:
-    """The shape the rest of the app reads: `.rows` and `.columns`."""
-
-    rows: tuple[tuple[Any, ...], ...] = ()
-    columns: tuple[str, ...] = ()
-
-
-def _decode_value(cell: Any) -> Any:
-    """Decode one Hrana/Turso cell into a Python value."""
-    if cell is None:
-        return None
-    if isinstance(cell, dict):
-        kind = cell.get("type")
-        if kind == "null":
-            return None
-        if kind == "blob":
-            import base64
-
-            raw = cell.get("base64")
-            return base64.b64decode(raw) if raw else None
-        value = cell.get("value")
-        if kind == "integer":
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                return value
-        if kind == "float":
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return value
-        return value
-    if isinstance(cell, (list, tuple)):
-        return tuple(_decode_value(item) for item in cell)
-    return cell
-
-
-def _columns_of(payload: dict[str, Any]) -> tuple[str, ...]:
-    cols = payload.get("cols") or payload.get("columns") or ()
-    names: list[str] = []
-    for col in cols:
-        if isinstance(col, dict):
-            names.append(str(col.get("name") or ""))
-        else:
-            names.append(str(col))
-    return tuple(names)
-
-
-def _rows_of(payload: dict[str, Any]) -> tuple[tuple[Any, ...], ...]:
-    rows = payload.get("rows") or ()
-    decoded: list[tuple[Any, ...]] = []
-    for row in rows:
-        if isinstance(row, dict) and "value" in row and "type" in row:
-            decoded.append((_decode_value(row),))
-        elif isinstance(row, (list, tuple)):
-            decoded.append(tuple(_decode_value(cell) for cell in row))
-        else:
-            decoded.append((_decode_value(row),))
-    return tuple(decoded)
-
-
-def _result_from_payload(payload: Any) -> ResultSet:
-    """Best-effort extraction from any response shape we have seen."""
-    if payload is None:
-        return ResultSet()
-    if isinstance(payload, ResultSet):
-        return payload
-    if not isinstance(payload, dict):
-        return ResultSet()
-
-    # a step object: {"type": "ok", "response": {...}}
-    if "response" in payload and isinstance(payload["response"], dict):
-        return _result_from_payload(payload["response"])
-
-    # a step that failed
-    if payload.get("type") == "error":
-        error = payload.get("error") or {}
-        raise DatabaseError(f"libsql step failed: {error.get('message') or error}")
-
-    # a container holding one or more results
-    if "results" in payload:
-        results = payload["results"]
-        if isinstance(results, list):
-            first = results[0] if results else None
-            if first is None:
-                return ResultSet()
-            merged_rows: list[tuple[Any, ...]] = []
-            columns: tuple[str, ...] = ()
-            for step in results:
-                extracted = _result_from_payload(step)
-                if extracted.columns and not columns:
-                    columns = extracted.columns
-                merged_rows.extend(extracted.rows)
-            return ResultSet(rows=tuple(merged_rows), columns=columns)
-        return _result_from_payload(results)
-
-    # the actual execute result
-    if "result" in payload:
-        return _result_from_payload(payload["result"])
-
-    if "cols" in payload or "columns" in payload or "rows" in payload:
-        return ResultSet(rows=_rows_of(payload), columns=_columns_of(payload))
-
-    return ResultSet()
-
-
-def parse_pipeline_response(payload: Any) -> list[ResultSet]:
-    """Parse a v2 pipeline response into one ResultSet per request."""
-    if not isinstance(payload, dict):
-        return [ResultSet()]
-    steps = payload.get("results")
-    if not isinstance(steps, list):
-        return [_result_from_payload(payload)]
-    if not steps:
-        return [ResultSet()]  # an empty pipeline is "no rows", not an error
-    return [_result_from_payload(step) for step in steps]
-
-
-def _encode_arg(value: Any) -> dict[str, Any]:
+def encode_arg(value: Any) -> dict[str, Any]:
+    """Encode a Python value as a Hrana typed value."""
     if value is None:
-        return {"type": "null"}
+        return dict(_NULL)
     if isinstance(value, bool):
-        return {"type": "integer", "value": str(int(value))}
+        return {"type": "integer", "value": "1" if value else "0"}
     if isinstance(value, int):
         return {"type": "integer", "value": str(value)}
     if isinstance(value, float):
-        return {"type": "float", "value": value}
-    if isinstance(value, (bytes, bytearray)):
-        import base64
-
-        return {"type": "blob", "base64": base64.b64encode(bytes(value)).decode()}
+        return {"type": "float", "value": repr(value)}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"type": "blob", "base64": base64.b64encode(bytes(value)).decode("ascii")}
     return {"type": "text", "value": str(value)}
 
 
-class TursoHTTPClient:
-    """Minimal async client for the Turso HTTP v2 pipeline."""
+def decode_cell(cell: Any) -> Any:
+    """Decode a Hrana typed value into a Python value."""
+    if not isinstance(cell, dict):
+        return cell
+    kind = cell.get("type")
+    if kind == "null":
+        return None
+    if kind == "integer":
+        raw = cell.get("value")
+        return int(raw) if raw is not None else None
+    if kind == "float":
+        raw = cell.get("value")
+        return float(raw) if raw is not None else None
+    if kind == "blob":
+        raw = cell.get("base64") or ""
+        return base64.b64decode(raw)
+    if kind == "text":
+        return cell.get("value")
+    return cell.get("value")
+
+
+def rewrite_scheme(url: str) -> str:
+    """Map libSQL schemes onto the HTTP client Turso actually accepts.
+
+    `libsql://`, `ws://` and `wss://` all select a WebSocket backend in most
+    clients, and Turso's Hrana endpoint rejects those with a 400. The pipeline
+    endpoint is plain HTTPS.
+    """
+    url = url.strip()
+    for prefix, replacement in (
+        ("libsql://", "https://"),
+        ("wss://", "https://"),
+        ("ws://", "http://"),
+    ):
+        if url.startswith(prefix):
+            return replacement + url[len(prefix) :]
+    return url
+
+
+class TursoHttpClient:
+    """A minimal, strict client for Turso's Hrana-over-HTTP pipeline."""
 
     def __init__(
         self,
         url: str,
+        token: str = "",
         *,
-        auth_token: str | None = None,
-        timeout: float = 10.0,
+        limiter: ProcessRateLimiter | None = None,
+        timeout: float = 20.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        base = url.rstrip("/")
-        for suffix in ("/v2/pipeline", "/v1/pipeline", "/v2", "/v1"):
-            if base.endswith(suffix):
-                base = base[: -len(suffix)]
-                break
-        self._base = base
-        self._token = auth_token
-        self._timeout = timeout
-        self._transport = transport
-        self._client: httpx.AsyncClient | None = None
-        self.last_errors: list[str] = []
-
-    @property
-    def endpoint(self) -> str:
-        return f"{self._base}/v2/pipeline"
+        if not url:
+            raise ValueError("a Turso database URL is required")
+        self.base_url = rewrite_scheme(url).rstrip("/")
+        self.token = token
+        self.limiter = limiter or ProcessRateLimiter(0.5)
+        self._client = httpx.AsyncClient(
+            timeout=timeout,
+            transport=transport,
+            headers=self._headers(),
+        )
 
     def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
+        headers = {"content-type": "application/json"}
+        if self.token:
+            headers["authorization"] = f"Bearer {self.token}"
         return headers
 
-    # Statement-type counters, so "hundreds of POSTs, no writes" is answerable
-    # from the log instead of by inference.
-    _COUNTS: dict[str, int] = {}
-    _TOTAL = 0
-    _strict: bool = True
-    last_errors: list[str]
+    async def execute(self, sql: str, args: Sequence[Any] = ()) -> ResultSet:
+        results = await self.batch([(sql, args)])
+        return results[0]
 
-    @classmethod
-    def _record(cls, requests: list[dict[str, Any]]) -> None:
-        heads: list[str] = []
-        for request in requests:
-            sql = str(request.get("stmt", {}).get("sql", "")).strip()
-            verb = sql.split()[0].upper() if sql else "?"
-            cls._COUNTS[verb] = cls._COUNTS.get(verb, 0) + 1
-            cls._TOTAL += 1
-            heads.append(sql.splitlines()[0][:60])
-        logger.debug("pipeline execute: %s", heads)
-        if cls._TOTAL % 50 < len(requests):
-            logger.debug("statements so far: %s", dict(sorted(cls._COUNTS.items())))
+    async def batch(self, statements: Sequence[Statement]) -> list[ResultSet]:
+        """Run statements in order in one request and check every one of them."""
+        if not statements:
+            return []
 
-    async def _post(self, requests: list[dict[str, Any]]) -> list[ResultSet]:
-        self._record(requests)
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout, transport=self._transport)
-        try:
-            await _HTTP_RATE_LIMITER.acquire()
-            response = await self._client.post(
-                self.endpoint, json={"requests": requests}, headers=self._headers()
-            )
-        except Exception as exc:
-            raise DatabaseError(f"libsql http request failed: {exc}") from exc
-
-        if response.status_code >= 400:
-            body = response.text[:300]
-            raise DatabaseError(f"libsql http {response.status_code}: {body}")
-
-        try:
-            payload = response.json()
-        except Exception as exc:
-            raise DatabaseError(f"libsql http returned non-JSON: {response.text[:200]}") from exc
-
-        self.last_errors = []
-        steps = payload.get("results") if isinstance(payload, dict) else None
-        # Turso answers 200 OK even when a statement inside the batch failed, so
-        # every step has to be inspected. This is the difference between "the
-        # request succeeded" and "the row was written".
-        if isinstance(steps, list):
-            for index, step in enumerate(steps):
-                for failed_step in _iter_pipeline_errors(step):
-                    error = failed_step.get("error") or {}
-                    sql = ""
-                    if index < len(requests):
-                        request = requests[index]
-                        stmt = request.get("stmt", {})
-                        if not stmt and isinstance(request.get("batch"), dict):
-                            batch_steps = request["batch"].get("steps") or []
-                            if batch_steps:
-                                stmt = batch_steps[0].get("stmt", {})
-                        sql = str(stmt.get("sql", "")).strip().splitlines()[0][:120] if stmt else ""
-                    message = (
-                        f"libsql step {index} failed: {error.get('message') or error} "
-                        f"(statement: {sql})"
-                    )
-                    self.last_errors.append(message)
-                    if getattr(self, "_strict", True):
-                        raise DatabaseError(message)
-                    logger.error("%s", message)
-        return parse_pipeline_response(payload)
-
-    async def execute(self, sql: str, params: Sequence[Any] | None = None) -> ResultSet:
-        requests = [
-            {
-                "type": "execute",
-                "stmt": {
-                    "sql": sql,
-                    "args": [_encode_arg(value) for value in (params or [])],
-                },
-            }
-        ]
-        results = await self._post(requests)
-        return results[0] if results else ResultSet()
-
-    async def batch(
-        self,
-        statements: Iterable[Any],
-        *,
-        strict: bool = True,
-    ) -> list[ResultSet]:
-        """Run `[(sql, params), ...]` in one pipeline round trip.
-
-        With `strict=False` a failing step does not discard the whole response:
-        the successful steps are still returned and the caller decides what to do
-        with the errors (see `last_errors`). Each `execute` step is its own
-        implicit transaction, so a later failure cannot undo an earlier commit —
-        but a caller that throws the response away would never know that.
-        """
-        requests: list[dict[str, Any]] = []
-        for statement in statements:
-            if isinstance(statement, (list, tuple)) and len(statement) == 2:
-                sql, params = statement
-            else:
-                sql, params = statement, []
-            requests.append(
+        payload = {
+            "requests": [
                 {
                     "type": "execute",
                     "stmt": {
-                        "sql": str(sql),
-                        "args": [_encode_arg(value) for value in (params or [])],
+                        "sql": sql,
+                        "args": [encode_arg(value) for value in args],
                     },
+                    "want_rows": True,
                 }
-            )
-        if not requests:
-            return []
-        self._strict = strict
-        try:
-            return await self._post(requests)
-        finally:
-            self._strict = True
-
-    async def batch_atomic(self, statements: Iterable[Any]) -> list[ResultSet]:
-        """Execute statements in one Hrana write batch; raise on any failed step."""
-        steps: list[dict[str, Any]] = []
-        for statement in statements:
-            if isinstance(statement, (list, tuple)) and len(statement) == 2:
-                sql, params = statement
-            else:
-                sql, params = statement, []
-            steps.append({
-                "stmt": {
-                    "sql": str(sql),
-                    "args": [_encode_arg(value) for value in (params or [])],
-                }
-            })
-        if not steps:
-            return []
-        request = {
-            "type": "batch",
-            "batch": {"steps": steps, "mode": "write"},
+                for sql, args in statements
+            ]
         }
-        previous_strict = self._strict
-        self._strict = True
+
+        await self.limiter.acquire()
         try:
-            return await self._post([request])
-        finally:
-            self._strict = previous_strict
+            response = await self._client.post(f"{self.base_url}/v2/pipeline", json=payload)
+        except httpx.HTTPError as error:
+            raise DatabaseUnavailable(f"Turso request failed: {error}") from error
+
+        if response.status_code >= 400:
+            raise DatabaseUnavailable(
+                f"Turso answered HTTP {response.status_code}: {response.text[:300]}"
+            )
+
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise DatabaseUnavailable("Turso returned a non-JSON body") from error
+
+        if "error" in body and body["error"]:
+            raise LibsqlError(f"Turso rejected the pipeline: {body['error']}")
+
+        steps = body.get("results") or []
+        if len(steps) != len(statements):
+            raise LibsqlError(
+                f"Turso returned {len(steps)} results for {len(statements)} statements"
+            )
+
+        results: list[ResultSet] = []
+        for index, (step, (sql, _args)) in enumerate(zip(steps, statements)):
+            results.append(self._decode_step(step, index, sql))
+        return results
+
+    @staticmethod
+    def _decode_step(step: dict[str, Any], index: int, sql: str) -> ResultSet:
+        if step.get("type") == "error":
+            error = step.get("error") or {}
+            raise LibsqlError(
+                f"libsql step {index} failed: {error.get('message', 'unknown error')} "
+                f"(statement: {sql})"
+            )
+
+        response = step.get("response") or {}
+        if response.get("type") == "error":
+            error = response.get("error") or {}
+            raise LibsqlError(
+                f"libsql step {index} failed: {error.get('message', 'unknown error')} "
+                f"(statement: {sql})"
+            )
+
+        result = response.get("result") or {}
+        columns = [column.get("name", "") for column in result.get("cols") or []]
+        rows = [[decode_cell(cell) for cell in row] for row in result.get("rows") or []]
+        affected = int(result.get("affected_row_count") or 0)
+        return ResultSet(columns=columns, rows=rows, rows_affected=affected)
 
     async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        await self._client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Local SQLite
+# ---------------------------------------------------------------------------
+
+
+class LocalSqliteClient:
+    """The same interface over the standard library, for local runs and tests."""
+
+    def __init__(self, path: str = ":memory:") -> None:
+        self.path = path
+        self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        self._connection.row_factory = None
+        self._lock = asyncio.Lock()
+        self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA foreign_keys=ON")
+
+    async def execute(self, sql: str, args: Sequence[Any] = ()) -> ResultSet:
+        results = await self.batch([(sql, args)])
+        return results[0]
+
+    async def batch(self, statements: Sequence[Statement]) -> list[ResultSet]:
+        if not statements:
+            return []
+        async with self._lock:
+            return await asyncio.to_thread(self._run, list(statements))
+
+    def _run(self, statements: list[Statement]) -> list[ResultSet]:
+        results: list[ResultSet] = []
+        for sql, args in statements:
+            try:
+                cursor = self._connection.execute(sql, tuple(args))
+                columns = [description[0] for description in cursor.description or []]
+                rows = [list(row) for row in cursor.fetchall()] if cursor.description else []
+                results.append(
+                    ResultSet(
+                        columns=columns,
+                        rows=rows,
+                        rows_affected=cursor.rowcount if cursor.rowcount > 0 else 0,
+                    )
+                )
+            except sqlite3.Error as error:
+                raise LibsqlError(f"sqlite failed: {error} (statement: {sql})") from error
+        return results
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._connection.close)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+
+def build_client(settings: Settings | None = None) -> LibsqlClient:
+    """Build the client the configured URL asks for, or refuse to guess."""
+    settings = settings or get_settings()
+    url = settings.database_url
+
+    if not url or url.startswith("file:"):
+        if settings.is_production and not settings.allow_local_db:
+            raise DatabaseUnavailable(
+                "refusing to start: no remote database configured. Set "
+                "TURSO_DB_URL and TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true "
+                "if a local file is genuinely intended."
+            )
+        path = url[len("file:") :] if url.startswith("file:") else settings.local_db_path
+        path = path or ":memory:"
+        logger.warning(
+            "Connected to LOCAL SQLite: %s — this is not the Turso cloud database", path
+        )
+        return LocalSqliteClient(path)
+
+    if not settings.turso_auth_token:
+        raise DatabaseUnavailable(
+            f"TURSO_AUTH_TOKEN is required for the remote database {url}"
+        )
+
+    logger.info("Connected to Remote Turso DB: %s (HttpClient)", rewrite_scheme(url))
+    return TursoHttpClient(
+        url,
+        settings.turso_auth_token,
+        limiter=ProcessRateLimiter(settings.libsql_min_interval_seconds),
+    )
+
+
+def statements_from_rows(rows: Iterable[Sequence[Any]]) -> list[Statement]:
+    """Small helper for callers that build statements dynamically."""
+    return [(row[0], row[1:]) for row in rows]
 
 
 __all__ = [
-    "ResultSet",
-    "TursoHTTPClient",
+    "DatabaseUnavailable",
+    "LibsqlClient",
+    "LibsqlError",
+    "LocalSqliteClient",
     "ProcessRateLimiter",
-    "parse_pipeline_response",
+    "ResultSet",
+    "Statement",
+    "TursoHttpClient",
+    "build_client",
+    "decode_cell",
+    "encode_arg",
+    "rewrite_scheme",
 ]

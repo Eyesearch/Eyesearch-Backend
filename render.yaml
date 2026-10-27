@@ -1,4 +1,8 @@
 # Render blueprint for the EyeSearch gateway (free tier: 1 instance, 512 MB).
+#
+# The database is Turso, not Render: the free instance has no persistent disk,
+# so a local SQLite file would be lost on every deploy. TURSO_DB_URL and
+# TURSO_AUTH_TOKEN are marked `sync: false` and are set in the dashboard.
 services:
   - type: web
     name: eyesearch-backend
@@ -17,10 +21,14 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
-      - key: SEARCH_REGION
-        value: in-en
       - key: CORS_ORIGINS
         value: "*"
+      - key: CRAWLER_ENABLED
+        value: "true"
+      - key: REVALIDATION_ENABLED
+        value: "true"
+      - key: STORAGE_PAGE_LIMIT
+        value: "300000"
       - key: TURSO_DB_URL
         sync: false
       - key: TURSO_AUTH_TOKEN

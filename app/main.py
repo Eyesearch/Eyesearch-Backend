@@ -1,328 +1,452 @@
-"""EyeSearch Gateway — FastAPI application wiring.
+"""The FastAPI application: lifespan, CORS, and the frontend-facing API.
 
-`lifespan` owns the two shared resources (Turso client, httpx client) so nothing
-is created per request. Startup never hard-fails: if Turso is unreachable the
-service still boots, `/health` reports `db: down`, and requests degrade to live
-retrieval.
+The endpoint set is the contract `web/config/api-config.js` and
+`web/results/ai-chat/chat-panel.js` already speak:
+
+| method | path             | consumer                                  |
+| ------ | ---------------- | ----------------------------------------- |
+| GET    | `/v1/search`     | result cards, or `format=json` flat hits   |
+| GET    | `/v1/suggest`    | address-bar autocomplete                   |
+| GET    | `/v1/retrieve`   | AI clients, markdown or json               |
+| POST   | `/v1/retrieve`   | AI clients, JSON body                      |
+| POST   | `/v1/chat`       | the AI tab, server-sent events             |
+| GET    | `/v1/stats`      | index counters                             |
+| GET    | `/health`        | Render health probe, never raises          |
+| GET    | `/opensearch.xml`| browser search-engine install              |
+
+One rule for errors: every failure leaves through the same envelope,
+`{"error": {"code", "message", "retryable"}}`, because the frontend maps `code`
+onto user-facing text and treats a missing `retryable` as true.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
-import httpx
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
 
-from app import database
-from app.config import Settings, get_settings
-from app.errors import AppError, DatabaseError, error_envelope
-from app.engine.config import get_engine_settings
-from app.indexer import crawler as seed_crawler
-from app.indexer import scheduler as revalidate_scheduler
-from app.routes import chat, health, opensearch, retrieve, search
-from app.services import live_retrieval, search_service
+from app.database import initialize_database, verify_writable
+from app.engine.config import Settings, describe_database_target, get_settings
+from app.engine.store import IndexStore
+from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
+from app.libsql_http import LibsqlClient, LibsqlError, build_client
+from app.orchestrator import Orchestrator
+from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
 
-
-def _running_commit() -> str:
-    """Which commit this process is actually running — Render exposes it."""
-    import os
-
-    for name in ("RENDER_GIT_COMMIT", "GIT_COMMIT", "SOURCE_VERSION", "COMMIT_SHA"):
-        value = os.getenv(name)
-        if value:
-            return f"{value} ({name})"
-    return "unknown (set RENDER_GIT_COMMIT or GIT_COMMIT)"
+SERVICE_NAME = "eyesearch"
+SERVICE_TITLE = "EyeSearch Backend"
 
 
-def _configure_logging(settings: Settings) -> None:
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class AppError(Exception):
+    """A failure with a contract-shaped answer."""
+
+    def __init__(self, code: str, message: str, status: int = 500, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+        self.retryable = retryable
+
+
+def error_response(code: str, message: str, status: int, retryable: bool) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"code": code, "message": message, "retryable": retryable}},
     )
 
 
-def _build_http_client(settings: Settings) -> httpx.AsyncClient:
-    """One shared client for the process: pooled, bounded, identifiable."""
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(
-            connect=settings.http_connect_timeout_s,
-            read=settings.http_read_timeout_s,
-            write=settings.http_write_timeout_s,
-            pool=settings.http_pool_timeout_s,
-        ),
-        limits=httpx.Limits(
-            max_connections=settings.http_max_connections,
-            max_keepalive_connections=settings.http_max_keepalive,
-        ),
-        headers={"User-Agent": live_retrieval.USER_AGENT},
-        follow_redirects=True,
-    )
+# ---------------------------------------------------------------------------
+# Request bodies
+# ---------------------------------------------------------------------------
 
 
-async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str, str]) -> None:
-    """Initialize dependencies and workers off the ASGI startup critical path."""
-    if settings.requires_remote_db and not settings.is_remote_db:
-        message = (
-            f"refusing database initialization: environment={settings.environment} but the "
-            f"database is a local file ({target['url']}). Set TURSO_DB_URL/TURSO_DATABASE_URL "
-            "and TURSO_AUTH_TOKEN, or set ALLOW_LOCAL_DB=true if intended."
-        )
-        app.state.db_error = message
-        logger.critical(message)
-        return
+class RetrieveRequest(BaseModel):
+    query: str = Field(default="", description="what to look up")
+    format: str = Field(default="json", description="json or markdown")
+    limit: int = Field(default=10, ge=1, le=50)
 
-    # A database outage must not prevent Uvicorn from binding its port. Retry
-    # asynchronously while /health remains a fast liveness response.
-    while not app.state.db_ready:
-        try:
-            await database.connect(settings)
-            await database.initialize_schema()
-            await database.probe()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            app.state.db_error = str(exc)
-            logger.error("database initialization failed; retrying in 15s: %s", exc)
-            await asyncio.sleep(15)
-            continue
-        app.state.db_ready = True
-        app.state.db_error = ""
-        logger.info("database ready (%s): %s", target["kind"], target["url"])
 
-    try:
-        from app.engine.store import get_store
+class ChatRequest(BaseModel):
+    query: str = Field(default="")
+    messages: list[dict[str, Any]] = Field(default_factory=list)
 
-        stats = await get_store().stats()
-        app.state.index_stats = {
-            "documents": int(stats.get("documents", 0)),
-            "backlog": int(stats.get("backlog", 0)),
-        }
-        logger.info(
-            "index: %d documents, %d queued queries (%s)",
-            stats.get("documents", 0), stats.get("backlog", 0), target["url"],
-        )
-    except Exception as exc:
-        logger.warning("index stats unavailable during initialization: %s", exc)
 
-    # These maintenance probes may involve several remote database requests;
-    # they run only after the server is already serving HTTP.
-    baseline = bool(getattr(get_engine_settings(), "baseline_only", False))
-    app.state.baseline_mode = baseline
-
-    if baseline:
-        # One workflow only: no queue refill, no backlog purge, no seed
-        # coverage pass. The queue is drained by the baseline worker and the
-        # only thing that matters at boot is whether `pages` can grow.
-        logger.info(
-            "BASELINE_ONLY=true: single ingestion workflow "
-            "(crawl_queue -> fetch -> basic parse -> pages); the other five "
-            "agents' workers stay stopped"
-        )
-    else:
-        try:
-            purged = await database.execute_safe(
-                "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
-                "WHERE COALESCE(kind, 'query') = 'query' AND status = 'pending' "
-                "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
-            )
-            logger.info("startup: blocked backlog queries purged (%s)", type(purged).__name__)
-        except Exception as exc:
-            logger.warning("startup backlog purge failed: %s", exc)
-
-        try:
-            refill = await seed_crawler.refill_frontier()
-            app.state.queue_depth = refill["after"]
-        except Exception as exc:
-            logger.warning("startup frontier refill failed: %s", exc)
-
-    try:
-        probe = await database.verify_database()
-        app.state.db_writable = bool(probe.get("writable"))
-        app.state.db_counts = probe.get("counts", {})
-        if not app.state.db_writable:
-            logger.error(
-                "database is NOT writable (%s) — crawler persistence is unavailable",
-                probe.get("error") or "unknown reason",
-            )
-    except Exception as exc:
-        app.state.db_writable = False
-        logger.error("startup write probe failed: %s", exc)
-
-    if baseline:
-        # The queue depth is the number the operator is watching next to `pages`.
-        try:
-            pending = await database.execute_safe(
-                "SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'"
-            )
-            rows = getattr(pending, "rows", ()) or ()
-            app.state.queue_depth = int(rows[0][0]) if rows else 0
-        except Exception as exc:
-            logger.warning("baseline: queue depth unavailable: %s", exc)
-        logger.info(
-            "baseline: pages=%s, crawl_queue pending=%s, writable=%s",
-            app.state.db_counts.get("pages"), app.state.queue_depth, app.state.db_writable,
-        )
-    else:
-        try:
-            state = await seed_crawler.coverage()
-            app.state.seed_coverage = state
-            logger.info(
-                "seed coverage: %s sites, %s/%s seed domains; sufficient=%s",
-                state.get("sites"), state.get("covered"), state.get("seed_domains"),
-                state.get("sufficient"),
-            )
-        except Exception as exc:
-            logger.warning("seed coverage check failed: %s", exc)
-
-    # Workers are scheduled only after the ASGI lifespan has yielded and the
-    # database has initialized successfully.
-    if baseline:
-        revalidate_scheduler.start_baseline_worker()
-        return
-
-    revalidate_scheduler.start()
-    revalidate_scheduler.start_backlog_worker()
-    revalidate_scheduler.start_url_queue_worker()
-    revalidate_scheduler.start_seed_crawler(initial_pass=True)
-    revalidate_scheduler.start_discovery_worker()
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI):
     settings = get_settings()
-    _configure_logging(settings)
-    target = database.describe_target(settings)
-    logger.info(
-        "starting %s v%s (%s, db=%s %s)",
-        settings.app_name, settings.app_version, settings.environment,
-        target["kind"], target["url"],
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    http_client = _build_http_client(settings)
-    app.state.http = http_client
-    app.state.db_ready = False
-    app.state.db_error = ""
-    app.state.db_writable = False
-    app.state.db_counts = {}
-    app.state.index_stats = {"documents": 0, "backlog": 0}
-    app.state.queue_depth = 0
-    app.state.seed_coverage = {}
+    logger.info("starting %s (%s)", SERVICE_TITLE, settings.environment)
+    logger.info("database target: %s", describe_database_target(settings))
 
-    search_service.configure(http_client, settings)
+    client: LibsqlClient = build_client(settings)
+    await initialize_database(client)
+    writable = await verify_writable(client)
+    if not writable:
+        logger.error("database rejected the write probe — crawling will stay paused")
 
-    # Do not await Turso, schema migrations, storage checks, or queue refill
-    # before yielding. Uvicorn can bind the port and Render can probe /health.
-    initializer = asyncio.create_task(
-        _initialize_runtime(app, settings, target), name="eyesearch-runtime-initializer"
-    )
+    orchestrator = Orchestrator(client, settings)
+    app.state.settings = settings
+    app.state.client = client
+    app.state.orchestrator = orchestrator
+    app.state.service = SearchService(orchestrator.store, settings)
+    app.state.workers = WorkerHandles()
+
+    # Workers are scheduled from a bootstrap task, not inline, so the port is
+    # bound and /health answers before the first crawl begins.
+    bootstrap = asyncio.create_task(_start_workers_when_serving(app, orchestrator, settings))
+    app.state.bootstrap = bootstrap
+
     try:
         yield
     finally:
-        if not initializer.done():
-            initializer.cancel()
-        try:
-            await initializer
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("runtime initializer stopped with an error")
-
-        await revalidate_scheduler.stop_baseline_worker()
-        await revalidate_scheduler.stop_discovery_worker()
-        await revalidate_scheduler.stop_seed_crawler()
-        await revalidate_scheduler.stop_backlog_worker()
-        await revalidate_scheduler.stop_url_queue_worker()
-        await revalidate_scheduler.stop()
-        await search_service.drain_background_writes()
-        await http_client.aclose()
-        await database.close()
+        bootstrap.cancel()
+        await stop_workers(app.state.workers)
+        await orchestrator.close()
+        await client.close()
         logger.info("shutdown complete")
 
-def create_app() -> FastAPI:
-    settings = get_settings()
-    application = FastAPI(
-        title=settings.app_name,
-        version=settings.app_version,
-        description=(
-            "Unified Search & Retrieval Gateway. `GET /v1/search` serves the "
-            "EyeSearch web UI with structured cards; `POST /v1/retrieve` serves "
-            "AI clients with token-optimised Markdown or JSON."
-        ),
-        lifespan=lifespan,
+
+async def _start_workers_when_serving(
+    app: FastAPI,
+    orchestrator: Orchestrator,
+    settings: Settings,
+) -> None:
+    """Give the event loop a turn, then start the crawl workers."""
+    await asyncio.sleep(0)
+    app.state.workers = start_workers(orchestrator, settings)
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+settings_at_import = get_settings()
+
+app = FastAPI(
+    title=SERVICE_TITLE,
+    version="2.0.0",
+    description=(
+        "Async search gateway over an own Turso (libSQL) index. "
+        "One index, four consumer contracts."
+    ),
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings_at_import.cors_origin_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+@app.exception_handler(AppError)
+async def handle_app_error(_request: Request, error: AppError) -> JSONResponse:
+    return error_response(error.code, error.message, error.status, error.retryable)
+
+
+@app.exception_handler(LibsqlError)
+async def handle_db_error(_request: Request, error: LibsqlError) -> JSONResponse:
+    logger.error("database error: %s", error)
+    return error_response("database_error", "The search index is unavailable.", 503, True)
+
+
+def get_service(request: Request) -> SearchService:
+    service = getattr(request.app.state, "service", None)
+    if service is None:
+        raise AppError("internal", "The service is still starting.", 503, True)
+    return service
+
+
+def require_query(raw: str) -> str:
+    query = " ".join((raw or "").split())
+    if not query:
+        raise AppError("bad_request", "A non-empty q parameter is required.", 400, False)
+    if len(query) > 400:
+        raise AppError("bad_request", "The query is too long.", 400, False)
+    return query
+
+
+# ---------------------------------------------------------------------------
+# Service metadata and health
+# ---------------------------------------------------------------------------
+
+
+@app.get("/")
+async def root() -> dict[str, Any]:
+    return {
+        "service": SERVICE_NAME,
+        "title": SERVICE_TITLE,
+        "version": app.version,
+        "endpoints": [
+            "/v1/search",
+            "/v1/suggest",
+            "/v1/retrieve",
+            "/v1/chat",
+            "/v1/stats",
+            "/health",
+            "/opensearch.xml",
+            "/docs",
+        ],
+    }
+
+
+async def health_payload(request: Request) -> dict[str, Any]:
+    """Never raises: a probe that 500s is a probe that cannot report a fault."""
+    settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "db": "unknown",
+        "db_target": describe_database_target(settings),
+        "sites": 0,
+        "pages": 0,
+        "indexed": 0,
+        "queued": 0,
+        "storage": {},
+        "workers": [],
+    }
+
+    try:
+        client = getattr(request.app.state, "client", None)
+        if client is None:
+            raise AppError("database_error", "database client is not ready", 503, True)
+
+        stats = await IndexStore(client, settings).stats()
+        payload.update(
+            {
+                "db": "up",
+                "sites": stats.sites,
+                "pages": stats.pages,
+                "indexed": stats.indexed,
+                "queued": stats.queued,
+            }
+        )
+
+        orchestrator = getattr(request.app.state, "orchestrator", None)
+        if orchestrator is not None:
+            state = await orchestrator.guard.storage_state()
+            payload["storage"] = state.as_dict()
+
+        workers = getattr(request.app.state, "workers", None)
+        if workers is not None:
+            payload["workers"] = workers.running()
+    except Exception as error:  # health must answer, always
+        payload["status"] = "degraded"
+        payload["db"] = "down"
+        payload["error"] = str(error)
+
+    return payload
+
+
+@app.get("/health")
+@app.get("/healthz")
+async def health(request: Request) -> JSONResponse:
+    payload = await health_payload(request)
+    status = 200 if payload["status"] == "ok" else 503
+    return JSONResponse(status_code=status, content=payload)
+
+
+# ---------------------------------------------------------------------------
+# Search, suggest, retrieve
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/search")
+async def search(
+    request: Request,
+    q: str = Query(default="", description="the query"),
+    limit: int = Query(default=10, ge=1, le=50),
+    page: int = Query(default=1, ge=1, le=20),
+    format: str = Query(default="cards", description="cards or json"),
+) -> JSONResponse:
+    query = require_query(q)
+    service = get_service(request)
+    try:
+        if format.lower() == "json":
+            payload = await service.search_flat(query, limit=limit)
+        else:
+            payload = await service.search(query, limit=limit, page=page)
+    except LibsqlError:
+        raise
+    except Exception as error:
+        logger.exception("search failed for %r", query)
+        raise AppError("internal", f"The search failed: {error}", 500, True) from error
+    return JSONResponse(content=payload)
+
+
+@app.get("/v1/suggest")
+async def suggest(
+    request: Request,
+    q: str = Query(default=""),
+    limit: int = Query(default=6, ge=1, le=20),
+) -> JSONResponse:
+    query = " ".join((q or "").split())
+    if not query:
+        return JSONResponse(content=["", []])
+    service = get_service(request)
+    return JSONResponse(content=await service.suggest(query, limit=limit))
+
+
+async def _retrieve_payload(
+    request: Request,
+    raw_query: str,
+    output_format: str,
+    limit: int,
+):
+    query = require_query(raw_query)
+    service = get_service(request)
+    payload = await service.retrieve(query, limit=limit, format=output_format)
+    if isinstance(payload, str):
+        return PlainTextResponse(content=payload, media_type="text/markdown; charset=utf-8")
+    return JSONResponse(content=payload)
+
+
+@app.get("/v1/retrieve")
+async def retrieve_get(
+    request: Request,
+    q: str = Query(default=""),
+    format: str = Query(default="json"),
+    limit: int = Query(default=10, ge=1, le=50),
+    max_results: int | None = Query(default=None, ge=1, le=50),
+):
+    return await _retrieve_payload(request, q, format, max_results or limit)
+
+
+@app.post("/v1/retrieve")
+async def retrieve_post(request: Request, body: RetrieveRequest):
+    return await _retrieve_payload(request, body.query, body.format, body.limit)
+
+
+# ---------------------------------------------------------------------------
+# Chat (server-sent events)
+# ---------------------------------------------------------------------------
+
+
+def compose_answer(query: str, results: list[dict[str, Any]]) -> str:
+    """An extractive answer assembled only from indexed text.
+
+    There is no model behind this endpoint, so it does not invent prose: it
+    reports what the index holds and attributes each sentence to its source.
+    """
+    if not results:
+        return (
+            f"Nothing is indexed for **{query}** yet. The query has been left to the "
+            "crawler; ask again once it has been fetched."
+        )
+
+    lines = [f"Here is what the index holds for **{query}**.", ""]
+    for result in results[:3]:
+        title = result.get("title") or result.get("url", "")
+        snippet = (result.get("snippet") or "").strip()
+        lines.append(f"**{title}**")
+        if snippet:
+            lines.append(snippet)
+        lines.append(f"Source: {result.get('url', '')}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def sse(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@app.post("/v1/chat")
+async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
+    query = require_query(body.query)
+    service = get_service(request)
+    payload = await service.search(query, limit=5)
+    results = payload.get("results", [])
+    answer = compose_answer(query, results)
+    sources = [{"title": item["title"], "url": item["url"]} for item in results[:5]]
+
+    async def stream() -> AsyncIterator[str]:
+        buffer: list[str] = []
+        for token in answer.split(" "):
+            buffer.append(token)
+            if len(buffer) >= 6:
+                yield sse({"delta": " ".join(buffer) + " "})
+                buffer = []
+                await asyncio.sleep(0)
+        if buffer:
+            yield sse({"delta": " ".join(buffer)})
+        yield sse({"done": True, "sources": sources})
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
     )
 
-    application.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origin_list,
-        allow_credentials=settings.allow_credentials,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["X-Response-Time-Ms"],
-        max_age=600,
+
+# ---------------------------------------------------------------------------
+# Stats and OpenSearch
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/stats")
+async def stats(request: Request) -> JSONResponse:
+    service = get_service(request)
+    orchestrator = getattr(request.app.state, "orchestrator", None)
+    payload: dict[str, Any] = await service.stats()
+    if orchestrator is not None:
+        state = await orchestrator.guard.storage_state()
+        payload["storage"] = state.as_dict()
+    payload["db_target"] = describe_database_target(getattr(request.app.state, "settings", get_settings()))
+    return JSONResponse(content=payload)
+
+
+def base_url_for(request: Request) -> str:
+    settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
+    if settings.public_base_url:
+        return settings.public_base_url.rstrip("/")
+    forwarded = request.headers.get("x-forwarded-proto")
+    scheme = forwarded.split(",")[0].strip() if forwarded else request.url.scheme
+    return f"{scheme}://{request.headers.get('host', request.url.netloc)}"
+
+
+@app.get("/opensearch.xml")
+async def opensearch(request: Request) -> Response:
+    base = base_url_for(request)
+    template = base + "/v1/search?q={searchTerms}"
+    suggestions = base + "/v1/suggest?q={searchTerms}"
+    document = f"""<?xml version="1.0" encoding="UTF-8"?>
+<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">
+  <ShortName>eyesearch</ShortName>
+  <Description>Search the EyeSearch index</Description>
+  <InputEncoding>UTF-8</InputEncoding>
+  <Url type="text/html" method="GET" template="{template}"/>
+  <Url type="application/x-suggestions+json" method="GET" template="{suggestions}"/>
+</OpenSearchDescription>
+"""
+    return Response(
+        content=document,
+        media_type="application/opensearchdescription+xml; charset=utf-8",
     )
 
-    application.include_router(health.router)
-    application.include_router(opensearch.router)
-    application.include_router(search.router)
-    application.include_router(retrieve.router)
-    application.include_router(chat.router)
 
-    @application.exception_handler(AppError)
-    async def _app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-        logger.warning("%s %s -> %s: %s", request.method, request.url.path, exc.code, exc.message)
-        return JSONResponse(status_code=exc.status_code, content=exc.envelope())
-
-    @application.exception_handler(RequestValidationError)
-    async def _validation_handler(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
-        detail = "; ".join(
-            f"{'.'.join(str(part) for part in error.get('loc', ()))}: {error.get('msg', '')}"
-            for error in exc.errors()[:4]
-        )
-        return JSONResponse(
-            status_code=400,
-            content=error_envelope("bad_request", detail or "invalid request", False),
-        )
-
-    @application.exception_handler(Exception)
-    async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
-        logger.exception("unhandled error on %s %s", request.method, request.url.path)
-        return JSONResponse(
-            status_code=500,
-            content=error_envelope("internal", "internal server error", False),
-        )
-
-    @application.get("/", tags=["meta"], summary="Service metadata")
-    async def root() -> dict[str, object]:
-        return {
-            "service": settings.app_name,
-            "version": settings.app_version,
-            "environment": settings.environment,
-            "endpoints": {
-                "search": "GET /v1/search?q=&limit=&page=",
-                "retrieve": "POST /v1/retrieve {query, format, limit}",
-                "health": "GET /health",
-                "docs": "GET /docs",
-            },
-        }
-
-    return application
-
-
-app = create_app()
-
-
-if __name__ == "__main__":  # local convenience: python -m app.main
-    import uvicorn
-
-    cfg = get_settings()
-    uvicorn.run("app.main:app", host="0.0.0.0", port=cfg.port, log_level=cfg.log_level.lower())
+__all__ = ["app", "compose_answer", "lifespan", "sse"]

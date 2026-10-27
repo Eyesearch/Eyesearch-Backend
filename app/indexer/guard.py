@@ -1,15 +1,16 @@
-"""Storage safety: stop crawling before the database bill does.
+"""Storage safety: stop writing before the database bill does.
 
-Two independent brakes:
+`StorageGuard` is the only thing in the process allowed to answer "how many
+pages do we hold". Two rules make it safe:
 
-* a **record ceiling** — before any pass starts, the crawler asks how many pages
-  the index holds and pauses when it is over `STORAGE_PAGE_LIMIT` (300,000 by
-  default, roughly 3.5–4 GB at our row sizes);
-* a **quota breaker** — when Turso answers a write with a storage/quota error,
-  the breaker trips and every scheduled pass returns immediately until the
-  cooldown expires, so nothing tight-loops against a full database.
-
-Neither brake touches the read path: the search API keeps serving.
+* **A 60-second in-memory TTL cache.** The crawl pipeline asks once per batch,
+  never once per URL. `COUNT(*)` on every fetch is the difference between a
+  free tier that holds and one that rate-limits itself into a stall.
+* **Fail-closed.** If the count cannot be read — the database is down, the
+  token expired, the response was malformed — the guard reports `paused=True`
+  and blocks writes. Crawling blind past a ceiling is how a 300,000-page budget
+  becomes a bill; refusing to write until the count is known costs nothing but
+  a delay.
 """
 
 from __future__ import annotations
@@ -18,200 +19,162 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
 
-from app.engine.config import get_engine_settings
+from app.libsql_http import LibsqlClient, LibsqlError
 
 logger = logging.getLogger(__name__)
 
-# Substrings that mean "the database will not take more data".
-QUOTA_MARKERS: tuple[str, ...] = (
-    "storage quota",
-    "quota exceeded",
-    "database full",
-    "database or disk is full",
-    "sqlite_full",
-    "storage limit",
-    "no space left",
-    "too many bytes",
-    "exceeded the storage",
-)
-
 STORAGE_WARNING = (
-    "WARNING: Storage safety threshold reached (300k+ records). Pausing autonomous crawling."
+    "WARNING: Storage safety threshold reached (300k+ records). "
+    "Pausing autonomous crawling."
 )
 
 
-def is_quota_error(error: Any) -> bool:
-    """True when a driver error means the database is out of space."""
-    text = str(error).lower()
-    return any(marker in text for marker in QUOTA_MARKERS)
+@dataclass(frozen=True)
+class StorageState:
+    """What the guard knows right now, and whether writes are allowed."""
 
-
-@dataclass
-class _Breaker:
-    tripped_at: float = 0.0
+    pages: int
+    sites: int
+    limit: int
+    paused: bool
     reason: str = ""
+    from_cache: bool = False
 
     @property
-    def tripped(self) -> bool:
-        return self.tripped_at > 0.0
+    def over_limit(self) -> bool:
+        return self.pages >= self.limit
 
-    def elapsed(self) -> float:
-        return time.monotonic() - self.tripped_at if self.tripped else 0.0
-
-
-_breaker = _Breaker()
-_STORAGE_CACHE_TTL_SECONDS = 60.0
-_STORAGE_CACHE: dict[str, tuple[float, int, int]] = {}
-_STORAGE_CACHE_LOCK = asyncio.Lock()
-
-
-def _storage_target_key(store: Any, settings: Any) -> str:
-    """Key cached counts by the actual database target, not just a wrapper object."""
-    for owner in (store, getattr(store, "settings", None), settings):
-        if owner is None:
-            continue
-        for name in ("database_url", "turso_url", "libsql_url", "db_url", "url"):
-            value = getattr(owner, name, None)
-            if value:
-                return str(value).rstrip("/")
-    try:
-        from app.database import get_client
-
-        client = get_client()
-        for name in ("_base", "endpoint", "url", "database_url"):
-            value = getattr(client, name, None)
-            if value:
-                return str(value).rstrip("/")
-    except Exception:
-        pass
-    return f"store:{id(store)}"
-
-
-def invalidate_storage_cache(store: Any | None = None, settings: Any | None = None) -> None:
-    """Invalidate cached counts after a committed write."""
-    if store is None:
-        _STORAGE_CACHE.clear()
-        return
-    cfg = settings or getattr(store, "settings", None) or get_engine_settings()
-    _STORAGE_CACHE.pop(_storage_target_key(store, cfg), None)
-
-
-async def _cached_storage_counts(store: Any, settings: Any) -> tuple[int, int]:
-    key = _storage_target_key(store, settings)
-    async with _STORAGE_CACHE_LOCK:
-        cached = _STORAGE_CACHE.get(key)
-        if cached and time.monotonic() < cached[0]:
-            return cached[1], cached[2]
-        pages = int(await store.count_pages())
-        sites = int(await store.count_documents())
-        if pages < 0 or sites < 0:
-            raise ValueError("negative storage count returned")
-        _STORAGE_CACHE[key] = (
-            time.monotonic() + _STORAGE_CACHE_TTL_SECONDS,
-            pages,
-            sites,
-        )
-        return pages, sites
-
-
-def trip_quota(reason: str) -> None:
-    """Stop scheduling fetches after a quota failure. Logged once, loudly."""
-    if _breaker.tripped:
-        return
-    _breaker.tripped_at = time.monotonic()
-    _breaker.reason = reason
-    logger.error(
-        "STORAGE QUOTA EXHAUSTED: %s — autonomous crawling is paused; the search API "
-        "continues to serve from the existing index. Raise the Turso plan or prune rows, "
-        "then restart the service to resume.",
-        reason,
-    )
-
-
-def reset_quota() -> None:
-    global _breaker
-    _breaker = _Breaker()
-
-
-def quota_paused() -> bool:
-    """Whether the breaker is currently holding the crawler back."""
-    if not _breaker.tripped:
-        return False
-    cooldown = max(60, get_engine_settings().storage_pause_seconds)
-    if _breaker.elapsed() >= cooldown:
-        logger.info("storage quota cooldown elapsed — resuming crawling")
-        reset_quota()
-        return False
-    return True
-
-
-async def storage_state(
-    store: Any | None = None,
-    settings: Any | None = None,
-) -> dict[str, Any]:
-    """Pages, sites, the ceiling and whether crawling should be paused."""
-    from app.engine.store import get_store
-
-    index = store or get_store()
-    cfg = settings or get_engine_settings()
-    try:
-        pages, sites = await _cached_storage_counts(index, cfg)
-    except Exception as exc:
-        logger.error("storage check failed; refusing writes: %s", exc)
+    def as_dict(self) -> dict[str, object]:
         return {
-            "pages": None,
-            "sites": None,
-            "limit": cfg.storage_page_limit,
-            "over_limit": True,
-            "quota_tripped": _breaker.tripped,
-            "quota_reason": _breaker.reason,
-            "paused": True,
-            "error": str(exc),
+            "pages": self.pages,
+            "sites": self.sites,
+            "limit": self.limit,
+            "over_limit": self.over_limit,
+            "paused": self.paused,
+            "reason": self.reason,
         }
 
-    over_limit = pages >= cfg.storage_page_limit
-    paused = over_limit or quota_paused()
-    return {
-        "pages": pages,
-        "sites": sites,
-        "limit": cfg.storage_page_limit,
-        "over_limit": over_limit,
-        "quota_tripped": _breaker.tripped,
-        "quota_reason": _breaker.reason,
-        "paused": paused,
-    }
 
+class StorageGuard:
+    """Counts pages and sites at most once per TTL, and fails closed."""
 
-async def storage_paused(store: Any | None = None, settings: Any | None = None) -> bool:
-    """Ask once, at the start of a pass, failing closed on every exception."""
-    try:
-        state = await storage_state(store, settings)
-        if state.get("error"):
-            return True
-        if state["over_limit"]:
-            logger.warning(STORAGE_WARNING)
-            return True
-        if state["quota_tripped"] and quota_paused():
-            logger.warning(
-                "storage quota breaker open (%s) — skipping this pass", state["quota_reason"]
+    def __init__(
+        self,
+        client: LibsqlClient,
+        *,
+        limit: int = 300_000,
+        ttl_seconds: float = 60.0,
+        clock=time.monotonic,
+    ) -> None:
+        self._client = client
+        self._limit = limit
+        self._ttl = ttl_seconds
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._cached: StorageState | None = None
+        self._cached_at = 0.0
+        self._queries = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @property
+    def count_queries(self) -> int:
+        """How many times the database was actually asked. Tests assert on this."""
+        return self._queries
+
+    def invalidate(self) -> None:
+        """Force the next call to read the database again."""
+        self._cached = None
+        self._cached_at = 0.0
+
+    def note_write(self, pages: int) -> None:
+        """Add pages we just committed to the cached count.
+
+        The pipeline knows exactly how many rows it wrote, so it can keep the
+        cache honest between refreshes without spending a query.
+        """
+        if self._cached is None or pages <= 0:
+            return
+        self._cached = StorageState(
+            pages=self._cached.pages + pages,
+            sites=self._cached.sites,
+            limit=self._cached.limit,
+            paused=self._cached.paused,
+            reason=self._cached.reason,
+            from_cache=True,
+        )
+
+    async def storage_state(self) -> StorageState:
+        """The current state, from cache when fresh, fail-closed when not."""
+        async with self._lock:
+            now = self._clock()
+            if self._cached is not None and (now - self._cached_at) < self._ttl:
+                return StorageState(
+                    pages=self._cached.pages,
+                    sites=self._cached.sites,
+                    limit=self._cached.limit,
+                    paused=self._cached.paused,
+                    reason=self._cached.reason,
+                    from_cache=True,
+                )
+
+            try:
+                results = await self._client.batch(
+                    [
+                        ("SELECT COUNT(*) FROM pages", ()),
+                        ("SELECT COUNT(*) FROM sites", ()),
+                    ]
+                )
+                self._queries += 1
+                pages = int(results[0].scalar(0) or 0)
+                sites = int(results[1].scalar(0) or 0)
+            except (LibsqlError, ValueError, TypeError, IndexError) as error:
+                # Fail closed: an unknown page count is not permission to write.
+                state = StorageState(
+                    pages=self._limit,
+                    sites=0,
+                    limit=self._limit,
+                    paused=True,
+                    reason=f"storage_state unavailable: {error}",
+                    from_cache=False,
+                )
+                self._cached = state
+                self._cached_at = now
+                logger.error("storage guard failed closed: %s", error)
+                return state
+
+            over = pages >= self._limit
+            state = StorageState(
+                pages=pages,
+                sites=sites,
+                limit=self._limit,
+                paused=over,
+                reason=STORAGE_WARNING if over else "",
+                from_cache=False,
             )
-            return True
-        return bool(state.get("paused", False))
-    except Exception as exc:
-        logger.error("storage pause check failed; refusing writes: %s", exc)
-        return True
+            self._cached = state
+            self._cached_at = now
+            if over:
+                logger.warning(STORAGE_WARNING)
+            return state
+
+    async def can_write(self) -> bool:
+        state = await self.storage_state()
+        return not state.paused
+
+    async def assert_can_write(self) -> StorageState:
+        """Raise when writes are blocked, so a caller cannot ignore it."""
+        state = await self.storage_state()
+        if state.paused:
+            raise StoragePaused(state.reason or "storage paused")
+        return state
 
 
-__all__ = [
-    "STORAGE_WARNING",
-    "QUOTA_MARKERS",
-    "is_quota_error",
-    "trip_quota",
-    "reset_quota",
-    "quota_paused",
-    "storage_state",
-    "storage_paused",
-    "invalidate_storage_cache",
-]
+class StoragePaused(RuntimeError):
+    """Writes are blocked because the index is at its ceiling or unreadable."""
+
+
+__all__ = ["STORAGE_WARNING", "StorageGuard", "StoragePaused", "StorageState"]

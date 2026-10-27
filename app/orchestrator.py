@@ -1,42 +1,48 @@
-"""The orchestrator: frontier → fetcher → parser → quality → indexer.
+"""The pipeline: one shared HTTP client, six agents, one batch loop.
 
-Each stage runs as its own coroutine reading from an `asyncio.Queue`, so a slow
-or failing stage applies backpressure instead of corrupting the others. A
-failure anywhere is caught, logged and counted — it never propagates to the
-search API, which shares this process.
+`Orchestrator` is the only place the agents meet. It owns the pooled
+`httpx.AsyncClient`, pulls a batch of ten URLs from the frontier, runs them
+through fetch → parse → quality → index, and closes or fails each queue row as
+its own outcome dictates.
 
-    orchestrator = Orchestrator()
-    report = await orchestrator.run(hosts=["eci.gov.in", "ssc.nic.in"])
-
-`run_from_frontier()` pulls its own work from the frontier queue instead of a
-list you supply.
+The counters it reports are honest by construction: `pages` comes from the
+store's confirmed commit, never from the number of documents it handed over.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Sequence
 
-from app.agents import (
-    FetcherAgent,
-    FrontierAgent,
-    IndexerAgent,
-    ParserAgent,
-    QualityAgent,
-    SemanticAIAgent,
-)
+from app.agents import load_agent
+from app.engine.config import Settings, get_settings
+from app.engine.store import IndexStore, PageDocument, QueuedUrl
+from app.indexer.guard import StorageGuard
+from app.libsql_http import LibsqlClient
 
 logger = logging.getLogger(__name__)
 
-# One in-flight page per slot; the fetcher applies its own concurrency limit.
-QUEUE_SIZE = 32
+_frontier_module = load_agent("01_frontier_agent")
+_fetcher_module = load_agent("02_fetcher_agent")
+_parser_module = load_agent("03_parser_agent")
+_quality_module = load_agent("04_quality_agent")
+_indexer_module = load_agent("05_indexer_agent")
+_revalidation_module = load_agent("06_revalidation_agent")
+
+FrontierAgent = _frontier_module.FrontierAgent
+FetcherAgent = _fetcher_module.FetcherAgent
+ParserAgent = _parser_module.ParserAgent
+QualityAgent = _quality_module.QualityAgent
+IndexerAgent = _indexer_module.IndexerAgent
+RevalidationAgent = _revalidation_module.RevalidationAgent
 
 
 @dataclass
-class OrchestratorReport:
-    """What one run did, stage by stage."""
+class BatchOutcome:
+    """What one batch of URLs achieved."""
 
     attempted: int = 0
     fetched: int = 0
@@ -44,13 +50,17 @@ class OrchestratorReport:
     accepted: int = 0
     rejected: int = 0
     indexed_pages: int = 0
-    sites: int = 0
-    errors: dict[str, int] = field(default_factory=dict)
+    queue_closed: int = 0
+    queue_failed: int = 0
+    paused: bool = False
+    skip_reasons: dict[str, int] = field(default_factory=dict)
+    elapsed_ms: int = 0
 
-    def fail(self, stage: str) -> None:
-        self.errors[stage] = self.errors.get(stage, 0) + 1
+    @property
+    def empty(self) -> bool:
+        return self.attempted == 0
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "attempted": self.attempted,
             "fetched": self.fetched,
@@ -58,317 +68,195 @@ class OrchestratorReport:
             "accepted": self.accepted,
             "rejected": self.rejected,
             "indexed_pages": self.indexed_pages,
-            "sites": self.sites,
-            "errors": dict(self.errors),
+            "queue_closed": self.queue_closed,
+            "queue_failed": self.queue_failed,
+            "paused": self.paused,
+            "skip_reasons": dict(self.skip_reasons),
+            "elapsed_ms": self.elapsed_ms,
         }
 
 
 class Orchestrator:
-    """Wires the six agents together over async queues."""
+    """Wires the agents together over one client and one store."""
 
-    def __init__(
-        self,
-        *,
-        frontier: FrontierAgent | None = None,
-        fetcher: FetcherAgent | None = None,
-        parser: ParserAgent | None = None,
-        quality: QualityAgent | None = None,
-        indexer: IndexerAgent | None = None,
-        semantic: SemanticAIAgent | None = None,
-        store: Any | None = None,
-        settings: Any | None = None,
-    ) -> None:
-        self.frontier = frontier or FrontierAgent(store=store)
-        self.fetcher = fetcher or FetcherAgent(settings)
-        self.parser = parser or ParserAgent(settings)
-        self.quality = quality or QualityAgent(settings)
-        self.indexer = indexer or IndexerAgent(store=store, settings=settings)
-        self.semantic = semantic or SemanticAIAgent(settings)
-        self.settings = settings
-
-    # -- one page, all five stages ------------------------------------
-    async def process_url(self, url: str, report: OrchestratorReport) -> Any | None:
-        """Fetch → parse → quality for one URL. Returns the accepted document."""
-        report.attempted += 1
-
-        fetched = await self.fetcher.fetch(url)
-        if not fetched.ok:
-            report.fail("fetch")
-            return None
-        report.fetched += 1
-
-        parsed = await self.parser.parse(url, fetched.html, status=fetched.status)
-        if not parsed.ok:
-            report.fail("parse")
-            report.rejected += 1
-            return None
-        report.parsed += 1
-
-        verdict = await self.quality.check(parsed.document)
-        if not verdict.ok:
-            report.rejected += 1
-            report.fail(f"quality:{verdict.reason}")
-            return None
-
-        report.accepted += 1
-        return parsed.document
-
-    # -- a batch, with the queues in between --------------------------
-    async def run(self, hosts: Iterable[str] | None = None, *, limit: int | None = None) -> dict[str, Any]:
-        """Crawl `hosts` (or the frontier's next batch) through every stage."""
-        report = OrchestratorReport()
-
-        if hosts is None:
-            hosts = await self.frontier.next_batch(limit)
-        urls = [
-            f"https://{host.strip().lower().removeprefix('www.')}/"
-            for host in list(hosts)[: limit or None]
-            if host and host.strip()
-        ]
-        if not urls:
-            return report.as_dict()
-
-        if not await self.indexer.can_write():
-            logger.warning("orchestrator idle: storage safety threshold reached")
-            return {**report.as_dict(), "paused": True}
-
-        fetch_queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_SIZE)
-        parse_queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_SIZE)
-        index_queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_SIZE)
-
-        async def producer() -> None:
-            for url in urls:
-                await fetch_queue.put(url)
-            for _ in range(3):
-                await fetch_queue.put(None)
-
-        async def fetch_stage() -> None:
-            while True:
-                url = await fetch_queue.get()
-                if url is None:
-                    await parse_queue.put(None)
-                    return
-                try:
-                    fetched = await self.fetcher.fetch(url)
-                except Exception as exc:  # isolation: one bad URL is not the run
-                    logger.warning("fetch stage error for %s: %s", url, exc)
-                    report.fail("fetch")
-                    continue
-                await parse_queue.put((url, fetched))
-
-        async def parse_stage() -> None:
-            while True:
-                item = await parse_queue.get()
-                if item is None:
-                    await index_queue.put(None)
-                    return
-                url, fetched = item
-                report.attempted += 1
-                if not fetched.ok:
-                    report.fail("fetch")
-                    continue
-                report.fetched += 1
-                try:
-                    parsed = await self.parser.parse(url, fetched.html, status=fetched.status)
-                except Exception as exc:
-                    logger.warning("parse stage error for %s: %s", url, exc)
-                    report.fail("parse")
-                    continue
-                if not parsed.ok:
-                    report.rejected += 1
-                    report.fail(f"parse:{parsed.reason}")
-                    continue
-                report.parsed += 1
-                await index_queue.put(parsed.document)
-
-        async def index_stage() -> None:
-            while True:
-                document = await index_queue.get()
-                if document is None:
-                    return
-                try:
-                    verdict = await self.quality.check(document)
-                except Exception as exc:
-                    logger.warning("quality stage error: %s", exc)
-                    report.fail("quality")
-                    continue
-                if not verdict.ok:
-                    report.rejected += 1
-                    report.fail(f"quality:{verdict.reason}")
-                    continue
-                report.accepted += 1
-                try:
-                    outcome = await self.indexer.persist([document])
-                except Exception as exc:
-                    logger.warning("index stage error: %s", exc)
-                    report.fail("index")
-                    continue
-                pages = int(outcome.get("pages", 0) or 0)
-                if outcome.get("error"):
-                    report.fail("index")
-                    continue
-                if outcome.get("paused"):
-                    report.fail("storage")
-                    continue
-                if pages <= 0:
-                    report.fail("index")
-                    logger.warning("index stage persisted zero pages for %s", getattr(document, "url", "unknown"))
-                    continue
-                report.indexed_pages += pages
-                report.sites += int(outcome.get("sites", 0) or 0)
-
-        try:
-            async with self.fetcher:
-                await asyncio.gather(producer(), fetch_stage(), parse_stage(), index_stage())
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("orchestrator run failed: %s", exc)
-            report.fail("orchestrator")
-
-        logger.info("orchestrator run complete: %s", report.as_dict())
-        return report.as_dict()
-
-    async def run_from_frontier(self, *, limit: int | None = None) -> dict[str, Any]:
-        """Take the frontier's next batch and run it through the pipeline."""
-        hosts = await self.frontier.next_batch(limit)
-        if not hosts:
-            return OrchestratorReport().as_dict()
-        report = await self.run(hosts, limit=limit)
-        errors = report.get("errors") or {}
-        index_failed = bool(errors.get("index") or errors.get("storage"))
-        status = (
-            "processed"
-            if int(report.get("indexed_pages", 0) or 0) > 0 and not index_failed
-            else "failed"
+    def __init__(self, client: LibsqlClient, settings: Settings | None = None) -> None:
+        self._settings = settings or get_settings()
+        self._store = IndexStore(client, self._settings)
+        self._guard = StorageGuard(
+            client,
+            limit=self._settings.storage_page_limit,
+            ttl_seconds=self._settings.storage_count_ttl_seconds,
         )
-        for host in hosts:
-            await self.frontier.mark_done(host, status=status)
-        return report
+        self._fetcher = FetcherAgent(self._settings)
+        self._parser = ParserAgent()
+        self._quality = QualityAgent()
+        self._indexer = IndexerAgent(self._store, self._guard)
+        self._frontier = FrontierAgent(self._store, self._settings)
+        self._revalidation = RevalidationAgent(
+            self._store,
+            self._fetcher,
+            self._settings,
+            parser=self._parser,
+        )
+        self.batches = 0
+        self.pages_indexed = 0
 
-    # -- whole domains, through the queue pipeline --------------------
-    async def run_domains(
-        self,
-        domains: list[str],
-        *,
-        category: str | None = None,
-        labels: dict[str, str] | None = None,
-        seed_objects: dict[str, Any] | None = None,
-        settings: Any | None = None,
-        concurrency: int | None = None,
-        robots: Any | None = None,
-        client: Any | None = None,
-        domain_worker: Any | None = None,
-    ) -> dict[str, Any]:
-        """Crawl whole domains (root + sitelinks) as the pipeline's unit of work.
+    # -- accessors ---------------------------------------------------------
 
-        Each domain is fetched, parsed and written as it finishes, so a long pass
-        never holds its work in memory. The storage cap and the quota breaker are
-        checked before the first fetch and after every write.
+    @property
+    def store(self) -> IndexStore:
+        return self._store
+
+    @property
+    def guard(self) -> StorageGuard:
+        return self._guard
+
+    @property
+    def frontier(self) -> object:
+        return self._frontier
+
+    @property
+    def fetcher(self) -> object:
+        return self._fetcher
+
+    @property
+    def revalidation(self) -> object:
+        return self._revalidation
+
+    # -- one batch ---------------------------------------------------------
+
+    async def run_batch(self, limit: int | None = None) -> BatchOutcome:
+        """Fetch, parse, gate and store one batch of queued URLs."""
+        started = time.monotonic()
+        outcome = BatchOutcome()
+
+        queue: list[QueuedUrl] = await self._frontier.next_batch(limit)
+        if not queue:
+            return outcome
+
+        outcome.attempted = len(queue)
+
+        # One storage read for the whole batch — never one per URL.
+        state = await self._guard.storage_state()
+        if state.paused:
+            outcome.paused = True
+            logger.warning("batch skipped, storage paused: %s", state.reason)
+            return outcome
+
+        documents: list[PageDocument] = []
+        queue_ids: list[int] = []
+        failed_ids: list[int] = []
+
+        self._quality.reset()
+        results = await self._fetcher.fetch_many([item.url for item in queue])
+
+        for item, result in zip(queue, results):
+            if not result.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, result.reason or "fetch_failed")
+                failed_ids.append(item.rowid)
+                continue
+
+            outcome.fetched += 1
+            parsed = self._parser.parse(item.url, result.html)
+            if not parsed.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, parsed.reason or "parse_failed")
+                failed_ids.append(item.rowid)
+                continue
+
+            outcome.parsed += 1
+            document = PageDocument(
+                url=item.url,
+                domain=item.domain,
+                title=parsed.title,
+                description=parsed.description,
+                body_text=parsed.body_text,
+            )
+            verdict = self._quality.check(document)
+            if not verdict.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, verdict.reason or "rejected")
+                failed_ids.append(item.rowid)
+                continue
+
+            document.digest = verdict.digest
+            document.quality_score = verdict.score
+            documents.append(document)
+            queue_ids.append(item.rowid)
+
+        outcome.accepted = len(documents)
+
+        if failed_ids:
+            outcome.queue_failed = await self._indexer.mark_failed(
+                failed_ids, reason="fetch, parse or quality gate rejected the page"
+            )
+
+        if documents:
+            index_outcome = await self._indexer.persist(documents, queue_ids)
+            if index_outcome.committed:
+                # Only a confirmed commit may move the counters.
+                outcome.indexed_pages = index_outcome.pages_written
+                outcome.queue_closed = index_outcome.queue_closed
+                self.pages_indexed += index_outcome.counted
+                self.batches += 1
+            else:
+                outcome.paused = index_outcome.paused
+                logger.warning("batch not persisted: %s", index_outcome.reason)
+
+        outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "batch done: %d queued, %d fetched, %d accepted, %d rejected, %d indexed (%dms)",
+            outcome.attempted,
+            outcome.fetched,
+            outcome.accepted,
+            outcome.rejected,
+            outcome.indexed_pages,
+            outcome.elapsed_ms,
+        )
+        return outcome
+
+    # -- the loop ----------------------------------------------------------
+
+    async def run_forever(self) -> None:
+        """Consume the frontier until cancelled.
+
+        2.0 s between batches; a 15.0 s non-blocking backoff when the queue is
+        empty, so an idle deployment costs nothing and still recovers the
+        moment there is work.
         """
-        report = OrchestratorReport()
-        targets = [d.strip().lower().removeprefix("www.") for d in domains if d and d.strip()]
-        if not targets:
-            return {**report.as_dict(), "domains": 0, "reports": {}}
-        if not await self.indexer.can_write():
-            logger.warning("crawl idle: storage safety threshold reached")
-            return {**report.as_dict(), "domains": 0, "reports": {}, "paused": True}
+        while True:
+            try:
+                outcome = await self.run_batch()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # a failed batch must not end the loop
+                logger.exception("batch failed: %s", error)
+                outcome = None
 
-        cfg = settings or self.settings
-        if cfg is None:
-            from app.engine.config import get_engine_settings
+            if outcome is not None and not outcome.empty and not outcome.paused:
+                await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
+                continue
 
-            cfg = get_engine_settings()
-        self.settings = cfg
+            if outcome is not None and outcome.empty:
+                await self._frontier.refill(minimum=1)
 
-        if domain_worker is None:
-            from app.indexer.crawler import crawl_seed  # imported here: no cycle
+            logger.debug(
+                "crawl worker sleeping %.1fs (queue empty)", self._settings.crawl_empty_backoff_seconds
+            )
+            await asyncio.sleep(self._settings.crawl_empty_backoff_seconds)
 
-            domain_worker = crawl_seed
+    async def run_domains(self, domains: Sequence[str]) -> BatchOutcome:
+        """Seed specific domains and process exactly one batch of them."""
+        await self._frontier.enqueue([f"https://{domain}/" for domain in domains])
+        return await self.run_batch(limit=len(domains) or self._settings.crawl_batch_size)
 
-        labels = labels or {}
-        workers = max(1, concurrency or cfg.seed_crawl_concurrency)
-        queue: asyncio.Queue = asyncio.Queue()
-        results: dict[str, Any] = {}
+    async def close(self) -> None:
+        await self._fetcher.aclose()
 
-        for host in targets:
-            queue.put_nowait(host)
-
-        async def worker() -> None:
-            while True:
-                try:
-                    host = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                from app.indexer import crawler as pipeline
-
-                # The caller's own seed object is used when it has one: it carries
-                # the label and the category the registry assigned.
-                seed = (seed_objects or {}).get(host) or pipeline.CategorySeed(
-                    f"https://{host}/", labels.get(host, host), category or "government"
-                )
-                try:
-                    # the pooled client comes from the fetcher opened below
-                    seed_report, documents = await domain_worker(
-                        seed,
-                        client=client or self.fetcher.client,
-                        settings=cfg,
-                        robots=robots,
-                        max_pages=cfg.seed_crawl_pages_per_domain,
-                        fetcher=self.fetcher,
-                    )
-                except Exception as exc:
-                    logger.warning("domain worker failed for %s: %s", host, exc)
-                    report.fail("domain")
-                    results[host] = {"category": category or "government", "fetched": 0,
-                                     "extracted": 0, "stored": 0, "skipped": 0,
-                                     "reasons": {"worker_error": 1}}
-                    continue
-
-                results[host] = seed_report.as_dict()
-                report.attempted += 1
-                report.fetched += seed_report.fetched
-                report.parsed += seed_report.extracted
-
-                if not documents:
-                    report.rejected += 1
-                    continue
-
-                report.accepted += len(documents)
-                # Write this domain now, not at the end of the pass: a restart
-                # mid-crawl must not lose the work already done, and one failed
-                # write must not take another domain's pages with it.
-                try:
-                    outcome = await self.indexer.persist(documents)
-                except Exception as exc:
-                    logger.error("index stage failed for %s: %s", host, exc)
-                    report.fail("index")
-                    continue
-
-                report.indexed_pages += int(outcome.get("pages", 0))
-                report.sites += int(outcome.get("sites", 0))
-                results[host]["stored"] = int(outcome.get("pages", 0))
-                if outcome.get("paused"):
-                    report.fail("storage")
-                    return
-                logger.info(
-                    "DB COMMIT SUCCESS: Indexed %s with %d pages (Running total: %d)",
-                    host, int(outcome.get("pages", 0)), await self.indexer.count(),
-                )
-
-        try:
-            async with self.fetcher:
-                await asyncio.gather(*(worker() for _ in range(min(workers, len(targets)))))
-
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("domain pipeline failed: %s", exc)
-            report.fail("orchestrator")
-
-        logger.info("domain pipeline complete: %s", report.as_dict())
-        return {**report.as_dict(), "domains": len(results), "reports": results}
-
-    # -- the semantic seam -------------------------------------------
-    async def answer(self, question: str, documents: list[dict[str, str]] | None = None) -> Any:
-        """Agent 6's hook: a grounded answer, with the model wired later."""
-        return await self.semantic.answer(question, documents)
+    @staticmethod
+    def _tally(counter: dict[str, int], reason: str) -> None:
+        counter[reason] = counter.get(reason, 0) + 1
 
 
-__all__ = ["Orchestrator", "OrchestratorReport"]
+__all__ = ["BatchOutcome", "Orchestrator"]

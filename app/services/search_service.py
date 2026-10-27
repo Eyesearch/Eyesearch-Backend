@@ -1,410 +1,237 @@
-"""Orchestration: cache (Turso) -> live retrieval chain -> async persistence.
+"""The query service the frontend talks to.
 
-The service owns the request budget. A database outage degrades the response
-instead of failing it, and cache writes happen after the response is shaped so
-they never sit on the critical path.
+One place that turns a query into the exact JSON shapes `web/config/api-config.js`
+parses:
+
+* `search()`   → the card contract `GET /v1/search`
+* `suggest()`  → the OpenSearch suggestions shape `[query, [titles]]`
+* `retrieve()` → the flat context contract for AI clients
+
+Every field the cards carry is either read from the index or `null`. Nothing is
+invented: no fabricated thumbnails, no synthesised publish dates, no provider
+snippets passed off as our own extract.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import re
 import time
-from dataclasses import dataclass, field
-from typing import Any, Sequence
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
 
-import httpx
-
-from app.config import Settings, get_settings
-from app.engine.config import get_engine_settings
-from app.engine.relevance import filter_candidates, is_relevant
-from app.engine.store import get_store
-from app.indexer.extractor import extract_candidates
-from app.errors import DatabaseError
-from app.schemas import (
-    AIContextResult,
-    MetaSearchResponse,
-    MetaSearchResult,
-    RagContextItem,
-    RetrieveResponse,
-    SearchResponse,
-    SearchResult,
-)
-from app.services import formatter, live_retrieval
-from app.services.live_retrieval import RawResult, RetrievalOutcome
+from app.engine.config import Settings, get_settings
+from app.engine.store import IndexStore, SearchHit
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on the inline index write that follows a first-time live fetch.
-AUTO_INGEST_TIMEOUT_S = 2.0
+SOURCE_LABEL = "eyesearch_index"
 
-# Strong references so fire-and-forget cache writes are not garbage collected
-# mid-flight; the done-callback releases each one.
-_background_tasks: set[asyncio.Task[Any]] = set()
+_DOCUMENT_EXTENSIONS = (".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx")
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")
+_NEWS_HOSTS = ("thehindu.com", "deccanherald.com", "prajavani.net", "ndtv.com", "timesofindia")
 
-
-def _schedule_write(coro: Any) -> None:
-    task = asyncio.create_task(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "m.youtube.com")
+_YOUTUBE_ID = re.compile(r"(?:v=|/)([A-Za-z0-9_-]{11})(?:[&?/]|$)")
 
 
-@dataclass(slots=True)
-class Acquisition:
-    """Results plus provenance, shared by both endpoints."""
+@dataclass
+class SearchResult:
+    """One result card."""
 
-    query: str
-    results: list[RawResult] = field(default_factory=list)
-    providers: dict[str, int] = field(default_factory=dict)
-    failed: list[dict[str, str]] = field(default_factory=list)
-    cache_hit: bool = False
-    total_estimate: int = 0
-    # "index" = answered by our own FTS5 index, "cache" = Turso result cache,
-    # "live" = external providers.
-    source: str = "live"
-    index_hits: int = 0
-    auto_ingested: int = 0
+    id: str
+    title: str
+    url: str
+    snippet: str
+    source: str = SOURCE_LABEL
+    kind: str = "web"
+    poster_url: str | None = None
+    thumbnail_url: str | None = None
+    published_at: str | None = None
+    score: float = 0.0
 
-    @property
-    def degraded(self) -> bool:
-        return bool(self.failed)
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "url": self.url,
+            "snippet": self.snippet,
+            "source": self.source,
+            "kind": self.kind,
+            "poster_url": self.poster_url,
+            "thumbnail_url": self.thumbnail_url,
+            "published_at": self.published_at,
+            "score": self.score,
+        }
 
-    @property
-    def failed_providers(self) -> list[str]:
-        return [item.get("provider", "unknown") for item in self.failed]
+
+def youtube_thumbnail(url: str) -> str | None:
+    """The deterministic thumbnail for a YouTube video URL, or `None`.
+
+    `i.ytimg.com/vi/<id>/hqdefault.jpg` is a pure function of the video id, so
+    this is a derived value rather than a guess.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in _YOUTUBE_HOSTS:
+        return None
+    match = _YOUTUBE_ID.search(url)
+    if not match:
+        return None
+    return f"https://i.ytimg.com/vi/{match.group(1)}/hqdefault.jpg"
+
+
+def kind_of(url: str) -> str:
+    """A coarse content type, derived only from the URL itself."""
+    path = (urlparse(url).path or "").lower()
+    host = (urlparse(url).hostname or "").lower()
+    if host.endswith(_YOUTUBE_HOSTS) or host == "youtu.be":
+        return "video"
+    if path.endswith(_DOCUMENT_EXTENSIONS):
+        return "document"
+    if path.endswith(_IMAGE_EXTENSIONS):
+        return "image"
+    if any(host.endswith(news_host) for news_host in _NEWS_HOSTS):
+        return "news"
+    return "web"
+
+
+def to_result(hit: SearchHit) -> SearchResult:
+    """Map an index row onto the card contract."""
+    return SearchResult(
+        id=f"eyesearch:{hit.page_id}",
+        title=hit.title or hit.url,
+        url=hit.url,
+        snippet=hit.snippet,
+        kind=kind_of(hit.url),
+        thumbnail_url=youtube_thumbnail(hit.url),
+        score=hit.score,
+    )
 
 
 class SearchService:
-    """Single entry point used by every route."""
+    """Search, suggest and retrieve over the index."""
 
-    def __init__(
-        self,
-        client: httpx.AsyncClient | None = None,
-        settings: Settings | None = None,
-    ) -> None:
-        self._client = client
+    def __init__(self, store: IndexStore, settings: Settings | None = None) -> None:
+        self._store = store
         self._settings = settings or get_settings()
 
-    @property
-    def settings(self) -> Settings:
-        return self._settings
+    async def search(self, query: str, limit: int | None = None, page: int = 1) -> dict[str, Any]:
+        """The `GET /v1/search` payload."""
+        started = time.perf_counter()
+        size = self._clamp_limit(limit)
+        page_number = max(1, min(page, self._settings.search_max_page))
+        offset = (page_number - 1) * size
 
-    def bind_client(self, client: httpx.AsyncClient) -> None:
-        self._client = client
+        hits = await self._store.search(query, limit=size, offset=offset)
+        results = [to_result(hit).as_dict() for hit in hits]
+        took_ms = int((time.perf_counter() - started) * 1000)
 
-    # -- acquisition -----------------------------------------------------
-    async def acquire(self, query: str, limit: int) -> Acquisition:
-        """Index first; on a miss, verify and extract on demand.
-
-        1. `documents_fts` with BM25 ranking (title > URL > snippet) and the
-           universal relevance gate. Any hit is served from our own index.
-        2. On a miss, ask the providers only for *candidate URLs*. Candidates
-           are gated on their own title/URL/snippet, the survivors are fetched
-           and parsed by the native extractor, gated again on the extracted
-           document, and upserted into `documents`/`documents_fts`.
-        3. The response carries our extracts — never a provider's raw text — and
-           the next query for these words is a step-1 hit.
-
-        Nothing is written to `search_records`: that table held unverified
-        provider dumps and is no longer part of the serving path.
-        """
-        normalized = " ".join(query.split())
-        acquisition = Acquisition(query=normalized)
-        engine = get_engine_settings()
-        store = get_store()
-
-        # 1. our own index
-        try:
-            local = await store.search_local(normalized, limit)
-        except Exception as exc:  # a broken index must never fail a request
-            local = []
-            logger.warning("index lookup failed for %r: %s", normalized, exc)
-
-        acquisition.index_hits = len(local)
-        if local:
-            acquisition.results = [
-                RawResult(
-                    title=doc.title,
-                    url=doc.url,
-                    snippet=doc.snippet,
-                    source="eyesearch_index",
-                    position=index,
-                    image_url=doc.favicon_url,
-                    sections=doc.sections,
-                )
-                for index, doc in enumerate(local)
-            ]
-            acquisition.providers = {"eyesearch_index": len(local)}
-            acquisition.source = "index"
-            acquisition.total_estimate = len(local)
-            return acquisition
-
-        # 2. miss: nothing outbound unless discovery is enabled at all
-        if not engine.live_search_enabled:
-            _schedule_write(store.enqueue_backlog(normalized, 0))
-            acquisition.source = "queued"
-            return acquisition
-
-        # 2a. do not hammer the providers for a query we already gave up on
-        try:
-            if await store.recently_queued(normalized):
-                acquisition.source = "queued"
-                return acquisition
-        except Exception as exc:
-            logger.debug("backlog guard skipped for %r: %s", normalized, exc)
-
-        verified = await self._extract_on_demand(normalized, engine)
-        acquisition.failed.extend(verified.get("failed", []))
-        acquisition.auto_ingested = verified["stored"]
-        acquisition.providers = {"eyesearch_index": verified["stored"]}
-        acquisition.index_hits = verified["stored"]
-
-        if verified["documents"]:
-            acquisition.results = [
-                RawResult(
-                    title=document.title,
-                    url=document.url,
-                    snippet=document.snippet,
-                    source="eyesearch_index",
-                    position=index,
-                    image_url=document.favicon_url,
-                )
-                for index, document in enumerate(verified["documents"])
-            ]
-            acquisition.source = "index"
-            acquisition.total_estimate = len(acquisition.results)
-            return acquisition
-
-        # 3. nothing verified: say so, and leave the query for the crawler
-        _schedule_write(store.enqueue_backlog(normalized, 0))
-        acquisition.source = "queued"
-        return acquisition
-
-    async def _extract_on_demand(self, query: str, engine: Any) -> dict[str, Any]:
-        """Discover → gate → extract → gate → upsert. Returns what was verified."""
-        outcome: dict[str, Any] = {
-            "documents": [], "stored": 0, "candidates": 0, "dropped": 0, "failed": []
+        return {
+            "query": query,
+            "page": page_number,
+            "limit": size,
+            "total_estimate": len(results),
+            "took_ms": took_ms,
+            "degraded": False,
+            "cache_hit": True,
+            "providers": {SOURCE_LABEL: len(results)},
+            "failed_providers": [],
+            "results": results,
         }
 
-        try:
-            async with asyncio.timeout(engine.on_demand_budget_seconds):
-                discovery = await live_retrieval.retrieve(
-                    query,
-                    engine.on_demand_max_candidates,
-                    client=self._client,
-                    settings=self._settings,
-                )
-        except (TimeoutError, asyncio.TimeoutError):
-            logger.warning("on-demand discovery timed out for %r", query)
-            return outcome
-        except Exception as exc:
-            logger.warning("on-demand discovery failed for %r: %s", query, exc)
-            return outcome
-
-        outcome["failed"] = list(getattr(discovery, "failed", []) or [])
-        candidates = [
-            {"title": result.title, "url": result.url, "snippet": result.snippet}
-            for result in discovery.results
-        ]
-        outcome["candidates"] = len(candidates)
-
-        # Gate before we spend a single fetch on a candidate.
-        gated = filter_candidates(
-            query, candidates, min_coverage=engine.relevance_min_token_coverage
-        )
-        outcome["dropped"] = len(candidates) - len(gated)
-        if not gated:
-            logger.info(
-                "on-demand: %d candidates for %r all failed the relevance gate",
-                len(candidates),
-                query,
-            )
-            return outcome
-
-        urls = [candidate["url"] for candidate in gated][: engine.on_demand_max_fetches]
-        try:
-            documents = await extract_candidates(
-                urls, client=self._client, settings=engine, limit=engine.on_demand_max_fetches
-            )
-        except Exception as exc:
-            logger.warning("on-demand extraction failed for %r: %s", query, exc)
-            return outcome
-
-        # Gate again, this time on our own extract rather than the provider's text.
-        verified = [
-            document
-            for document in documents
-            if is_relevant(
-                query,
-                title=document.title,
-                url=document.url,
-                snippet=document.snippet,
-                min_coverage=engine.relevance_min_token_coverage,
-            )
-        ]
-        outcome["dropped"] += len(documents) - len(verified)
-        if not verified:
-            return outcome
-
-        try:
-            written = await get_store().ingest_documents(
-                [document.as_row() for document in verified], mode="upsert"
-            )
-            outcome["stored"] = int(written.get("inserted", 0)) + int(written.get("replaced", 0))
-            logger.info(
-                "on-demand: verified %d documents for %r and stored them (%s)",
-                len(verified),
-                query,
-                written,
-            )
-        except Exception as exc:
-            logger.warning("on-demand ingest failed for %r: %s", query, exc)
-
-        outcome["documents"] = verified
-        return outcome
-
-    async def suggest(self, query: str, limit: int | None = None) -> list[str]:
-        """Autocomplete from the index. Never touches the network."""
-        cleaned = " ".join((query or "").split())
-        if len(cleaned) < 2:
-            return []
-        return await get_store().suggest(cleaned, limit or get_engine_settings().suggest_limit)
-
-    # -- contracts -------------------------------------------------------
-    async def search(
-        self,
-        query: str,
-        *,
-        limit: int | None = None,
-        page: int = 1,
-    ) -> SearchResponse:
+    async def search_flat(self, query: str, limit: int | None = None) -> dict[str, Any]:
+        """The meta-search contract (`format=json`), shaped like the README."""
         started = time.perf_counter()
-        cfg = self._settings
-        effective_limit = min(max(1, limit or cfg.default_limit), cfg.max_limit)
-        safe_page = max(1, page)
-        offset = (safe_page - 1) * effective_limit
-        needed = min(offset + effective_limit, cfg.max_limit)
+        size = self._clamp_limit(limit)
+        hits = await self._store.search(query, limit=size)
+        return {
+            "query": query,
+            "total_hits": len(hits),
+            "took_ms": int((time.perf_counter() - started) * 1000),
+            "source": SOURCE_LABEL,
+            "results": [
+                {
+                    "title": hit.title or hit.url,
+                    "url": hit.url,
+                    "snippet": hit.snippet,
+                    "favicon": self._favicon(hit.url),
+                }
+                for hit in hits
+            ],
+        }
 
-        acquisition = await self.acquire(query, needed)
-        window = acquisition.results[offset : offset + effective_limit]
-        cards: list[SearchResult] = formatter.build_ui_results(
-            window, settings=cfg, limit=effective_limit, query=acquisition.query
-        )
-        return SearchResponse(
-            query=acquisition.query,
-            page=safe_page,
-            limit=effective_limit,
-            total_estimate=max(acquisition.total_estimate, len(acquisition.results)),
-            took_ms=int((time.perf_counter() - started) * 1000),
-            degraded=acquisition.degraded,
-            cache_hit=acquisition.cache_hit,
-            source=acquisition.source,
-            index_hits=acquisition.index_hits,
-            auto_ingested=acquisition.auto_ingested,
-            providers=acquisition.providers,
-            results=cards,
-        )
-
-    async def meta_search(self, query: str, *, limit: int | None = None) -> MetaSearchResponse:
-        """The flat, aggregator-friendly JSON contract (`format=json`)."""
-        started = time.perf_counter()
-        cfg = self._settings
-        effective = min(max(1, limit or cfg.default_limit), cfg.max_limit)
-        acquisition = await self.acquire(query, effective)
-
-        results = [
-            MetaSearchResult(
-                title=formatter.clean_snippet(raw.title or raw.url, 160),
-                url=formatter.canonical_url(raw.url),
-                snippet=formatter.clean_snippet(raw.snippet, cfg.snippet_max_chars),
-                favicon=raw.image_url,
-                sitelinks=formatter.rank_sections(
-                    getattr(raw, "sections", []) or [], acquisition.query, base_url=raw.url
-                ),
-            )
-            for raw in formatter.dedupe(acquisition.results)[:effective]
-        ]
-        source = "eyesearch_index" if acquisition.source == "index" else f"eyesearch_{acquisition.source}"
-        return MetaSearchResponse(
-            query=acquisition.query,
-            total_hits=max(acquisition.index_hits, len(results), acquisition.total_estimate),
-            took_ms=int((time.perf_counter() - started) * 1000),
-            source=source,
-            auto_ingested=acquisition.auto_ingested,
-            results=results,
-        )
-
-    async def rag_context(self, query: str, *, limit: int | None = None) -> tuple[list[RagContextItem], Acquisition]:
-        """Token-optimised context blocks for LLM clients."""
-        cfg = self._settings
-        effective = min(max(1, limit or cfg.default_limit), cfg.max_limit)
-        acquisition = await self.acquire(query, effective)
-        context = [
-            RagContextItem(
-                title=formatter.clean_snippet(raw.title or raw.url, 160),
-                url=formatter.canonical_url(raw.url),
-                text=formatter.clean_snippet(raw.snippet, cfg.ai_snippet_max_chars),
-            )
-            for raw in formatter.dedupe(acquisition.results)[:effective]
-        ]
-        return context, acquisition
+    async def suggest(self, query: str, limit: int = 6) -> list[Any]:
+        """The OpenSearch suggestions shape: `[query, [completions]]`."""
+        try:
+            titles = await self._store.suggest(query, limit=limit)
+        except Exception as error:  # suggestions are a convenience, never an error
+            logger.debug("suggest failed for %r: %s", query, error)
+            return [query, []]
+        return [query, titles]
 
     async def retrieve(
         self,
         query: str,
-        *,
         limit: int | None = None,
-    ) -> tuple[list[AIContextResult], Acquisition]:
-        cfg = self._settings
-        effective_limit = min(max(1, limit or cfg.default_limit), cfg.max_limit)
-        acquisition = await self.acquire(query, effective_limit)
-        results = formatter.build_ai_results(
-            acquisition.results, settings=cfg, limit=effective_limit
-        )
-        return results, acquisition
+        format: str = "json",
+    ) -> dict[str, Any] | str:
+        """Token-optimised context for AI clients."""
+        size = self._clamp_limit(limit)
+        hits = await self._store.search(query, limit=size)
+        results = [
+            {"title": hit.title or hit.url, "url": hit.url, "snippet": hit.snippet}
+            for hit in hits
+        ]
+        if format == "markdown":
+            return self._as_markdown(query, results)
+        return {
+            "query": query,
+            "format": format,
+            "degraded": False,
+            "providers": {SOURCE_LABEL: len(results)},
+            "failed_providers": [],
+            "results": results,
+            "context": [
+                {"title": hit.title or hit.url, "url": hit.url, "text": hit.snippet}
+                for hit in hits
+            ],
+        }
 
-    async def retrieve_json(
-        self, query: str, *, limit: int | None = None
-    ) -> RetrieveResponse:
-        results, acquisition = await self.retrieve(query, limit=limit)
-        context = [RagContextItem(title=item.title, url=item.url, text=item.snippet) for item in results]
-        return RetrieveResponse(
-            query=acquisition.query,
-            format="json",
-            degraded=acquisition.degraded,
-            source=acquisition.source,
-            index_hits=acquisition.index_hits,
-            providers=acquisition.providers,
-            failed_providers=acquisition.failed_providers,
-            results=results,
-            context=context,
-        )
+    async def stats(self) -> dict[str, Any]:
+        stats = await self._store.stats()
+        return stats.as_dict()
+
+    # -- helpers -----------------------------------------------------------
+
+    def _clamp_limit(self, limit: int | None) -> int:
+        value = limit if isinstance(limit, int) and limit > 0 else self._settings.search_default_limit
+        return max(1, min(value, self._settings.search_max_limit))
+
+    @staticmethod
+    def _favicon(url: str) -> str:
+        host = (urlparse(url).hostname or "").lower()
+        return f"https://{host}/favicon.ico" if host else ""
+
+    @staticmethod
+    def _as_markdown(query: str, results: list[dict[str, str]]) -> str:
+        lines = [f"# {query}", ""]
+        for index, result in enumerate(results, start=1):
+            lines.append(f"{index}. **{result['title']}**")
+            lines.append(f"   {result['url']}")
+            if result["snippet"]:
+                lines.append(f"   {result['snippet']}")
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
 
 
-_service: SearchService | None = None
-
-
-def get_service() -> SearchService:
-    global _service
-    if _service is None:
-        _service = SearchService()
-    return _service
-
-
-def configure(client: httpx.AsyncClient | None, settings: Settings | None = None) -> SearchService:
-    """Wire the shared HTTP client in from ``lifespan``."""
-    global _service
-    _service = SearchService(client=client, settings=settings)
-    return _service
-
-
-async def drain_background_writes(timeout_s: float = 2.0) -> None:
-    """Best-effort flush of pending cache writes during shutdown."""
-    if not _background_tasks:
-        return
-    pending = list(_background_tasks)
-    try:
-        async with asyncio.timeout(timeout_s):
-            await asyncio.gather(*pending, return_exceptions=True)
-    except (TimeoutError, asyncio.TimeoutError):
-        logger.warning("shutdown: %d cache writes still pending", len(pending))
+__all__ = [
+    "SOURCE_LABEL",
+    "SearchResult",
+    "SearchService",
+    "kind_of",
+    "to_result",
+    "youtube_thumbnail",
+]
