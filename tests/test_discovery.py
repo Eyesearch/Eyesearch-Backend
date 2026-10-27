@@ -762,3 +762,59 @@ async def test_the_row_budget_accommodates_the_deeper_body(temp_db) -> None:
     # the domain ceiling and the 300k page cap are unchanged
     assert cfg.max_site_payload_bytes == 10240
     assert cfg.storage_page_limit == 300000
+
+
+# --- card snippets: deep text, not the domain echoed back ------------------
+
+def test_a_boilerplate_description_is_replaced_by_the_body() -> None:
+    from app.engine.text import rich_snippet
+
+    body = ("The Board supplies water to Bengaluru and manages sewerage across 198 wards. "
+            "It publishes tariff notices and complaint numbers for residents.")
+    snippet = rich_snippet("BWSSB — official website", body, "Bangalore Water Supply and Sewerage Board")
+
+    assert "official website" not in snippet
+    assert snippet.startswith("The Board supplies water")
+    assert len(snippet) <= 200
+
+
+def test_a_real_meta_description_wins() -> None:
+    from app.engine.text import rich_snippet
+
+    description = "Official state portal with citizen services and departmental notices for Karnataka."
+    snippet = rich_snippet(description, "Body text that should not be used.", "Government of Karnataka")
+    assert snippet == description
+
+
+def test_a_long_body_is_cut_on_a_word_boundary_with_an_ellipsis() -> None:
+    from app.engine.text import rich_snippet
+
+    body = "Karnataka publishes district-wise rainfall data every season for every taluk. " * 8
+    snippet = rich_snippet("Karnataka — official website", body, "Karnataka")
+
+    assert len(snippet) <= 201
+    assert snippet.endswith("…")
+    assert not snippet[:-1].endswith(" ")
+
+
+async def test_the_card_carries_the_deep_snippet_and_the_page_title(temp_db) -> None:
+    from app.engine.text import extract_document_with_reason
+
+    html = (
+        "<html><head><title>Bangalore Water Supply and Sewerage Board</title>"
+        "<meta name='description' content='BWSSB — official website'></head>"
+        "<body><h1>BWSSB</h1><p>" + ("The Board supplies water to Bengaluru and manages sewerage "
+                                     "across 198 wards, publishing tariff notices. " * 4) + "</p></body></html>"
+    )
+    document, reason = extract_document_with_reason("https://bwssb.karnataka.gov.in/", html)
+    assert document is not None, reason
+
+    store = get_store()
+    await store.ingest_documents([document.as_row()])
+
+    hits = await store.search_local("water supply", limit=2)
+    assert hits
+    card = hits[0]
+    assert card.title == "Bangalore Water Supply and Sewerage Board"
+    assert "official website" not in card.snippet
+    assert 60 <= len(card.snippet) <= 200
