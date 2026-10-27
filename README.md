@@ -367,9 +367,13 @@ page plus at most five sitelinks** inside the 10 KB domain budget.
 | `06_semantic_ai_agent` | `answer()`, `stream()` | plug-in seam for Indoone AI; grounded answers until wired |
 
 A failure in any stage is caught, counted in the run report and logged — the
-orchestrator and the search API keep serving. The crawler routes every page
-through the fetcher, parser and quality agents, so this is the live path rather
-than a parallel copy. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
+orchestrator and the search API keep serving. **There is only one crawl loop
+now**: `run_seed_pass` pushes its seeds into the frontier and `run_discovery_pass`
+pulls batches from it, and both hand the work to `Orchestrator.run_domains()`,
+which runs the per-domain worker across the fetcher's pooled client with the
+storage cap and quota breaker checked before the first fetch. Each domain is
+written the moment it finishes, so a restart mid-pass keeps what was already
+crawled. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
 `{attempted, fetched, parsed, accepted, rejected, indexed_pages, sites, errors}`.
 
 **The crawl is an audit, not a download.** Each seed root is fetched as desktop
@@ -858,9 +862,13 @@ page plus at most five sitelinks** inside the 10 KB domain budget.
 | `06_semantic_ai_agent` | `answer()`, `stream()` | plug-in seam for Indoone AI; grounded answers until wired |
 
 A failure in any stage is caught, counted in the run report and logged — the
-orchestrator and the search API keep serving. The crawler routes every page
-through the fetcher, parser and quality agents, so this is the live path rather
-than a parallel copy. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
+orchestrator and the search API keep serving. **There is only one crawl loop
+now**: `run_seed_pass` pushes its seeds into the frontier and `run_discovery_pass`
+pulls batches from it, and both hand the work to `Orchestrator.run_domains()`,
+which runs the per-domain worker across the fetcher's pooled client with the
+storage cap and quota breaker checked before the first fetch. Each domain is
+written the moment it finishes, so a restart mid-pass keeps what was already
+crawled. `Orchestrator().run(["eci.gov.in", "ssc.nic.in"])` returns
 `{attempted, fetched, parsed, accepted, rejected, indexed_pages, sites, errors}`.
 
 **The crawl is an audit, not a download.** Each seed root is fetched as desktop
