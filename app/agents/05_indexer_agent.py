@@ -76,6 +76,13 @@ class IndexerAgent:
             total_pages=outcome.total_pages,
         )
 
+    async def park(
+        self,
+        failed_ids: Sequence[int] = (),
+        skipped_ids: Sequence[int] = (),
+    ) -> tuple[int, int]:
+        return await self._store.park_rows(failed_ids, skipped_ids)
+
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
         return await self._store.mark_failed(queue_ids, reason)
 

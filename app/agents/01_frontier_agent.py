@@ -450,12 +450,13 @@ class FrontierAgent:
             candidates = candidates[:capacity]
 
         candidates.sort(key=lambda item: (item.priority, len(item.url), item.url))
-        known = await self._store.known_urls([item.url for item in candidates])
-        fresh = [item for item in candidates if item.url not in known]
-        if not fresh:
-            return 0
 
-        added = await self._store.enqueue_urls([(item.url, item.domain) for item in fresh])
+        # No pre-flight `known_urls` query: `enqueue_urls` is INSERT OR IGNORE
+        # and reports the rows it actually inserted, so it already answers
+        # "how many of these were new" in the one request it has to make
+        # anyway. The extra read was a round trip against the rate limiter on
+        # every batch, for an answer we were about to compute for free.
+        added = await self._store.enqueue_urls([(item.url, item.domain) for item in candidates])
         if added:
             logger.info("frontier: queued %d new URLs (depth now %d)", added, await self.depth())
         return added

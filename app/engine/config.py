@@ -62,15 +62,18 @@ class Settings(BaseSettings):
     # the environment, so a smaller instance can be dialled back without a code
     # change.
     crawler_enabled: bool = True
-    crawl_batch_size: int = 60
-    crawl_batch_sleep_seconds: float = 0.05
+    #: Throughput is (batch_size / per-batch database floor), so this scales the
+    #: crawl directly. It is also the memory ceiling: the fetcher holds every
+    #: body in a batch before parsing, so peak ~= batch_size x max_body_bytes.
+    crawl_batch_size: int = 80
+    crawl_batch_sleep_seconds: float = 0.02
     crawl_empty_backoff_seconds: float = 2.0
     # A batch waits for its slowest member, so this bounds the whole batch, not
     # just one request. 4s fails fast on dead hosts; some Indian government
     # portals legitimately take longer, so raise it if the failure rate climbs.
-    crawl_timeout_seconds: float = 4.0
+    crawl_timeout_seconds: float = 3.5
     crawl_max_body_bytes: int = 512_000
-    crawl_concurrency: int = 30
+    crawl_concurrency: int = 40
     #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
     #: as Indian ones. Off by default: the crawl targets the Indian web, and an
     #: open global ring dilutes the index and re-opens the spider-trap surface.

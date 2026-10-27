@@ -455,6 +455,36 @@ class IndexStore:
             logger.info("marked %d queue rows skipped: %s", skipped, reason)
         return skipped
 
+    async def park_rows(
+        self,
+        failed_ids: Sequence[int] = (),
+        skipped_ids: Sequence[int] = (),
+    ) -> tuple[int, int]:
+        """Close failed and skipped rows in a single round trip.
+
+        These were two separate calls, and every round trip costs a slot
+        against the rate limiter that bounds the whole crawl.
+        """
+        statements: list[tuple[str, Sequence[Any]]] = [
+            (
+                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1 "
+                "WHERE rowid = ?",
+                (rowid,),
+            )
+            for rowid in failed_ids
+        ]
+        statements.extend(
+            ("UPDATE crawl_queue SET status = 'skipped' WHERE rowid = ?", (rowid,))
+            for rowid in skipped_ids
+        )
+        if not statements:
+            return (0, 0)
+
+        results = await self._client.batch(statements)
+        failed = sum(1 for result in results[: len(failed_ids)] if result.rows_affected > 0)
+        skipped = sum(1 for result in results[len(failed_ids) :] if result.rows_affected > 0)
+        return failed, skipped
+
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
         """Park queue rows that cannot be indexed, so the batch can move on."""
         if not queue_ids:

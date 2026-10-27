@@ -261,15 +261,9 @@ class Orchestrator:
 
         outcome.accepted = len(documents)
 
-        if failed_ids:
-            outcome.queue_failed = await self._indexer.mark_failed(
-                failed_ids, reason="fetch, parse or quality gate rejected the page"
-            )
-
-        if skipped_ids:
-            await self._indexer.mark_skipped(
-                skipped_ids, reason=f"domain reached its {cap}-page cap"
-            )
+        if failed_ids or skipped_ids:
+            failed, _skipped = await self._indexer.park(failed_ids, skipped_ids)
+            outcome.queue_failed = failed
             # Park the rest of the backlog for those domains too, so the depth
             # reflects real work and new domains are not dropped at the cap.
             for domain in {item.domain for item in queue if item.rowid in set(skipped_ids)}:
