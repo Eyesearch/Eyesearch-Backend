@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     storage_count_ttl_seconds: float = 60.0
 
     # --- Turso request shaping ---------------------------------------------
-    libsql_min_interval_seconds: float = 0.5
+    # One shared limiter covers crawl, revalidation, and search. 0.1s allows
+    # up to 10 HTTP pipeline requests/second by default; deployments can raise
+    # this value to match a stricter database plan or provider throttling.
+    libsql_min_interval_seconds: float = 0.1
 
     # --- Crawl pipeline -----------------------------------------------------
     # Tuned for throughput on a single 512 MB instance. `crawl_batch_size`
