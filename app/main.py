@@ -23,7 +23,6 @@ from app import database
 from app.config import Settings, get_settings
 from app.errors import AppError, DatabaseError, error_envelope
 from app.engine.config import get_engine_settings
-from app.indexer import crawler as seed_crawler
 from app.indexer import scheduler as revalidate_scheduler
 from app.routes import chat, health, opensearch, retrieve, search
 from app.services import live_retrieval, search_service
@@ -68,7 +67,7 @@ def _build_http_client(settings: Settings) -> httpx.AsyncClient:
 
 
 async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str, str]) -> None:
-    """Initialize dependencies and workers off the ASGI startup critical path."""
+    """Initialize Turso, then run only the isolated baseline URL ingestion worker."""
     if settings.requires_remote_db and not settings.is_remote_db:
         message = (
             f"refusing database initialization: environment={settings.environment} but the "
@@ -79,8 +78,6 @@ async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str
         logger.critical(message)
         return
 
-    # A database outage must not prevent Uvicorn from binding its port. Retry
-    # asynchronously while /health remains a fast liveness response.
     while not app.state.db_ready:
         try:
             await database.connect(settings)
@@ -90,12 +87,17 @@ async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str
             raise
         except Exception as exc:
             app.state.db_error = str(exc)
-            logger.error("database initialization failed; retrying in 15s: %s", exc)
+            logger.exception("database initialization failed; retrying in 15s: %s", exc)
             await asyncio.sleep(15)
             continue
+
         app.state.db_ready = True
         app.state.db_error = ""
         logger.info("database ready (%s): %s", target["kind"], target["url"])
+
+    # BASELINE MODE: only crawl_queue -> fetch -> basic parse -> pages persistence.
+    # Do not start seed, discovery, revalidation, backlog, quality, or semantic paths.
+    revalidate_scheduler.start_url_queue_worker()
 
     try:
         from app.engine.store import get_store
@@ -106,29 +108,12 @@ async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str
             "backlog": int(stats.get("backlog", 0)),
         }
         logger.info(
-            "index: %d documents, %d queued queries (%s)",
-            stats.get("documents", 0), stats.get("backlog", 0), target["url"],
+            "baseline mode active: pages=%s pending_queue=%s",
+            stats.get("pages", stats.get("documents", 0)),
+            stats.get("crawl_queue_pending", "unknown"),
         )
-    except Exception as exc:
-        logger.warning("index stats unavailable during initialization: %s", exc)
-
-    # These maintenance probes may involve several remote database requests;
-    # they run only after the server is already serving HTTP.
-    try:
-        purged = await database.execute_safe(
-            "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
-            "WHERE COALESCE(kind, 'query') = 'query' AND status = 'pending' "
-            "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
-        )
-        logger.info("startup: blocked backlog queries purged (%s)", type(purged).__name__)
-    except Exception as exc:
-        logger.warning("startup backlog purge failed: %s", exc)
-
-    try:
-        refill = await seed_crawler.refill_frontier()
-        app.state.queue_depth = refill["after"]
-    except Exception as exc:
-        logger.warning("startup frontier refill failed: %s", exc)
+    except Exception:
+        logger.exception("post-start index stats failed")
 
     try:
         probe = await database.verify_database()
@@ -136,31 +121,12 @@ async def _initialize_runtime(app: FastAPI, settings: Settings, target: dict[str
         app.state.db_counts = probe.get("counts", {})
         if not app.state.db_writable:
             logger.error(
-                "database is NOT writable (%s) — crawler persistence is unavailable",
+                "database is NOT writable; baseline page persistence will report each failure: %s",
                 probe.get("error") or "unknown reason",
             )
-    except Exception as exc:
+    except Exception:
         app.state.db_writable = False
-        logger.error("startup write probe failed: %s", exc)
-
-    try:
-        state = await seed_crawler.coverage()
-        app.state.seed_coverage = state
-        logger.info(
-            "seed coverage: %s sites, %s/%s seed domains; sufficient=%s",
-            state.get("sites"), state.get("covered"), state.get("seed_domains"),
-            state.get("sufficient"),
-        )
-    except Exception as exc:
-        logger.warning("seed coverage check failed: %s", exc)
-
-    # Workers are scheduled only after the ASGI lifespan has yielded and the
-    # database has initialized successfully.
-    revalidate_scheduler.start()
-    revalidate_scheduler.start_backlog_worker()
-    revalidate_scheduler.start_url_queue_worker()
-    revalidate_scheduler.start_seed_crawler(initial_pass=True)
-    revalidate_scheduler.start_discovery_worker()
+        logger.exception("post-start database write probe failed")
 
 
 @asynccontextmanager
@@ -203,11 +169,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.exception("runtime initializer stopped with an error")
 
-        await revalidate_scheduler.stop_discovery_worker()
-        await revalidate_scheduler.stop_seed_crawler()
-        await revalidate_scheduler.stop_backlog_worker()
         await revalidate_scheduler.stop_url_queue_worker()
-        await revalidate_scheduler.stop()
         await search_service.drain_background_writes()
         await http_client.aclose()
         await database.close()
