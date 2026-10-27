@@ -17,6 +17,7 @@ FTS_COLUMNS: tuple[str, ...] = (
     "title",
     "headings",
     "description",
+    "content",
     "nav_terms",
     "site_terms",
     "category_terms",
@@ -24,7 +25,7 @@ FTS_COLUMNS: tuple[str, ...] = (
 )
 
 # bm25 weights, matching FTS_COLUMNS one-for-one.
-BM25_WEIGHTS: tuple[float, ...] = (10.0, 5.0, 2.5, 3.0, 4.0, 1.0, 2.0)
+BM25_WEIGHTS: tuple[float, ...] = (10.0, 5.0, 2.5, 1.5, 3.0, 4.0, 1.0, 2.0)
 
 SITES_TABLE = """
 CREATE TABLE IF NOT EXISTS sites (
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS pages (
     title TEXT NOT NULL DEFAULT '',
     headings TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
     nav_terms TEXT NOT NULL DEFAULT '',
     site_terms TEXT NOT NULL DEFAULT '',
     category_terms TEXT NOT NULL DEFAULT '',
@@ -64,6 +66,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS page_fts USING fts5(
     title,
     headings,
     description,
+    content,
     nav_terms,
     site_terms,
     category_terms,
@@ -78,22 +81,22 @@ CREATE VIRTUAL TABLE IF NOT EXISTS page_fts USING fts5(
 PAGE_TRIGGERS: tuple[str, ...] = (
     """
     CREATE TRIGGER IF NOT EXISTS pages_ai AFTER INSERT ON pages BEGIN
-        INSERT INTO page_fts(rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
-        VALUES (new.page_id, new.title, new.headings, new.description, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
+        INSERT INTO page_fts(rowid, title, headings, description, content, nav_terms, site_terms, category_terms, url_terms)
+        VALUES (new.page_id, new.title, new.headings, new.description, new.content, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
     END
     """,
     """
     CREATE TRIGGER IF NOT EXISTS pages_ad AFTER DELETE ON pages BEGIN
-        INSERT INTO page_fts(page_fts, rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
-        VALUES ('delete', old.page_id, old.title, old.headings, old.description, old.nav_terms, old.site_terms, old.category_terms, old.url_terms);
+        INSERT INTO page_fts(page_fts, rowid, title, headings, description, content, nav_terms, site_terms, category_terms, url_terms)
+        VALUES ('delete', old.page_id, old.title, old.headings, old.description, old.content, old.nav_terms, old.site_terms, old.category_terms, old.url_terms);
     END
     """,
     """
     CREATE TRIGGER IF NOT EXISTS pages_au AFTER UPDATE ON pages BEGIN
         INSERT INTO page_fts(page_fts, rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
         VALUES ('delete', old.page_id, old.title, old.headings, old.description, old.nav_terms, old.site_terms, old.category_terms, old.url_terms);
-        INSERT INTO page_fts(rowid, title, headings, description, nav_terms, site_terms, category_terms, url_terms)
-        VALUES (new.page_id, new.title, new.headings, new.description, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
+        INSERT INTO page_fts(rowid, title, headings, description, content, nav_terms, site_terms, category_terms, url_terms)
+        VALUES (new.page_id, new.title, new.headings, new.description, new.content, new.nav_terms, new.site_terms, new.category_terms, new.url_terms);
     END
     """,
 )
@@ -159,6 +162,7 @@ LEGACY_TRIGGERS: tuple[str, ...] = (
 ENGINE_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("crawl_backlog", "kind TEXT NOT NULL DEFAULT 'query'"),
     ("crawl_backlog", "reason TEXT"),
+    ("pages", "content TEXT NOT NULL DEFAULT ''"),
 )
 
 __all__ = [

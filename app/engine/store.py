@@ -24,10 +24,9 @@ from app.engine.config import EngineSettings, get_engine_settings
 from app.engine.ranking import RankedDocument, rank_documents
 from app.engine.relevance import is_relevant
 from app.engine.schema import BM25_WEIGHTS
-from app.engine.text import detect_language
+from app.engine.text import detect_language, truncate
 from app.engine.urls import domain_class, is_indexable, normalise_url, root_domain
 from app.errors import DatabaseError, StorageQuotaError
-from app.indexer.guard import is_quota_error, trip_quota
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ _BM25_LIST = ", ".join(f"{weight:.1f}" for weight in BM25_WEIGHTS)
 # The retrieval query from the brief: weighted bm25, live pages only, best first.
 _SEARCH_SQL = f"""
 SELECT p.page_id, p.site_id, s.domain, s.name, s.category, p.url, p.title,
-       p.description, p.kind, p.last_crawled_at,
+       p.description, p.content, p.kind, p.last_crawled_at,
        bm25(page_fts, {_BM25_LIST}) AS lexical_score
 FROM page_fts
 JOIN pages p ON p.page_id = page_fts.rowid
@@ -70,15 +69,16 @@ ON CONFLICT(domain) DO UPDATE SET
 
 _PAGE_UPSERT = """
 INSERT INTO pages (
-    site_id, url, kind, title, headings, description, nav_terms, site_terms,
+    site_id, url, kind, title, headings, description, content, nav_terms, site_terms,
     category_terms, url_terms, http_status, noindex, canonical_url, content_hash, last_crawled_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(url) DO UPDATE SET
     site_id = excluded.site_id,
     kind = excluded.kind,
     title = excluded.title,
     headings = excluded.headings,
     description = excluded.description,
+    content = excluded.content,
     nav_terms = excluded.nav_terms,
     site_terms = excluded.site_terms,
     category_terms = excluded.category_terms,
@@ -92,9 +92,9 @@ ON CONFLICT(url) DO UPDATE SET
 
 _PAGE_REPLACE = """
 INSERT OR REPLACE INTO pages (
-    site_id, url, kind, title, headings, description, nav_terms, site_terms,
+    site_id, url, kind, title, headings, description, content, nav_terms, site_terms,
     category_terms, url_terms, http_status, noindex, canonical_url, content_hash, last_crawled_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -109,6 +109,9 @@ async def _batch(client: Any, statements: Sequence[tuple[str, list[Any]]], *, st
     except TypeError:
         await client.batch(list(statements))
     except Exception as exc:
+        # Imported here: the guard reaches back into this module for counts.
+        from app.indexer.guard import is_quota_error, trip_quota
+
         if is_quota_error(exc):
             trip_quota(str(exc)[:200])
             raise StorageQuotaError(f"database storage exhausted: {exc}") from exc
@@ -143,11 +146,15 @@ def passes_relevance(query: str, document: RankedDocument, settings: EngineSetti
         f"{section.get('title', '')} {section.get('url', '')}"
         for section in (document.sections or [])
     )
+    # The extracted body is now part of the record (up to 1.2 KB of clean prose),
+    # so a term that appears only there is a genuine match rather than a footer
+    # artefact — navigation and footers are stripped before this point.
+    body = truncate(str(getattr(document, "body", "") or ""), 1200)
     return is_relevant(
         query,
         title=document.title or "",
         url=document.url or "",
-        snippet=f"{document.snippet or ''} {section_text}".strip(),
+        snippet=f"{document.snippet or ''} {section_text} {body}".strip(),
         min_coverage=settings.relevance_min_token_coverage,
     )
 
@@ -360,6 +367,7 @@ class IndexStore:
                         title,
                         str(doc.get("headings") or "")[:500],
                         str(doc.get("description") or doc.get("snippet") or "")[:500],
+                        str(doc.get("content") or doc.get("body_text") or "")[:1200],
                         str(doc.get("nav_terms") or "")[:500],
                         str(doc.get("site_terms") or host.replace(".", " "))[:300],
                         str(doc.get("category_terms") or doc.get("category") or "")[:80],
@@ -397,6 +405,7 @@ class IndexStore:
                             section_title[:120],
                             "",
                             str(section.get("snippet") or "")[:200],
+                            str(section.get("snippet") or section_title)[:300],
                             section_title[:200],
                             str(doc.get("site_terms") or host.replace(".", " "))[:300],
                             str(doc.get("category_terms") or doc.get("category") or "")[:80],
@@ -500,7 +509,7 @@ class IndexStore:
         for site_id, matched in best.items():
             try:
                 pages = await execute_safe(
-                    "SELECT url, kind, title, description, last_crawled_at FROM pages "
+                    "SELECT url, kind, title, description, content, last_crawled_at FROM pages "
                     "WHERE site_id = ? AND http_status = 200 AND noindex = 0 "
                     "ORDER BY CASE kind WHEN 'root' THEN 0 ELSE 1 END, page_id LIMIT 12",
                     [site_id],
@@ -512,9 +521,17 @@ class IndexStore:
 
             root = None
             sitelinks: list[dict[str, str]] = []
-            for url, kind, title, description, crawled in page_rows:
+            bodies: dict[str, str] = {}
+            for url, kind, title, description, content, crawled in page_rows:
+                bodies[str(url)] = str(content or "")
                 if kind == "root" and root is None:
-                    root = {"url": url, "title": title, "description": description, "crawled": crawled}
+                    root = {
+                        "url": url,
+                        "title": title,
+                        "description": description,
+                        "content": content,
+                        "crawled": crawled,
+                    }
                 elif kind == "sitelink":
                     sitelinks.append(
                         {"title": str(title), "url": str(url), "snippet": str(description or "")}
@@ -525,8 +542,13 @@ class IndexStore:
                 "url": matched.get("url"),
                 "title": matched.get("title"),
                 "description": matched.get("description"),
+                "content": matched.get("content"),
                 "crawled": matched.get("last_crawled_at"),
             }
+            # A site whose only matched page is a sitelink still has body text:
+            # take it from that page rather than losing the match.
+            if not primary.get("content"):
+                primary["content"] = bodies.get(str(primary.get("url") or ""), "")
             documents.append(
                 RankedDocument(
                     url=str(primary["url"]),
@@ -538,6 +560,7 @@ class IndexStore:
                     # The schema stores no icon; the conventional location is a
                     # fine fallback and the UI degrades to a letter tile anyway.
                     favicon_url=f"https://{domain}/favicon.ico" if domain else None,
+                    body=str(primary.get("content") or ""),
                     sections=sitelinks[: self.settings.sections_max],
                 )
             )
@@ -574,7 +597,7 @@ class IndexStore:
         key = normalise_url(url)
         try:
             result = await execute_safe(
-                "SELECT page_id, site_id, url, kind, title, description, canonical_url, "
+                "SELECT page_id, site_id, url, kind, title, description, content, canonical_url, "
                 "content_hash, last_crawled_at FROM pages WHERE url = ? LIMIT 1",
                 [key],
             )
@@ -584,7 +607,10 @@ class IndexStore:
         if not rows:
             return None
 
-        page_id, site_id, page_url, kind, title, description, canonical, content_hash, crawled = rows[0]
+        (
+            page_id, site_id, page_url, kind, title, description, content,
+            canonical, content_hash, crawled,
+        ) = rows[0]
         site = None
         try:
             site_row = await execute_safe(
@@ -601,7 +627,7 @@ class IndexStore:
             "title": str(title),
             "snippet": str(description or ""),
             "description": str(description or ""),
-            "content": str(description or ""),
+            "content": str(content or ""),
             "canonical_url": str(canonical or page_url),
             "content_hash": str(content_hash or ""),
             "domain": str(site[0]) if site else root_domain(page_url),

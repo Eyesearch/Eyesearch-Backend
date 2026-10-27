@@ -55,7 +55,10 @@ class EngineSettings:
 
     # --- storage budget (1-2 KB per page) --------------------------------
     # Per page, and per domain across its root and sitelinks (the brief's 10 KB).
-    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 4096))
+    # Deep extraction: a page carries up to 1.2 KB of body text, so the row
+    # budget is 8 KB while the domain budget stays at 10 KB.
+    max_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_PAYLOAD_BYTES", 8192))
+    body_max_chars: int = field(default_factory=lambda: _int("INDEX_BODY_MAX_CHARS", 1200))
     max_site_payload_bytes: int = field(default_factory=lambda: _int("INDEX_MAX_SITE_PAYLOAD_BYTES", 10240))
     title_max_chars: int = field(default_factory=lambda: _int("INDEX_TITLE_MAX_CHARS", 100))
     snippet_max_chars: int = field(default_factory=lambda: _int("INDEX_SNIPPET_MAX_CHARS", 200))

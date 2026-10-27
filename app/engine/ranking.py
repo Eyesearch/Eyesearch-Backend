@@ -26,6 +26,8 @@ class RankedDocument:
     bm25: float
     favicon_url: str | None = None
     sections: list[dict[str, str]] = field(default_factory=list)
+    # The page's extracted body text, used by the relevance gate.
+    body: str = ""
     score: float = 0.0
 
 

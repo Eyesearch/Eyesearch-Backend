@@ -23,6 +23,7 @@ import libsql_client
 from app.config import Settings, get_settings
 from app.engine.schema import (
     ENGINE_MIGRATIONS,
+    FTS_COLUMNS,
     ENGINE_SCHEMA,
     LEGACY_TABLES,
     LEGACY_TRIGGERS,
@@ -388,6 +389,8 @@ async def _ensure_page_fts() -> None:
         not existing_sql
         or "content='pages'" not in existing_sql
         or "unicode61" not in existing_sql
+        # every indexed column must be present, or the triggers will fail
+        or any(column not in existing_sql for column in FTS_COLUMNS)
     )
 
     if needs_rebuild:

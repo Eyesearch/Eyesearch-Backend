@@ -120,6 +120,7 @@ class ExtractedDocument:
     sections: list[dict[str, str]] = field(default_factory=list)
     # The term fields the two-tier schema indexes (see app/engine/schema.py).
     headings: str = ""
+    body_text: str = ""
     nav_terms: str = ""
     site_terms: str = ""
     category_terms: str = ""
@@ -128,7 +129,7 @@ class ExtractedDocument:
     def payload_bytes(self) -> int:
         """UTF-8 size of what will actually be stored for this page."""
         fields = (
-            self.url, self.title, self.headings, self.description,
+            self.url, self.title, self.headings, self.description, self.body_text,
             self.nav_terms, self.site_terms, self.category_terms, self.url_terms,
         )
         fields = fields + (self.sections_json(),)
@@ -170,13 +171,14 @@ class ExtractedDocument:
             "title": self.title,
             "headings": self.headings,
             "description": self.description,
+            "content": self.body_text,
             "nav_terms": self.nav_terms,
             "site_terms": self.site_terms,
             "category_terms": self.category_terms,
             "url_terms": self.url_terms,
             # kept for callers that still read the old shape
             "snippet": self.snippet,
-            "content": self.content,
+            "summary": self.content,
             "language": self.language,
             "favicon_url": self.favicon_url,
             "category": self.category,
@@ -444,6 +446,7 @@ def extract_document_with_reason(
         language=detect_language(f"{title} {body}"),
         favicon_url=favicon,
     )
+    document.body_text = truncate(body, settings.body_max_chars)
     document.site_terms = truncate(
         f"{document.root_domain.replace('.', ' ')} {title}", 120
     )
