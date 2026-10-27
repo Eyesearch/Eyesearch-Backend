@@ -430,6 +430,14 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**The frontier never starves.** `refill_frontier()` tops the queue up to
+`FRONTIER_BUFFER_TARGET` (150) from registry seeds first, then from sitelink URLs
+already stored, and mirrors every queued domain into `crawl_queue` so the buffer
+is visible in the table operators watch. It runs at startup, and by hand with
+`python -m app.indexer.crawler --refill`. Startup also purges backlog queries
+whose only outcome was a block, and the discovery worker logs a per-domain line
+(`discovery indexed <host>: N pages (sites now M)`) so a pass is easy to follow.
+
 **Bot blocks are answered once, not retried forever.** The fetcher rotates two
 current desktop profiles (Chrome 128 on Windows, Safari 17 on macOS) with
 `Accept-Language: en-US,en;q=0.9` and the `sec-ch-ua` client hints, a different
@@ -936,6 +944,14 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**The frontier never starves.** `refill_frontier()` tops the queue up to
+`FRONTIER_BUFFER_TARGET` (150) from registry seeds first, then from sitelink URLs
+already stored, and mirrors every queued domain into `crawl_queue` so the buffer
+is visible in the table operators watch. It runs at startup, and by hand with
+`python -m app.indexer.crawler --refill`. Startup also purges backlog queries
+whose only outcome was a block, and the discovery worker logs a per-domain line
+(`discovery indexed <host>: N pages (sites now M)`) so a pass is easy to follow.
 
 **Bot blocks are answered once, not retried forever.** The fetcher rotates two
 current desktop profiles (Chrome 128 on Windows, Safari 17 on macOS) with
