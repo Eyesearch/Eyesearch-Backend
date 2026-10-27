@@ -44,31 +44,39 @@ class IndexerAgent:
         """False when the storage ceiling or the quota breaker says stop."""
         try:
             return not await storage_paused(self.store, self.settings)
-        except Exception as exc:
-            logger.warning("storage check failed: %s", exc)
-            return True
+        except Exception:
+            logger.exception("storage check failed; refusing database writes")
+            return False
 
     async def persist(self, documents: Sequence[Any]) -> dict[str, int]:
-        """Write documents, returning the store's counters."""
+        """Write documents, reporting a failure when no page was persisted."""
+        empty = {"pages": 0, "sites": 0, "sitelinks": 0}
         if not documents:
-            return {"pages": 0, "sites": 0, "sitelinks": 0}
+            return empty
         if not await self.can_write():
             logger.warning("indexer paused: storage safety threshold reached")
-            return {"pages": 0, "sites": 0, "sitelinks": 0, "paused": 1}
+            return {**empty, "paused": 1}
 
-        rows = [doc.as_row() if hasattr(doc, "as_row") else dict(doc) for doc in documents]
         try:
+            rows = [
+                doc.as_row() if hasattr(doc, "as_row") else dict(doc)
+                for doc in documents
+            ]
             outcome = await self.store.replace_documents(rows)
-        except Exception as exc:
-            logger.error("index write failed: %s", exc)
-            return {"pages": 0, "sites": 0, "sitelinks": 0, "error": 1}
+            pages = int(outcome.get("pages", 0) or 0)
+            if pages <= 0:
+                logger.error("index write returned no persisted pages: %s", outcome)
+                return {**empty, **outcome, "pages": 0, "error": 1}
 
-        total = await self.count()
-        logger.info(
-            "DB COMMIT SUCCESS: indexed %d pages (%d sites, running total %d)",
-            outcome.get("pages", 0), outcome.get("sites", 0), total,
-        )
-        return outcome
+            total = await self.count()
+            logger.info(
+                "DB COMMIT SUCCESS: indexed %d pages (%d sites, running total %d)",
+                pages, int(outcome.get("sites", 0) or 0), total,
+            )
+            return outcome
+        except Exception:
+            logger.exception("index write failed")
+            return {**empty, "error": 1}
 
     async def count(self) -> int:
         try:
