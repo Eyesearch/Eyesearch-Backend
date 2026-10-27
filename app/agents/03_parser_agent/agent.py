@@ -1,7 +1,6 @@
 """Agent 3 — the parser: HTML in, a bounded document out.
 
-Clean body text is capped at 1,200 characters (the Google-standard snippet
-depth), alongside headings (h1/h2), the meta description and up to five
+Clean body text is capped at 1,000 characters, alongside headings (h1/h2), the meta description and up to five
 sitelinks. The parser never raises: a failure is a `ParseResult` with a reason.
 """
 
@@ -66,10 +65,17 @@ class ParserAgent:
         if document is None:
             return ParseResult(url=url, reason=reason or "not_extracted")
 
-        # The depth limit is enforced here, once, whatever the extractor produced.
-        limit = self.settings.body_max_chars
-        if len(document.body_text) > limit:
-            document.body_text = document.body_text[:limit]
+        # Enforce a strict hard cap, regardless of environment configuration.
+        limit = min(1_000, max(1, int(self.settings.body_max_chars)))
+        body = str(document.body_text or "")
+        if len(body) > limit:
+            truncated = body[: limit - 1]
+            boundary = truncated.rfind(" ")
+            if boundary > 0:
+                truncated = truncated[:boundary]
+            document.body_text = truncated.rstrip() + "…"
+        else:
+            document.body_text = body
         return ParseResult(url=url, document=document)
 
 
