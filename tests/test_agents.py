@@ -426,7 +426,7 @@ async def test_the_backlog_drops_a_query_after_repeated_blocks(temp_db, monkeypa
     await store.enqueue_backlog("a query that stays blocked", hits=1)
 
     async def _nothing(query, *, store=None, settings=None, client=None):
-        return {"urls": 0, "inserted": 0, "skipped": 0, "reason": "blocked"}
+        return {"urls": 0, "inserted": 0, "skipped": 0, "reason": "unreachable"}
 
     monkeypatch.setattr(backlog_worker, "resolve_query", _nothing)
     settings = EngineSettings(crawl_enabled=True, backlog_max_attempts=2)
@@ -437,4 +437,85 @@ async def test_the_backlog_drops_a_query_after_repeated_blocks(temp_db, monkeypa
 
     second = await backlog_worker.run_backlog_once(store=store, settings=settings)
     assert second["dropped"] == 1
-    assert await store.pending_backlog(5) == [], "a blocked query goes to history"
+    assert await store.pending_backlog(5) == [], "an exhausted query goes to history"
+
+
+async def test_a_blocked_query_is_dropped_on_the_first_pass(temp_db, monkeypatch) -> None:
+    """'zepto' returning 403 everywhere must not sit in the queue for three passes."""
+    from app.indexer import backlog_worker
+
+    store = get_store()
+    await store.enqueue_backlog("zepto", hits=2)
+
+    async def _blocked(query, *, store=None, settings=None, client=None):
+        return {"urls": 3, "inserted": 0, "skipped": 3, "reason": "blocked"}
+
+    monkeypatch.setattr(backlog_worker, "resolve_query", _blocked)
+
+    report = await backlog_worker.run_backlog_once(
+        store=store, settings=EngineSettings(crawl_enabled=True, backlog_max_attempts=3)
+    )
+
+    assert report["dropped"] == 1
+    assert await store.pending_backlog(5) == []
+
+
+# --- queue refill and blocked-query purge ---------------------------------
+
+async def test_the_frontier_mirrors_queued_domains_into_crawl_queue(temp_db) -> None:
+    frontier = FrontierAgent(store=get_store(), config=FrontierConfig())
+
+    assert await frontier.enqueue("eci.gov.in", reason="seed") is True
+    assert await frontier.queue_depth() == 1
+
+    result = await database.execute_safe("SELECT url, status FROM crawl_queue")
+    queued = [(str(url), str(status)) for url, status in result.rows]
+    assert queued == [("https://eci.gov.in/", "pending")]
+
+    await frontier.mark_done("eci.gov.in")
+    assert await frontier.queue_depth() == 0
+
+
+async def test_the_refill_pass_fills_the_buffer_to_the_target(temp_db) -> None:
+    from app.indexer import crawler as pipeline
+
+    store = get_store()
+    report = await pipeline.refill_frontier(
+        target=25, store=store, settings=EngineSettings(frontier_buffer_target=25)
+    )
+
+    assert report["after"] == 25
+    assert report["seeds"] == 25
+    assert await store.queue_depth() == 25
+    # the backlog the pipeline reads is populated too
+    assert await store.pending_domain_count() == 25
+
+
+async def test_the_refill_pass_does_not_overfill(temp_db) -> None:
+    from app.indexer import crawler as pipeline
+
+    store = get_store()
+    await pipeline.refill_frontier(target=10, store=store, settings=EngineSettings())
+    again = await pipeline.refill_frontier(target=10, store=store, settings=EngineSettings())
+
+    assert again["before"] == 10
+    assert again["after"] == 10
+    assert again["seeds"] == 0, "a full buffer queues nothing new"
+
+
+async def test_blocked_backlog_rows_are_purged(temp_db) -> None:
+    store = get_store()
+    client = database.get_client()
+
+    await store.enqueue_backlog("zepto", hits=3)
+    await store.enqueue_backlog("blinkit", hits=2)
+    await store.enqueue_backlog("karnataka budget", hits=1)
+    await client.execute("UPDATE crawl_backlog SET last_error = 'blocked (403)' WHERE query IN ('zepto','blinkit')")
+
+    purged = await store.purge_blocked_queries()
+
+    assert purged >= 1
+    pending = await store.pending_backlog(10)
+    assert "zepto" not in pending
+    assert "blinkit" not in pending
+    assert "karnataka budget" in pending
