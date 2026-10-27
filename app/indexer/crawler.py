@@ -231,107 +231,123 @@ async def run_url_pass(
     quality: QualityAgent | None = None,
     indexer: IndexerAgent | None = None,
 ) -> dict[str, object]:
-    """Drain pending URL rows through fetch, parse, quality and persistence."""
+    """Baseline ingestion only: fetch -> basic parse -> direct Turso store.
+
+    The optional agent parameters remain for API compatibility but are
+    intentionally not used by this isolated production path. Extra agents and
+    quality gates must not sit between a valid fetched page and persistence.
+    """
     cfg = settings or get_engine_settings()
     limit = max(1, min(10, int(batch_size)))
     report: dict[str, object] = {"attempted": 0, "processed": 0, "failed": 0}
 
     try:
-        result = await execute_safe(
-            "SELECT rowid AS id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT 10"
+        result = database._normalise_result(
+            await database._execute(
+                "SELECT rowid AS id, url, domain FROM crawl_queue "
+                "WHERE status = 'pending' ORDER BY rowid LIMIT ?",
+                [limit],
+            )
         )
         rows = list(getattr(result, "rows", ()) or ())
     except Exception as exc:
-        logger.exception("URL queue poll failed: %s", exc)
+        logger.exception("BASELINE queue poll failed (limit=%s): %s", limit, exc)
         report["error"] = str(exc)
         return report
 
     if not rows:
         report["empty"] = True
-        # Keep the queue's idle cadence low; scheduler adds its mandatory 2s throttle.
-        await asyncio.sleep(15.0)
         return report
 
-    active_fetcher = fetcher or FetcherAgent(cfg)
-    active_parser = parser or ParserAgent(cfg)
-    active_quality = quality or QualityAgent(cfg)
-    active_indexer = indexer or IndexerAgent(store=store, settings=cfg)
+    from app.engine.store import get_store
 
-    async def process_row(row: object) -> bool:
-        row_id = row[0]
-        raw_url = str(row[1] or "")
-        raw_domain = str(row[2] or "")
-        verdict = None
+    active_store = store or get_store()
+
+    async def mark_failed(row_id: object, url: str, reason: str) -> None:
         try:
-            if not raw_url:
-                raise ValueError("crawl_queue row has an empty URL")
-
-            fetched = await active_fetcher.fetch(raw_url)
-            if not fetched.ok:
-                raise RuntimeError(fetched.error or f"fetch failed ({fetched.status})")
-
-            parsed = await active_parser.parse(
-                raw_url, fetched.html, status=fetched.status
+            await database._execute(
+                "UPDATE crawl_queue SET status = 'failed' WHERE rowid = ?",
+                [row_id],
             )
-            if not parsed.ok or parsed.document is None:
-                raise ValueError(parsed.reason or "parser returned no document")
-
-            verdict = await active_quality.check(parsed.document)
-            if not verdict.ok:
-                raise ValueError(verdict.reason or "quality gate rejected document")
-
-            outcome = await active_indexer.persist(
-                [parsed.document],
-                queue_rowid=row_id,
+            logger.error(
+                "BASELINE row failed rowid=%s url=%s reason=%s queue_status=failed",
+                row_id, url, reason,
             )
-            pages = int(outcome.get("pages", 0) or 0)
-            if outcome.get("error") or outcome.get("paused") or pages <= 0:
-                raise RuntimeError(
-                    "index persistence failed: "
-                    f"error={outcome.get('error', 0)}, "
-                    f"paused={outcome.get('paused', 0)}, pages={pages}"
-                )
-
-            logger.info(
-                "[URL Worker] Processed rowid=%s, url=%s, status=processed",
-                row_id,
-                raw_url,
+        except Exception:
+            logger.exception(
+                "BASELINE could not mark rowid=%s failed (url=%s)", row_id, url
             )
-            return True
-        except Exception as exc:
-            if verdict is not None and verdict.digest:
-                active_quality.forget(verdict.digest)
-            logger.error("URL pass failed for url %s: %s", raw_url, exc, exc_info=True)
-            # Mark failed immediately so a broken URL cannot poison every future batch.
+
+    async with httpx.AsyncClient(
+        timeout=cfg.crawl_timeout_seconds,
+        follow_redirects=True,
+        headers={"User-Agent": cfg.crawl_user_agent},
+    ) as client:
+        for row in rows:
+            row_id = row[0]
+            raw_url = str(row[1] or "").strip()
+            report["attempted"] = int(report["attempted"]) + 1
+
             try:
-                await execute_safe(
-                    "UPDATE crawl_queue SET status = 'failed' WHERE rowid = ?",
-                    [row_id],
-                )
-                logger.info(
-                    "[URL Worker] Processed rowid=%s, url=%s, status=failed",
-                    row_id,
-                    raw_url,
-                )
-            except Exception:
-                logger.exception(
-                    "could not mark failed URL queue row %s (url=%s, domain=%s)",
-                    row_id, raw_url, raw_domain,
-                )
-            return False
+                if not raw_url:
+                    raise ValueError("crawl_queue row has an empty URL")
 
-    try:
-        async with active_fetcher:
-            for row in rows:
-                report["attempted"] = int(report["attempted"]) + 1
-                if await process_row(row):
-                    report["processed"] = int(report["processed"]) + 1
-                else:
-                    report["failed"] = int(report["failed"]) + 1
-    except Exception as exc:
-        # Covers batch/client setup errors outside an individual row's processing.
-        logger.exception("URL pass batch execution failed: %s", exc)
-        report["error"] = str(exc)
+                html, status = await fetch_page_status(client, raw_url, cfg)
+                if html is None:
+                    raise RuntimeError(
+                        f"fetch returned no HTML (http_status={status!r})"
+                    )
+
+                document, parse_reason = extract_document_with_reason(
+                    raw_url,
+                    html,
+                    http_status=int(status or 200),
+                    category=infer_category(raw_url),
+                )
+                if document is None:
+                    raise ValueError(f"basic parse rejected page: {parse_reason}")
+
+                document.fit_to_budget(cfg.max_payload_bytes)
+                outcome = await active_store.replace_documents(
+                    [document.as_row()],
+                    queue_rowid=int(row_id),
+                )
+                pages = int(outcome.get("pages", 0) or 0)
+                if pages < 1:
+                    raise RuntimeError(
+                        "direct store wrote zero pages; "
+                        f"outcome={outcome!r}; queue row was not marked processed"
+                    )
+
+                # replace_documents marks the queue row processed in the same
+                # Turso batch as the page write. Confirm it instead of assuming.
+                check = database._normalise_result(
+                    await database._execute(
+                        "SELECT status FROM crawl_queue WHERE rowid = ?",
+                        [row_id],
+                    )
+                )
+                check_rows = list(getattr(check, "rows", ()) or ())
+                queue_status = str(check_rows[0][0]) if check_rows else "missing"
+                if queue_status != "processed":
+                    raise RuntimeError(
+                        f"page write returned {pages} but queue status is {queue_status!r}"
+                    )
+
+                report["processed"] = int(report["processed"]) + 1
+                logger.info(
+                    "BASELINE DB COMMIT SUCCESS rowid=%s url=%s pages=%s queue_status=processed",
+                    row_id, raw_url, pages,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                report["failed"] = int(report["failed"]) + 1
+                logger.exception(
+                    "BASELINE ingestion failed rowid=%s url=%s: %s",
+                    row_id, raw_url, exc,
+                )
+                await mark_failed(row_id, raw_url, str(exc))
 
     return report
 
