@@ -115,6 +115,20 @@ async def _queue_depth() -> int:
         return 0
 
 
+def _backlog_sleep_seconds(report: dict, settings: EngineSettings) -> float:
+    """How long the backlog worker waits before its next pass.
+
+    A pass that filled its batch means work is still queued: retry soon. Only an
+    empty or partial batch is worth the full interval.
+    """
+    processed = int(report.get("queries", 0) or 0)
+    if processed >= max(1, settings.backlog_batch_queries):
+        return 30.0
+    if processed:
+        return 60.0
+    return float(max(60, settings.backlog_interval_seconds)) + random.uniform(0, 30)
+
+
 async def _backlog_loop(settings: EngineSettings) -> None:
     """Resolve missed queries into indexed documents, off the request path."""
     while True:
@@ -131,8 +145,9 @@ async def _backlog_loop(settings: EngineSettings) -> None:
 
         if processed:
             await _sleep_logged(
-                max(60, settings.backlog_interval_seconds) + random.uniform(0, 30),
-                "backlog worker", "next pass",
+                _backlog_sleep_seconds({"queries": processed}, settings),
+                "backlog worker",
+                "work remains" if processed >= max(1, settings.backlog_batch_queries) else "next pass",
             )
         else:
             await _sleep_logged(_idle_seconds(settings), "backlog worker", "nothing pending")

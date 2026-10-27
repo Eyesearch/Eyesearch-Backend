@@ -63,6 +63,10 @@ class EngineSettings:
     backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
     # How many already-crawled domains to inspect for a sitemap per refill pass.
     harvest_hosts_per_pass: int = field(default_factory=lambda: _int("HARVEST_HOSTS_PER_PASS", 5))
+    # How long a finished domain rests before the refill may re-arm it.
+    domain_rearm_cooldown_seconds: int = field(
+        default_factory=lambda: _int("DOMAIN_REARM_COOLDOWN_SECONDS", 21600)
+    )
     # A worker that finds nothing to do sleeps this long before polling again.
     worker_idle_backoff_seconds: int = field(
         default_factory=lambda: _int("WORKER_IDLE_BACKOFF_SECONDS", 15)

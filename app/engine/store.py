@@ -118,6 +118,25 @@ async def _batch(client: Any, statements: Sequence[tuple[str, list[Any]]], *, st
         raise
 
 
+# A domain in one of these states may be re-armed once its cooldown expires.
+REARMABLE_STATUSES: frozenset[str] = frozenset({"processed", "failed"})
+
+
+def _older_than(stamp: Any, cooldown_seconds: int) -> bool:
+    """True when `stamp` (a SQLite timestamp) is older than the cooldown.
+
+    Timestamps are stored as `YYYY-MM-DD HH:MM:SS` in UTC, which compares
+    lexicographically, so no driver-specific date handling is needed.
+    """
+    if not stamp:
+        return True
+    try:
+        moment = datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return (datetime.now(timezone.utc) - moment).total_seconds() >= max(0, int(cooldown_seconds))
+
+
 def _now_epoch() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
@@ -955,9 +974,24 @@ class IndexStore:
         client = get_client()
         try:
             existing = await execute_safe(
-                "SELECT 1 FROM crawl_backlog WHERE query = ? AND kind = 'domain' LIMIT 1", [cleaned]
+                "SELECT status, processed_at FROM crawl_backlog WHERE query = ? AND kind = 'domain' LIMIT 1",
+                [cleaned],
             )
-            if getattr(existing, "rows", ()):
+            rows = getattr(existing, "rows", ()) or ()
+            if rows:
+                # A domain that was crawled once is not dead forever: if it
+                # finished (or failed) longer than the cooldown ago, re-arm it so
+                # the refill has a real source once the registry is exhausted.
+                status = str(rows[0][0] or "").lower()
+                processed_at = rows[0][1]
+                if status in REARMABLE_STATUSES and _older_than(processed_at, self.settings.domain_rearm_cooldown_seconds):
+                    await execute_safe(
+                        "UPDATE crawl_backlog SET status = 'pending', processed_at = NULL, "
+                        "hits = COALESCE(hits, 0) + 1 WHERE query = ? AND kind = 'domain'",
+                        [cleaned],
+                    )
+                    logger.info("re-armed %s for crawling (was %s)", cleaned, status)
+                    return True
                 return False
             await execute_safe(
                 "INSERT INTO crawl_backlog (query, kind, reason, hits, status, created_at) "
@@ -984,11 +1018,30 @@ class IndexStore:
         client = get_client()
         if not await self._has_backlog_kind():
             return
+        cleaned = (host or "").strip().lower().removeprefix("www.")
         await execute_safe(
             "UPDATE crawl_backlog SET status = ?, processed_at = CURRENT_TIMESTAMP "
             "WHERE query = ? AND kind = 'domain'",
-            [status, (host or "").strip().lower().removeprefix("www.")],
+            [status, cleaned],
         )
+        # The update above may match nothing — a domain that was never queued, or
+        # one whose row was removed. Silence there is what let a crawl spin.
+        check = await execute_safe(
+            "SELECT status FROM crawl_backlog WHERE query = ? AND kind = 'domain' LIMIT 1",
+            [cleaned],
+        )
+        rows = getattr(check, "rows", ()) or ()
+        if not rows:
+            logger.warning(
+                "mark_domain_processed matched no row for %s (status %s) — "
+                "the domain will stay queued and be crawled again",
+                cleaned or "(empty)", status,
+            )
+        elif str(rows[0][0] or "").lower() != status.lower():
+            logger.warning(
+                "mark_domain_processed did not take for %s: wanted %s, found %s",
+                cleaned, status, rows[0][0],
+            )
 
     async def pending_domain_count(self) -> int:
         if not await self._has_backlog_kind():
