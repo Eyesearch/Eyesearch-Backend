@@ -50,6 +50,15 @@ class FrontierAgent:
         except Exception as exc:  # the frontier must never take the pipeline down
             logger.warning("frontier read failed: %s", exc)
             return []
+
+        if not hosts:
+            # nothing in the domain backlog: fall back to the URL queue, which is
+            # where sitemap harvesting puts its work
+            try:
+                hosts = await self.store.pending_queue_hosts(size)
+            except Exception as exc:
+                logger.warning("frontier queue read failed: %s", exc)
+                return []
         authoritative = [h for h in hosts if self.config.is_authoritative(h)]
         rest = [h for h in hosts if h not in authoritative and not self.config.is_excluded(h)]
         return (authoritative + rest)[:size]

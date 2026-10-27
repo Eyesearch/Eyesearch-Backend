@@ -833,6 +833,16 @@ class IndexStore:
             "UPDATE crawl_queue SET status = ? WHERE url = ?", [status, url]
         )
 
+    async def pending_queue_hosts(self, limit: int = 10) -> list[str]:
+        """Distinct hosts with pending URLs in `crawl_queue`."""
+        result = await execute_safe(
+            "SELECT DISTINCT domain FROM crawl_queue WHERE status = 'pending' "
+            "AND domain IS NOT NULL ORDER BY domain ASC LIMIT ?",
+            [max(1, int(limit))],
+        )
+        rows = getattr(result, "rows", ()) or ()
+        return [str(row[0]) for row in rows if row and row[0]]
+
     async def queue_depth(self) -> int:
         result = await execute_safe(
             "SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'"
