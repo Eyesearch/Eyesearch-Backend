@@ -381,6 +381,41 @@ class IndexStore:
         )
         return outcome
 
+    async def skip_pending_for_domain(self, domain: str) -> int:
+        """Park every remaining pending URL for a domain that is at its cap.
+
+        Filtering capped domains out of the dequeue is not enough on its own:
+        their rows would sit at `pending` for ever, so `queue_depth()` keeps
+        reporting a full queue and `enqueue()` drops genuinely new domains at
+        `MAX_PENDING_QUEUE`. Marking them `skipped` keeps the depth honest.
+        """
+        if not domain:
+            return 0
+        result = await self._client.execute(
+            "UPDATE crawl_queue SET status = 'skipped' "
+            "WHERE status = 'pending' AND domain = ?",
+            (domain,),
+        )
+        return result.rows_affected
+
+    async def skip_pending_for_capped_domains(self, cap: int | None = None) -> int:
+        """One-off reconciliation for rows queued before a domain hit its cap."""
+        limit = cap if cap is not None else self._settings.max_pages_per_domain
+        result = await self._client.execute(
+            "UPDATE crawl_queue SET status = 'skipped' WHERE status = 'pending' AND domain IN ("
+            "  SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
+            "  GROUP BY s.domain HAVING COUNT(*) >= ?"
+            ")",
+            (limit,),
+        )
+        if result.rows_affected:
+            logger.info(
+                "marked %d queued URLs skipped: their domain is at its %d-page cap",
+                result.rows_affected,
+                limit,
+            )
+        return result.rows_affected
+
     async def domain_page_counts(self, domains: Sequence[str]) -> dict[str, int]:
         """Indexed pages per domain, for the whole batch in one query.
 
@@ -536,16 +571,29 @@ class IndexStore:
         ordering by that number gives round-robin — one URL from each domain,
         then a second from each — so a batch always spreads across the frontier.
 
-        The row number is not capped: capping it (say at two per domain) would
-        shrink a batch below the configured size whenever few domains have work.
+        Domains that have already reached `MAX_PAGES_PER_DOMAIN` are excluded.
+        Round-robin alone was not enough: once most domains are capped, every
+        slot in the batch goes to a row the orchestrator will immediately skip,
+        and a genuinely fresh domain queued behind them is never reached. The
+        exclusion is one aggregate over `pages`; measured at 50k pages and 20k
+        queued rows it is not slower than the window function it sits beside.
+
+        The row number itself is not capped: capping it (say at two per domain)
+        would shrink a batch below the configured size whenever few domains have
+        work.
         """
+        cap = self._settings.max_pages_per_domain
         result = await self._client.execute(
             "SELECT id, url, domain, retry_count FROM ("
-            "  SELECT rowid AS id, url, domain, retry_count,"
-            "         ROW_NUMBER() OVER (PARTITION BY domain ORDER BY rowid ASC) AS rn "
-            "  FROM crawl_queue WHERE status = 'pending'"
+            "  SELECT cq.rowid AS id, cq.url, cq.domain, cq.retry_count,"
+            "         ROW_NUMBER() OVER (PARTITION BY cq.domain ORDER BY cq.rowid ASC) AS rn "
+            "  FROM crawl_queue cq WHERE cq.status = 'pending'"
+            "    AND cq.domain NOT IN ("
+            "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
+            "      GROUP BY s.domain HAVING COUNT(*) >= ?"
+            "    )"
             ") ORDER BY rn ASC, id ASC LIMIT ?",
-            (limit,),
+            (cap, limit),
         )
         return [
             QueuedUrl(

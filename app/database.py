@@ -395,6 +395,15 @@ async def initialize_database(
     # Before anything updates `pages`: a stale index makes every update fail.
     await resync_fts(client)
     await normalize_legacy_subdomains(client)
+
+    # Rows queued before their domain reached its cap would otherwise sit at
+    # 'pending' for ever and make the frontier look full.
+    from app.engine.store import IndexStore
+
+    try:
+        await IndexStore(client).skip_pending_for_capped_domains()
+    except LibsqlError as error:
+        logger.warning("skipping capped-domain reconciliation: %s", error)
     counts = await read_counts(client)
     logger.info(
         "schema ready: %d sites, %d pages, %d queued",

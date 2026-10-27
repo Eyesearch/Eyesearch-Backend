@@ -174,10 +174,14 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
         await orchestrator.frontier.enqueue(["https://karnataka.gov.in/page-99"])
         outcome = await orchestrator.run_batch()
 
-        assert outcome.skipped == 1
+        # A capped domain is excluded at dequeue, so its URL never reaches the
+        # batch at all — no wasted fetch, no wasted slot.
+        assert outcome.attempted == 0
         assert outcome.fetched == 0
-        assert outcome.skip_reasons.get("domain_cap") == 1
+        assert outcome.indexed_pages == 0
 
+        # The row is parked by the reconciliation, not by the batch.
+        await store.skip_pending_for_capped_domains(cap=2)
         status = await client.execute(
             "SELECT status FROM crawl_queue WHERE url = ?",
             ("https://karnataka.gov.in/page-99",),
@@ -252,7 +256,8 @@ async def test_a_capped_domain_does_not_grow_the_frontier(store, client):
         await orchestrator.frontier.enqueue(["https://karnataka.gov.in/start"])
         outcome = await orchestrator.run_batch()
 
-        assert outcome.skipped == 1
+        # The capped domain is not even dequeued, so it contributes nothing.
+        assert outcome.attempted == 0
         assert outcome.discovered == 0
     finally:
         await orchestrator.close()

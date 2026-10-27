@@ -196,3 +196,73 @@ async def test_the_write_probe_is_repeatable():
         assert int(rows.scalar(0)) == 0
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Capped domains must not crowd the batch
+# ---------------------------------------------------------------------------
+
+
+async def _seed_capped_domains(store, count: int, cap: int) -> None:
+    from app.engine.store import PageDocument
+
+    documents = []
+    for index in range(count):
+        for page in range(cap):
+            documents.append(
+                PageDocument(
+                    url=f"https://site{index}.gov.in/p{page}",
+                    domain=f"site{index}.gov.in",
+                    title=f"t{index}-{page}",
+                    description="d",
+                    body_text="b" * 90,
+                    digest=f"dg{index}-{page}",
+                )
+            )
+    await store.persist_batch(documents)
+
+
+async def test_a_capped_domain_does_not_fill_the_batch(store, client):
+    """Round-robin alone let capped domains take every slot."""
+    await _seed_capped_domains(store, 40, 10)
+    await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(40)])
+    await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
+
+    batch = await store.pending_batch(40)
+    domains = [item.domain for item in batch]
+
+    assert "fresh.gov.in" in domains
+    assert not any(domain.startswith("site") for domain in domains)
+
+
+async def test_the_batch_is_empty_when_every_domain_is_capped(store, client):
+    await _seed_capped_domains(store, 3, 10)
+    await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(3)])
+
+    assert await store.pending_batch(10) == []
+
+
+async def test_parking_capped_rows_keeps_the_depth_honest(store, client):
+    """Pending rows for a capped domain would otherwise look like real work."""
+    await _seed_capped_domains(store, 2, 10)
+    await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(2)])
+    await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
+
+    assert await store.queue_depth() == 3
+
+    parked = await store.skip_pending_for_capped_domains()
+
+    assert parked == 2
+    assert await store.queue_depth() == 1
+    assert await store.pending_domains() == ["fresh.gov.in"]
+
+
+async def test_parking_a_single_domain_leaves_others_alone(store, client):
+    await _seed_capped_domains(store, 1, 10)
+    await _queue(client, [("https://site0.gov.in/extra", "site0.gov.in")])
+    await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
+
+    parked = await store.skip_pending_for_domain("site0.gov.in")
+
+    assert parked == 1
+    assert await store.pending_domains() == ["fresh.gov.in"]
