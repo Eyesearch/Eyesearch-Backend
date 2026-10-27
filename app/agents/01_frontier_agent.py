@@ -11,6 +11,7 @@ else, and the dequeue query stays a plain `ORDER BY rowid`.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import re
@@ -113,6 +114,10 @@ SITEMAP_MAX_URLS_PER_DOMAIN = 100
 #: of nested sitemaps from an index.
 SITEMAP_MAX_FETCHES = 3
 
+#: Keep sitemap probing bounded so one discovery batch cannot open hundreds
+#: of simultaneous requests against the small production instance.
+SITEMAP_CONCURRENCY = 8
+
 #: Do not re-harvest a domain within this window.
 SITEMAP_COOLDOWN_SECONDS = 3600
 
@@ -146,7 +151,6 @@ SEED_URLS: tuple[str, ...] = (
     "https://indiankanoon.org/",
     "https://inc42.com/",
     "https://hasgeek.com/",
-    "https://en.wikipedia.org/wiki/Karnataka",
 )
 
 
@@ -561,18 +565,14 @@ class FrontierAgent:
         *,
         force: bool = False,
     ) -> int:
-        """Queue URLs from the sitemap of an authoritative domain, once an hour.
+        """Harvest eligible Indian-domain sitemaps concurrently and enqueue once.
 
-        Normally this only runs when the frontier is below `FRONTIER_LOW_WATER`,
-        on the reasoning that a queue with work in it does not need more. That
-        gate is wrong once the queue is large: with thousands of URLs pending,
-        the depth never drops and sitemaps are skipped forever — precisely the
-        domains that most need their sitemap read. `force=True` is for callers
-        that know a specific domain is newly interesting, and it bypasses the
-        depth check while still honouring the per-domain cooldown.
-
-        A domain is marked as attempted before its sitemap is fetched, so a
-        domain without one is not retried on every pass.
+        The low-water guard applies to opportunistic refill only. Explicitly
+        discovered domains can bypass it, because a busy frontier must not
+        prevent sitemap discovery. Network probes are bounded and gathered in
+        parallel; the previous serial loop could spend several timeouts per
+        domain and block a crawl batch for minutes. URLs are enqueued in one
+        store call after all probes finish.
         """
         if self._client is None:
             return 0
@@ -580,27 +580,54 @@ class FrontierAgent:
             return 0
 
         now = time.monotonic()
-        for domain in domains or AUTHORITATIVE_DOMAINS:
-            # Membership, not a 0.0 default: on a host whose monotonic clock
-            # reads less than the cooldown, every domain would look freshly
-            # harvested and no sitemap would ever be fetched.
+        eligible: list[str] = []
+        for domain in dict.fromkeys(domains or AUTHORITATIVE_DOMAINS):
+            if not domain or not is_authoritative(domain):
+                continue
             last = self._harvested_at.get(domain)
             if last is not None and now - last < SITEMAP_COOLDOWN_SECONDS:
                 continue
+            # Record the attempt before awaiting network I/O so another caller
+            # cannot schedule the same domain while this harvest is in flight.
             self._harvested_at[domain] = now
+            eligible.append(domain)
 
-            urls = await discover_sitemap_urls(f"https://{domain}/", self._client)
-            if not urls:
-                logger.debug("sitemap harvest %s: nothing usable", domain)
-                continue
+        if not eligible:
+            return 0
 
-            added = await self.enqueue(urls)
-            if added:
-                logger.info(
-                    "sitemap harvest %s: %d URLs found, %d queued", domain, len(urls), added
-                )
-                return added
-        return 0
+        semaphore = asyncio.Semaphore(SITEMAP_CONCURRENCY)
+
+        async def harvest_one(domain: str) -> tuple[str, list[str]]:
+            async with semaphore:
+                try:
+                    urls = await discover_sitemap_urls(f"https://{domain}/", self._client)
+                    return domain, urls
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning("sitemap harvest failed for %s: %s", domain, error)
+                    return domain, []
+
+        results = await asyncio.gather(*(harvest_one(domain) for domain in eligible))
+        discovered: list[str] = []
+        domains_with_urls = 0
+        for _domain, urls in results:
+            if urls:
+                domains_with_urls += 1
+                discovered.extend(urls)
+
+        # Dedupe across sitemaps and perform a single bounded queue insert.
+        discovered = list(dict.fromkeys(discovered))
+        added = await self.enqueue(discovered) if discovered else 0
+        logger.info(
+            "sitemap harvest complete: domains_checked=%d domains_with_urls=%d "
+            "urls_found=%d urls_queued=%d",
+            len(eligible),
+            domains_with_urls,
+            len(discovered),
+            added,
+        )
+        return added
 
     async def has_authoritative_pending(self) -> bool:
         """Is any authoritative domain waiting to be crawled?"""
@@ -627,6 +654,7 @@ __all__ = [
     "FRONTIER_LOW_WATER",
     "GLOBAL_ALLOWED_TLDS",
     "LOC_PATTERN",
+    "SITEMAP_CONCURRENCY",
     "SITEMAP_COOLDOWN_SECONDS",
     "SITEMAP_MAX_FETCHES",
     "SITEMAP_MAX_URLS_PER_DOMAIN",
