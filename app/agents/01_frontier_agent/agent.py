@@ -75,11 +75,13 @@ class FrontierAgent:
         if not key:
             return False
         try:
-            if await self.store.site_exists(key):
-                return False
+            # enqueue_domain owns the re-arm/cooldown decision. Check its result
+            # before mirroring so an existing site can become eligible again.
             queued = await self.store.enqueue_domain(key, reason=reason)
+            if not queued:
+                return False
             await self.store.queue_url(f"https://{key}/", domain=key, reason=reason)
-            return bool(queued)
+            return True
         except Exception as exc:
             logger.warning("frontier enqueue failed for %s: %s", host, exc)
             return False
