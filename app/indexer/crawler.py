@@ -225,7 +225,14 @@ async def run_seed_pass(
     settings: EngineSettings | None = None,
     store: object | None = None,
 ) -> dict[str, object]:
-    """Crawl every seed in the requested categories and store what comes back."""
+    """Crawl every seed in the requested categories through the orchestrator.
+
+    The seeds are pushed into the frontier agent, which owns the queue; the
+    per-domain work (root, sitelinks, fallback) is the orchestrator's domain
+    worker. There is no second crawl loop here any more.
+    """
+    from app.orchestrator import Orchestrator
+
     cfg = settings or get_engine_settings()
     index = store or get_store()
     report: dict[str, object] = {
@@ -244,68 +251,39 @@ async def run_seed_pass(
     if not targets:
         return report
 
-    # A single shared HTTP client and a single shared database client: the
-    # concurrency limit protects both the target sites and the Turso connection.
-    semaphore = asyncio.Semaphore(max(1, cfg.seed_crawl_concurrency))
+    orchestrator = Orchestrator(store=index, settings=cfg)
+    labels: dict[str, str] = {}
+    seed_objects: dict[str, CategorySeed] = {}
+    hosts: list[str] = []
+    for seed in targets:
+        host = _seed_domain(seed)
+        await orchestrator.frontier.enqueue(host, reason="seed")
+        labels[host] = seed.label
+        seed_objects[host] = seed
+        hosts.append(host)
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        robots = RobotsCache(client, cfg.crawl_user_agent)
+    outcome = await orchestrator.run_domains(
+        hosts,
+        labels=labels,
+        seed_objects=seed_objects,
+        settings=cfg,
+        concurrency=cfg.seed_crawl_concurrency,
+    )
+    if outcome.get("paused"):
+        report["paused"] = True
+        return report
 
-        async def run(seed: CategorySeed) -> tuple[CategorySeed, SeedReport, list]:
-            async with semaphore:
-                try:
-                    seed_report, documents = await crawl_seed(
-                        seed, client=client, settings=cfg, robots=robots
-                    )
-                    return seed, seed_report, documents
-                except Exception as exc:  # one dead domain must not stop the pass
-                    logger.warning("seed %s failed: %s", seed.url, exc)
-                    return seed, SeedReport(category=seed.category), []
+    for host, seed_report in (outcome.get("reports") or {}).items():
+        report["categories"][labels.get(host, host)] = seed_report
+        report["fetched"] = int(report["fetched"]) + int(seed_report.get("fetched", 0))
+        report["stored"] = int(report["stored"]) + int(seed_report.get("stored", 0))
+        report["documents"] = int(report["documents"]) + int(seed_report.get("extracted", 0))
 
-        tasks = [asyncio.create_task(run(seed)) for seed in targets]
-
-        # Persist each domain the moment it finishes. A long pass that waited for
-        # every seed before writing lost all of its work when the instance
-        # restarted mid-flight.
-        for finished in asyncio.as_completed(tasks):
-            seed, seed_report, documents = await finished
-            if documents:
-                try:
-                    written = await index.replace_documents(
-                        [document.as_row() for document in documents]
-                    )
-                    seed_report.stored = int(written.get("pages", 0))
-                    report["documents"] = int(report["documents"]) + len(documents)
-                    report["stored"] = int(report["stored"]) + seed_report.stored
-                    report["sitelinks"] = int(report.get("sitelinks", 0)) + int(written.get("sitelinks", 0))
-                    report["sites"] = int(report.get("sites", 0)) + int(written.get("sites", 0))
-                    total = await index.count_documents()
-                    logger.info(
-                        "DB COMMIT SUCCESS: Indexed %s with %d pages (Running total: %d)",
-                        _seed_domain(seed), seed_report.stored, total,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "index write failed for %s: %s: %s",
-                        _seed_domain(seed), type(exc).__name__, exc,
-                    )
-            else:
-                logger.info(
-                    "seed %s produced no indexable pages (fetched %d, skipped %d%s)",
-                    _seed_domain(seed), seed_report.fetched, len(seed_report.skipped),
-                    ": " + ", ".join(f"{k}={v}" for k, v in seed_report.reasons.items())
-                    if seed_report.reasons else "",
-                )
-
-            report["fetched"] = int(report["fetched"]) + seed_report.fetched
-            report["categories"][seed.label] = seed_report.as_dict()
-            logger.debug("seed %s (%s): %s", seed.url, seed.category, seed_report.as_dict())
-
+    report["sites"] = int(outcome.get("sites", 0))
+    report["sitelinks"] = max(0, int(outcome.get("indexed_pages", 0)) - int(outcome.get("sites", 0)))
     logger.info(
-        "seed pass complete: %d documents, %d stored, %d fetched",
-        report["documents"],
-        report["stored"],
-        report["fetched"],
+        "seed pass complete: %s documents, %s stored, %s fetched (errors: %s)",
+        report["documents"], report["stored"], report["fetched"], outcome.get("errors", {}),
     )
     return report
 
@@ -336,15 +314,19 @@ async def run_discovery_pass(
     store: object | None = None,
     settings: EngineSettings | None = None,
 ) -> dict[str, object]:
-    """Drain the discovered-domain backlog in bounded batches.
+    """Drain the discovered-domain backlog through the orchestrator.
 
     Ten domains at a time, a polite pause between batches, and a hard ceiling on
-    the number of indexed sites. Stops when the queue is empty.
+    the number of indexed sites. Stops when the frontier is empty.
     """
+    from app.orchestrator import Orchestrator
+
     cfg = settings or get_engine_settings()
     index = store or get_store()
     batch = max(1, batch_size or cfg.discovery_batch_size)
-    report: dict[str, object] = {"batches": 0, "attempted": 0, "stored": 0, "skipped": 0, "ceiling": False}
+    report: dict[str, object] = {
+        "batches": 0, "attempted": 0, "stored": 0, "skipped": 0, "ceiling": False
+    }
 
     if await storage_paused(index, cfg):
         report["paused"] = True
@@ -356,43 +338,38 @@ async def run_discovery_pass(
         report["ceiling"] = True
         return report
 
-    async with httpx.AsyncClient(follow_redirects=True) as client:
-        robots = RobotsCache(client, cfg.crawl_user_agent)
-        while sites < cfg.max_indexed_sites:
-            hosts = await index.pending_domains(batch)
-            if not hosts:
-                break
+    orchestrator = Orchestrator(store=index, settings=cfg)
 
-            report["batches"] = int(report["batches"]) + 1
-            for host in hosts:
-                report["attempted"] = int(report["attempted"]) + 1
-                seed = CategorySeed(f"https://{host}/", host, infer_category(f"https://{host}/"))
-                try:
-                    seed_report, documents = await crawl_seed(
-                        seed, client=client, settings=cfg, robots=robots, max_pages=cfg.seed_crawl_pages_per_domain
-                    )
-                except Exception as exc:
-                    logger.warning("discovered domain %s failed: %s", host, exc)
-                    await index.mark_domain_processed(host, status="failed")
-                    report["skipped"] = int(report["skipped"]) + 1
-                    continue
+    while sites < cfg.max_indexed_sites:
+        hosts = await orchestrator.frontier.next_batch(batch)
+        if not hosts:
+            break
 
-                if documents:
-                    written = await index.replace_documents([doc.as_row() for doc in documents])
-                    report["stored"] = int(report["stored"]) + int(written.get("pages", 0))
-                    sites = await index.count_documents()
-                else:
-                    report["skipped"] = int(report["skipped"]) + 1
-                await index.mark_domain_processed(host, status="processed")
+        report["batches"] = int(report["batches"]) + 1
+        outcome = await orchestrator.run_domains(hosts, settings=cfg)
+        if outcome.get("paused"):
+            report["paused"] = True
+            break
 
-            logger.info(
-                "discovery batch %s done: %s attempted, %s pages stored, %s sites",
-                report["batches"], report["attempted"], report["stored"], sites,
-            )
-            if sites >= cfg.max_indexed_sites:
-                report["ceiling"] = True
-                break
-            await asyncio.sleep(max(0.0, cfg.discovery_batch_pause_seconds))
+        attempted = int(outcome.get("domains", 0))
+        report["attempted"] = int(report["attempted"]) + attempted
+        report["stored"] = int(report["stored"]) + int(outcome.get("indexed_pages", 0))
+        report["skipped"] = int(report["skipped"]) + max(0, attempted - int(outcome.get("accepted", 0)))
+
+        for host in hosts:
+            seed_report = (outcome.get("reports") or {}).get(host, {})
+            status = "processed" if seed_report.get("stored") else "failed"
+            await orchestrator.frontier.mark_done(host, status=status)
+
+        sites = await index.count_documents()
+        logger.info(
+            "discovery batch %s done: %s attempted, %s pages stored, %s sites",
+            report["batches"], report["attempted"], report["stored"], sites,
+        )
+        if sites >= cfg.max_indexed_sites:
+            report["ceiling"] = True
+            break
+        await asyncio.sleep(max(0.0, cfg.discovery_batch_pause_seconds))
 
     return report
 
