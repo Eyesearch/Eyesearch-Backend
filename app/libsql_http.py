@@ -20,7 +20,9 @@ result — success is not an error.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
@@ -29,6 +31,40 @@ import httpx
 from app.errors import DatabaseError
 
 logger = logging.getLogger(__name__)
+
+
+class ProcessRateLimiter:
+    """Process-wide minimum interval between outbound HTTP request starts."""
+
+    def __init__(self, interval_seconds: float = 0.5) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self.interval_seconds = float(interval_seconds)
+        self._lock = asyncio.Lock()
+        self._next_start = 0.0
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            delay = self._next_start - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_start = time.monotonic() + self.interval_seconds
+
+
+_HTTP_RATE_LIMITER = ProcessRateLimiter(interval_seconds=0.5)
+
+
+def _iter_pipeline_errors(payload: Any):
+    """Yield nested Hrana step errors, including errors inside batch results."""
+    if isinstance(payload, dict):
+        if payload.get("type") == "error":
+            yield payload
+            return
+        for value in payload.values():
+            yield from _iter_pipeline_errors(value)
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            yield from _iter_pipeline_errors(value)
 
 
 @dataclass(slots=True)
@@ -224,6 +260,7 @@ class TursoHTTPClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self._timeout, transport=self._transport)
         try:
+            await _HTTP_RATE_LIMITER.acquire()
             response = await self._client.post(
                 self.endpoint, json={"requests": requests}, headers=self._headers()
             )
@@ -246,11 +283,17 @@ class TursoHTTPClient:
         # request succeeded" and "the row was written".
         if isinstance(steps, list):
             for index, step in enumerate(steps):
-                if isinstance(step, dict) and step.get("type") == "error":
-                    error = step.get("error") or {}
+                for failed_step in _iter_pipeline_errors(step):
+                    error = failed_step.get("error") or {}
                     sql = ""
                     if index < len(requests):
-                        sql = str(requests[index].get("stmt", {}).get("sql", "")).strip().splitlines()[0][:120]
+                        request = requests[index]
+                        stmt = request.get("stmt", {})
+                        if not stmt and isinstance(request.get("batch"), dict):
+                            batch_steps = request["batch"].get("steps") or []
+                            if batch_steps:
+                                stmt = batch_steps[0].get("stmt", {})
+                        sql = str(stmt.get("sql", "")).strip().splitlines()[0][:120] if stmt else ""
                     message = (
                         f"libsql step {index} failed: {error.get('message') or error} "
                         f"(statement: {sql})"
@@ -311,6 +354,33 @@ class TursoHTTPClient:
         finally:
             self._strict = True
 
+    async def batch_atomic(self, statements: Iterable[Any]) -> list[ResultSet]:
+        """Execute statements in one Hrana write batch; raise on any failed step."""
+        steps: list[dict[str, Any]] = []
+        for statement in statements:
+            if isinstance(statement, (list, tuple)) and len(statement) == 2:
+                sql, params = statement
+            else:
+                sql, params = statement, []
+            steps.append({
+                "stmt": {
+                    "sql": str(sql),
+                    "args": [_encode_arg(value) for value in (params or [])],
+                }
+            })
+        if not steps:
+            return []
+        request = {
+            "type": "batch",
+            "batch": {"steps": steps, "mode": "write"},
+        }
+        previous_strict = self._strict
+        self._strict = True
+        try:
+            return await self._post([request])
+        finally:
+            self._strict = previous_strict
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -320,5 +390,6 @@ class TursoHTTPClient:
 __all__ = [
     "ResultSet",
     "TursoHTTPClient",
+    "ProcessRateLimiter",
     "parse_pipeline_response",
 ]

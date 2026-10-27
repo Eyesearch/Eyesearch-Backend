@@ -14,6 +14,7 @@ Neither brake touches the read path: the search API keeps serving.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -61,6 +62,58 @@ class _Breaker:
 
 
 _breaker = _Breaker()
+_STORAGE_CACHE_TTL_SECONDS = 60.0
+_STORAGE_CACHE: dict[str, tuple[float, int, int]] = {}
+_STORAGE_CACHE_LOCK = asyncio.Lock()
+
+
+def _storage_target_key(store: Any, settings: Any) -> str:
+    """Key cached counts by the actual database target, not just a wrapper object."""
+    for owner in (store, getattr(store, "settings", None), settings):
+        if owner is None:
+            continue
+        for name in ("database_url", "turso_url", "libsql_url", "db_url", "url"):
+            value = getattr(owner, name, None)
+            if value:
+                return str(value).rstrip("/")
+    try:
+        from app.database import get_client
+
+        client = get_client()
+        for name in ("_base", "endpoint", "url", "database_url"):
+            value = getattr(client, name, None)
+            if value:
+                return str(value).rstrip("/")
+    except Exception:
+        pass
+    return f"store:{id(store)}"
+
+
+def invalidate_storage_cache(store: Any | None = None, settings: Any | None = None) -> None:
+    """Invalidate cached counts after a committed write."""
+    if store is None:
+        _STORAGE_CACHE.clear()
+        return
+    cfg = settings or getattr(store, "settings", None) or get_engine_settings()
+    _STORAGE_CACHE.pop(_storage_target_key(store, cfg), None)
+
+
+async def _cached_storage_counts(store: Any, settings: Any) -> tuple[int, int]:
+    key = _storage_target_key(store, settings)
+    async with _STORAGE_CACHE_LOCK:
+        cached = _STORAGE_CACHE.get(key)
+        if cached and time.monotonic() < cached[0]:
+            return cached[1], cached[2]
+        pages = int(await store.count_pages())
+        sites = int(await store.count_documents())
+        if pages < 0 or sites < 0:
+            raise ValueError("negative storage count returned")
+        _STORAGE_CACHE[key] = (
+            time.monotonic() + _STORAGE_CACHE_TTL_SECONDS,
+            pages,
+            sites,
+        )
+        return pages, sites
 
 
 def trip_quota(reason: str) -> None:
@@ -104,11 +157,19 @@ async def storage_state(
     index = store or get_store()
     cfg = settings or get_engine_settings()
     try:
-        pages = await index.count_pages()
-        sites = await index.count_documents()
+        pages, sites = await _cached_storage_counts(index, cfg)
     except Exception as exc:
-        logger.warning("storage check failed: %s", exc)
-        pages, sites = 0, 0
+        logger.error("storage check failed; refusing writes: %s", exc)
+        return {
+            "pages": None,
+            "sites": None,
+            "limit": cfg.storage_page_limit,
+            "over_limit": True,
+            "quota_tripped": _breaker.tripped,
+            "quota_reason": _breaker.reason,
+            "paused": True,
+            "error": str(exc),
+        }
 
     over_limit = pages >= cfg.storage_page_limit
     paused = over_limit or quota_paused()
@@ -124,18 +185,23 @@ async def storage_state(
 
 
 async def storage_paused(store: Any | None = None, settings: Any | None = None) -> bool:
-    """Ask once, at the start of a pass, whether to crawl at all."""
-    state = await storage_state(store, settings)
-    if state["over_limit"]:
-        logger.warning(STORAGE_WARNING)
-        return True
-    if state["quota_tripped"]:
-        if quota_paused():
+    """Ask once, at the start of a pass, failing closed on every exception."""
+    try:
+        state = await storage_state(store, settings)
+        if state.get("error"):
+            return True
+        if state["over_limit"]:
+            logger.warning(STORAGE_WARNING)
+            return True
+        if state["quota_tripped"] and quota_paused():
             logger.warning(
                 "storage quota breaker open (%s) — skipping this pass", state["quota_reason"]
             )
             return True
-    return False
+        return bool(state.get("paused", False))
+    except Exception as exc:
+        logger.error("storage pause check failed; refusing writes: %s", exc)
+        return True
 
 
 __all__ = [
@@ -147,4 +213,5 @@ __all__ = [
     "quota_paused",
     "storage_state",
     "storage_paused",
+    "invalidate_storage_cache",
 ]

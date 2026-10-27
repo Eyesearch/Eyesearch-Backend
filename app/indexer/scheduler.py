@@ -19,6 +19,7 @@ from app.indexer.crawler import run_autonomous_seed_crawl, run_discovery_pass, r
 from app.indexer.revalidate import revalidate_batch
 
 logger = logging.getLogger(__name__)
+URL_BATCH_THROTTLE_SECONDS = 2.0
 
 _task: asyncio.Task[None] | None = None
 _backlog_task: asyncio.Task[None] | None = None
@@ -235,7 +236,7 @@ async def _url_queue_loop(settings: EngineSettings) -> None:
             await asyncio.sleep(15.0)
         finally:
             # Mandatory throttle for every iteration, including empty and failed batches.
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(URL_BATCH_THROTTLE_SECONDS)
 
 
 def start_url_queue_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:

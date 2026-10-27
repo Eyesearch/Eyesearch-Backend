@@ -13,6 +13,7 @@ from typing import Any
 from .extractors import extract_document_with_reason
 
 logger = logging.getLogger(__name__)
+BODY_CHAR_CAP = 1000
 
 
 @dataclass(slots=True)
@@ -66,16 +67,18 @@ class ParserAgent:
             return ParseResult(url=url, reason=reason or "not_extracted")
 
         # Enforce a strict hard cap, regardless of environment configuration.
-        limit = min(1_000, max(1, int(self.settings.body_max_chars)))
+        limit = min(BODY_CHAR_CAP, max(1, int(self.settings.body_max_chars)))
         body = str(document.body_text or "")
         if len(body) > limit:
             truncated = body[: limit - 1]
-            boundary = truncated.rfind(" ")
+            boundary = max(truncated.rfind(char) for char in (" ", "\t", "\n", "\r"))
             if boundary > 0:
                 truncated = truncated[:boundary]
             document.body_text = truncated.rstrip() + "…"
         else:
             document.body_text = body
+        # Keep the ellipsis inside the hard cap.
+        document.body_text = document.body_text[:limit]
         return ParseResult(url=url, document=document)
 
 

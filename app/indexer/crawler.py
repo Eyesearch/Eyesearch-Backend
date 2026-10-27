@@ -238,8 +238,7 @@ async def run_url_pass(
 
     try:
         result = await execute_safe(
-            "SELECT rowid AS id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT ?",
-            [limit],
+            "SELECT rowid AS id, url, domain FROM crawl_queue WHERE status = 'pending' LIMIT 10"
         )
         rows = list(getattr(result, "rows", ()) or ())
     except Exception as exc:
@@ -257,12 +256,6 @@ async def run_url_pass(
     active_parser = parser or ParserAgent(cfg)
     active_quality = quality or QualityAgent(cfg)
     active_indexer = indexer or IndexerAgent(store=store, settings=cfg)
-
-    async def set_status(row_id: int, status: str) -> None:
-        await execute_safe(
-            "UPDATE crawl_queue SET status = ? WHERE rowid = ?",
-            [status, row_id],
-        )
 
     async def process_row(row: object) -> bool:
         row_id = row[0]
@@ -287,7 +280,10 @@ async def run_url_pass(
             if not verdict.ok:
                 raise ValueError(verdict.reason or "quality gate rejected document")
 
-            outcome = await active_indexer.persist([parsed.document])
+            outcome = await active_indexer.persist(
+                [parsed.document],
+                queue_rowid=row_id,
+            )
             pages = int(outcome.get("pages", 0) or 0)
             if outcome.get("error") or outcome.get("paused") or pages <= 0:
                 raise RuntimeError(
@@ -296,8 +292,11 @@ async def run_url_pass(
                     f"paused={outcome.get('paused', 0)}, pages={pages}"
                 )
 
-            await set_status(row_id, "processed")
-            logger.debug("URL queue row %s processed (%s)", row_id, raw_url)
+            logger.info(
+                "[URL Worker] Processed rowid=%s, url=%s, status=processed",
+                row_id,
+                raw_url,
+            )
             return True
         except Exception as exc:
             if verdict is not None and verdict.digest:
@@ -308,6 +307,11 @@ async def run_url_pass(
                 await execute_safe(
                     "UPDATE crawl_queue SET status = 'failed' WHERE rowid = ?",
                     [row_id],
+                )
+                logger.info(
+                    "[URL Worker] Processed rowid=%s, url=%s, status=failed",
+                    row_id,
+                    raw_url,
                 )
             except Exception:
                 logger.exception(

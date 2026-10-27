@@ -224,9 +224,22 @@ class IndexStore:
         """Write sites and pages. `mode="upsert"` refreshes, `"insert"` adds."""
         return await self._write(documents, mode=mode, replace=False)
 
-    async def replace_documents(self, documents: Sequence[dict[str, Any]]) -> dict[str, int]:
-        """`INSERT OR REPLACE` per page — the crawler's path."""
-        return await self._write(documents, mode="replace", replace=True)
+    async def replace_documents(
+        self,
+        documents: Sequence[dict[str, Any]],
+        *,
+        queue_rowid: int | None = None,
+    ) -> dict[str, int]:
+        """Replace page rows and optionally complete a queue row atomically."""
+        outcome = await self._write(
+            documents,
+            mode="replace",
+            replace=True,
+            queue_rowid=queue_rowid,
+        )
+        from app.indexer.guard import invalidate_storage_cache
+        invalidate_storage_cache(self, self.settings)
+        return outcome
 
     async def _write(
         self,
@@ -234,6 +247,7 @@ class IndexStore:
         *,
         mode: str,
         replace: bool,
+        queue_rowid: int | None = None,
     ) -> dict[str, int]:
         outcome = {
             "inserted": 0, "replaced": 0, "duplicate": 0, "domain_cap": 0,
@@ -295,6 +309,13 @@ class IndexStore:
             # Sites commit on their own, in their own request: a failure writing
             # pages later can never take the site rows with it.
             await _batch(client, site_statements, strict=False)
+            site_errors = list(getattr(client, "last_errors", []) or [])
+            if site_errors:
+                for message in site_errors[:3]:
+                    logger.error("site write step failed: %s", message)
+                raise DatabaseError(
+                    f"{len(site_errors)} site write statement(s) failed"
+                )
         except StorageQuotaError:
             raise
         except Exception as exc:
@@ -305,6 +326,8 @@ class IndexStore:
             )
             raise DatabaseError(f"site write failed: {exc}") from exc
         logger.debug("site rows written: %d", len(site_statements))
+        from app.indexer.guard import invalidate_storage_cache
+        invalidate_storage_cache(self, self.settings)
 
         site_ids: dict[str, int] = {}
         for host in hosts:
@@ -319,6 +342,7 @@ class IndexStore:
 
         # --- 3. pages: the root plus its bounded sitelinks ------------
         statements: list[tuple[str, list[Any]]] = []
+        planned_counts = {"inserted": 0, "replaced": 0, "pages": 0, "sitelinks": 0}
         site_payload: dict[str, int] = {}
         seen_pages: set[str] = set()
         root_seen: set[str] = set()  # one root page per domain, never two
@@ -402,8 +426,8 @@ class IndexStore:
             seen_pages.add(url)
             if not is_root_path:
                 sitelinks_per_host[host] = sitelinks_per_host.get(host, 0) + 1
-            outcome["pages"] += 1
-            outcome["replaced" if existed else "inserted"] += 1
+            planned_counts["pages"] += 1
+            planned_counts["replaced" if existed else "inserted"] += 1
 
             for section in (doc.get("sections") or [])[: self.settings.sections_max]:
                 if sitelinks_per_host.get(host, 0) >= self.settings.sections_max:
@@ -441,21 +465,37 @@ class IndexStore:
                 )
                 seen_pages.add(section_url)
                 sitelinks_per_host[host] = sitelinks_per_host.get(host, 0) + 1
-                outcome["pages"] += 1
-                outcome["sitelinks"] += 1
+                planned_counts["pages"] += 1
+                planned_counts["sitelinks"] += 1
 
         if statements:
             logger.debug(
                 "writing %d pages for %d sites (%d sitelinks)",
-                outcome["pages"], len(site_ids), outcome["sitelinks"],
+                planned_counts["pages"], len(site_ids), planned_counts["sitelinks"],
             )
             try:
-                await _batch(client, statements, strict=False)
-                errors = list(getattr(client, "last_errors", []) or [])
-                if errors:
-                    outcome["failed_statements"] = len(errors)
-                    for message in errors[:3]:
-                        logger.error("page write step failed: %s", message)
+                if queue_rowid is not None:
+                    await client.batch_atomic([
+                        *statements,
+                        (
+                            "UPDATE crawl_queue SET status = 'processed' WHERE rowid = ?",
+                            [int(queue_rowid)],
+                        ),
+                    ])
+                else:
+                    await _batch(client, statements, strict=False)
+                    errors = list(getattr(client, "last_errors", []) or [])
+                    if errors:
+                        outcome["failed_statements"] = len(errors)
+                        for message in errors[:3]:
+                            logger.error("page write step failed: %s", message)
+                        raise DatabaseError(
+                            f"{len(errors)} page write statement(s) failed"
+                        )
+                # Publish planned counters only after the batch has committed.
+                for key, value in planned_counts.items():
+                    outcome[key] += value
+                invalidate_storage_cache(self, self.settings)
             except StorageQuotaError:
                 raise
             except Exception as exc:
