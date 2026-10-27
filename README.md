@@ -220,7 +220,7 @@ seeds. The work is split in two, and the split matters:
 | rule | value |
 | --- | --- |
 | scheme | `http` / `https` only |
-| host | the source host, any `.in` domain, or a whitelisted Indian portal |
+| host | the source host's registrable domain, any `.in` domain, or a whitelisted Indian portal |
 | path depth | ≤ `MAX_PATH_DEPTH` (6) — Indian portals nest real content several levels down |
 | extensions | no `.png`, `.pdf`, `.zip`, `.css`, `.js`, media, fonts, archives |
 | paths | no `/login`, `/cart`, `/search`, `/account`, `/wp-admin` … |
@@ -243,6 +243,29 @@ orders by that number, so a batch takes one URL from each domain before taking a
 second from any. The row number is deliberately **not** capped: capping it at
 two per domain shrinks a batch below its configured size whenever few domains
 have work.
+
+### Registrable domains, not hosts
+
+`domain_of()` returns the **registrable root**, not the host. `python.fossee.in`,
+`arduino.fossee.in` and `om.fossee.in` are all `fossee.in`; `optica.iiita.ac.in`
+is `iiita.ac.in`; `sportstar.thehindu.com` is `thehindu.com`.
+
+The rule is the last two labels, or the last three under a two-part Indian
+public suffix (`TWO_PART_SUFFIXES`: `.gov.in`, `.nic.in`, `.ac.in`, `.edu.in`,
+`.res.in`, `.org.in`, `.co.in`). IP addresses and single-label hosts are returned
+unchanged, because there is no registrable domain to extract, and a trailing dot
+is stripped first.
+
+This matters in two places. The per-domain page cap counts a *site*, so a
+project that publishes one subdomain per module cannot claim ten pages for each
+one. And the round-robin dequeue partitions on the same value, so dozens of
+subdomains take one slot between them rather than crowding out every other
+source. Measured: eleven `*.fossee.in` subdomains and one news domain produce a
+batch of `[fossee.in, thehindu.com, fossee.in, …]`, and the eleven subdomains
+share one ten-page quota — 10 indexed, 1 skipped.
+
+The URL itself keeps its full host — only the grouping key is collapsed, so
+pages on different subdomains are still crawled and stored as themselves.
 
 `normalise_url()` also removes the fragment, the trailing slash and `www.`, so
 `/about`, `/about/`, `/about#history` and `/about?utm_source=x` are one queue

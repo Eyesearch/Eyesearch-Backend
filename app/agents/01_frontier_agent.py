@@ -11,6 +11,7 @@ else, and the dequeue query stays a plain `ORDER BY rowid`.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 import time
@@ -148,10 +149,52 @@ class FrontierItem:
     priority: int
 
 
+#: Public suffixes that carry an extra label: the registrable domain is the
+#: last three labels, so `optica.iiita.ac.in` is `iiita.ac.in`. Derived from
+#: `PRIORITY_SUFFIXES` so the two can never drift apart.
+TWO_PART_SUFFIXES: tuple[str, ...] = tuple(
+    suffix for suffix in PRIORITY_SUFFIXES if suffix.count(".") == 2
+)
+
+
+def _is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 def domain_of(url: str) -> str:
-    """The registrable host of a URL, lower-cased and without `www.`."""
-    host = (urlparse(url).hostname or "").lower()
-    return host[4:] if host.startswith("www.") else host
+    """The registrable root domain of a URL.
+
+    Subdomains are collapsed to the domain they belong to: `python.fossee.in`,
+    `arduino.fossee.in` and `om.fossee.in` are all `fossee.in`. Without this a
+    site that publishes one subdomain per project looks like dozens of separate
+    domains — each with its own page quota, each taking a slot in the
+    round-robin dequeue, which starves every real source behind it.
+
+    The rule is the last two labels, or the last three when the host sits under
+    a two-part Indian public suffix (`.gov.in`, `.ac.in`, …). IP addresses and
+    single-label hosts are returned unchanged, because there is no registrable
+    domain to extract.
+    """
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if not host:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+
+    if _is_ip_address(host):
+        return host
+
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+
+    if any(host.endswith(suffix) for suffix in TWO_PART_SUFFIXES):
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
 
 
 def normalise_url(url: str) -> str | None:
@@ -542,6 +585,7 @@ __all__ = [
     "SITEMAP_MAX_FETCHES",
     "SITEMAP_MAX_URLS_PER_DOMAIN",
     "SITEMAP_PATHS",
+    "TWO_PART_SUFFIXES",
     "discover_sitemap_urls",
     "parse_sitemap_locs",
     "BLOCKED_PATH_MARKERS",

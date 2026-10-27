@@ -313,3 +313,67 @@ async def test_a_page_under_the_cap_is_still_crawled(store, client):
         assert outcome.skipped == 0
     finally:
         await orchestrator.close()
+
+
+async def test_the_cap_is_shared_across_subdomains_of_one_site(store, client):
+    """The loophole: ten pages per subdomain instead of ten per site."""
+    settings = Settings(
+        environment="test",
+        crawler_enabled=False,
+        revalidation_enabled=False,
+        libsql_min_interval_seconds=0.0,
+        max_pages_per_domain=3,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        return httpx.Response(
+            200,
+            text=f"<html><head><title>{url}</title></head>"
+            f"<body><p>Distinct prose for {url} covering the project and its documentation.</p></body></html>",
+        )
+
+    orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
+    try:
+        await orchestrator.frontier.enqueue(
+            [
+                "https://python.fossee.in/guide",
+                "https://arduino.fossee.in/guide",
+                "https://om.fossee.in/guide",
+                "https://scilab.fossee.in/guide",
+                "https://spoken-tutorial.fossee.in/guide",
+            ]
+        )
+        outcome = await orchestrator.run_batch()
+
+        assert outcome.indexed_pages == 3
+        assert outcome.skipped == 2
+
+        total = await client.execute(
+            "SELECT COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id "
+            "WHERE s.domain = 'fossee.in'"
+        )
+        assert int(total.scalar(0)) == 3
+    finally:
+        await orchestrator.close()
+
+
+async def test_subdomains_share_one_round_robin_slot(store, client):
+    """One site's subdomains must not crowd the batch as separate domains."""
+    settings = Settings(environment="test", libsql_min_interval_seconds=0.0)
+    orchestrator = Orchestrator(client, settings)
+    try:
+        await orchestrator.frontier.enqueue(
+            [f"https://sub{i}.fossee.in/p" for i in range(6)]
+            + ["https://www.thehindu.com/news/", "https://indiankanoon.org/doc/1"]
+        )
+
+        batch = await store.pending_batch(10)
+        domains = [item.domain for item in batch]
+
+        assert "fossee.in" in domains
+        assert "thehindu.com" in domains
+        # The first three slots are three sites, not three subdomains of one.
+        assert len(set(domains[:3])) == 3
+    finally:
+        await orchestrator.close()

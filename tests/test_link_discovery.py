@@ -326,3 +326,71 @@ def test_the_seeds_span_more_than_one_category():
 def test_a_whitelisted_portal_is_not_capped_out_by_its_suffix():
     """`.com` news portals are in scope by whitelist, not by suffix."""
     assert in_crawl_scope("https://www.prajavani.net/", "karnataka.gov.in") is True
+
+
+# ---------------------------------------------------------------------------
+# Subdomain collapse
+# ---------------------------------------------------------------------------
+
+
+def test_domain_of_collapses_subdomains_to_root():
+    # Single suffixes (.in, .com)
+    assert frontier_module.domain_of("https://python.fossee.in/guide") == "fossee.in"
+    assert frontier_module.domain_of("https://om.fossee.in/") == "fossee.in"
+    assert frontier_module.domain_of("https://sportstar.thehindu.com/cricket") == "thehindu.com"
+
+    # Two-part public suffixes (.ac.in, .gov.in, .nic.in, .edu.in)
+    assert frontier_module.domain_of("https://optica.iiita.ac.in/") == "iiita.ac.in"
+    assert frontier_module.domain_of("https://sub.karnataka.gov.in/portal") == "karnataka.gov.in"
+    assert frontier_module.domain_of("https://bengaluruurban.nic.in/") == "bengaluruurban.nic.in"
+    assert frontier_module.domain_of("https://foo.nitk.edu.in/x") == "nitk.edu.in"
+
+    # Bare domain preservation
+    assert frontier_module.domain_of("https://thehindu.com/") == "thehindu.com"
+    assert frontier_module.domain_of("https://prajavani.net/") == "prajavani.net"
+
+
+def test_every_subdomain_of_one_site_maps_to_one_domain():
+    hosts = [
+        "python.fossee.in",
+        "arduino.fossee.in",
+        "om.fossee.in",
+        "spoken-tutorial.fossee.in",
+        "scilab.fossee.in",
+    ]
+
+    domains = {frontier_module.domain_of(f"https://{host}/") for host in hosts}
+
+    assert domains == {"fossee.in"}
+
+
+def test_the_two_part_suffix_list_covers_the_indian_suffixes():
+    assert frontier_module.TWO_PART_SUFFIXES == (
+        ".gov.in",
+        ".nic.in",
+        ".ac.in",
+        ".edu.in",
+        ".res.in",
+        ".org.in",
+        ".co.in",
+    )
+
+
+def test_an_ip_address_is_not_collapsed():
+    """The last two labels of an IP are not a registrable domain."""
+    assert frontier_module.domain_of("http://192.168.1.10:8080/x") == "192.168.1.10"
+    assert frontier_module.domain_of("https://10.0.0.7/x") == "10.0.0.7"
+
+
+def test_a_trailing_dot_host_is_handled():
+    assert frontier_module.domain_of("https://karnataka.gov.in./x") == "karnataka.gov.in"
+
+
+def test_a_single_label_host_is_returned_as_is():
+    assert frontier_module.domain_of("http://localhost:8000/x") == "localhost"
+
+
+def test_subdomains_of_one_site_are_in_scope_of_each_other():
+    """A link from one project subdomain to another is still same-site."""
+    assert in_crawl_scope("https://arduino.fossee.in/x", "fossee.in") is True
+    assert in_crawl_scope("https://arduino.fossee.in/x", frontier_module.domain_of("https://python.fossee.in/")) is True

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 #: The worker never sleeps less than this, however it is configured.
 MIN_SLEEP_SECONDS = 30.0
 
+_frontier_module = load_agent("01_frontier_agent")
 _parser_module = load_agent("03_parser_agent")
 _quality_module = load_agent("04_quality_agent")
 
@@ -121,10 +122,8 @@ class RevalidationAgent:
 
     @staticmethod
     def _domain(url: str) -> str:
-        from urllib.parse import urlparse
-
-        host = (urlparse(url).hostname or "").lower()
-        return host[4:] if host.startswith("www.") else host
+        """The same registrable domain the rest of the pipeline uses."""
+        return _frontier_module.domain_of(url)
 
 
 __all__ = ["MIN_SLEEP_SECONDS", "RevalidationAgent"]
