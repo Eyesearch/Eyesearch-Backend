@@ -249,6 +249,8 @@ async def run_url_pass(
 
     if not rows:
         report["empty"] = True
+        # Keep the queue's idle cadence low; scheduler adds its mandatory 2s throttle.
+        await asyncio.sleep(15.0)
         return report
 
     active_fetcher = fetcher or FetcherAgent(cfg)
