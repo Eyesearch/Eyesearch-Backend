@@ -289,7 +289,12 @@ async def normalize_legacy_subdomains(client: LibsqlClient) -> int:
 
     domain_of = load_agent("01_frontier_agent").domain_of
 
-    sites = await client.execute("SELECT site_id, domain FROM sites")
+    try:
+        sites = await client.execute("SELECT site_id, domain FROM sites")
+    except LibsqlError as error:
+        # Best-effort: a database blip here must not stop the service booting.
+        logger.warning("skipping subdomain normalisation: %s", error)
+        return 0
     if not sites.rows:
         return 0
 
@@ -335,7 +340,11 @@ async def normalize_legacy_subdomains(client: LibsqlClient) -> int:
             )
             merged += len(redundant)
 
-    queued = await client.execute("SELECT DISTINCT domain FROM crawl_queue")
+    try:
+        queued = await client.execute("SELECT DISTINCT domain FROM crawl_queue")
+    except LibsqlError as error:
+        logger.warning("skipping queue domain normalisation: %s", error)
+        return 0
     queue_updates = 0
     for row in queued.rows:
         raw = str(row[0] or "")

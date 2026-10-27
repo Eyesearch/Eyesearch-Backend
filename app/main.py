@@ -255,6 +255,10 @@ async def health_payload(request: Request) -> dict[str, Any]:
         workers = getattr(request.app.state, "workers", None)
         if workers is not None:
             payload["workers"] = workers.running()
+            payload["worker_status"] = workers.status()
+            restarts = sum(workers.restarts.values())
+            if restarts:
+                payload["worker_restarts"] = restarts
     except Exception as error:  # health must answer, always
         payload["status"] = "degraded"
         payload["db"] = "down"

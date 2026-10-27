@@ -342,29 +342,34 @@ class Orchestrator:
         moment there is work.
         """
         while True:
+            # The whole iteration is guarded, not just the batch. `refill()`
+            # does network and database work of its own, and an exception from
+            # it used to escape this loop and end the worker for good — which
+            # is indistinguishable from a crawl that has simply stopped.
             try:
                 outcome = await self.run_batch()
+
+                if outcome is not None and not outcome.empty and not outcome.paused:
+                    await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
+                    continue
+
+                delay = self._settings.crawl_empty_backoff_seconds
+
+                # Every pass, not only an empty one: the queue can be full of
+                # work from a single domain while every authoritative one sits
+                # idle.
+                added = await self._frontier.refill(minimum=1)
+                if outcome is not None and outcome.empty and not added:
+                    # Nothing to crawl and nothing past its cooldown yet.
+                    delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
+
+                logger.debug("crawl worker sleeping %.1fs (queue empty)", delay)
+                await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 raise
-            except Exception as error:  # a failed batch must not end the loop
-                logger.exception("batch failed: %s", error)
-                outcome = None
-
-            if outcome is not None and not outcome.empty and not outcome.paused:
-                await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
-                continue
-
-            delay = self._settings.crawl_empty_backoff_seconds
-
-            # Every pass, not only an empty one: the queue can be full of work
-            # from a single domain while every authoritative one sits idle.
-            added = await self._frontier.refill(minimum=1)
-            if outcome is not None and outcome.empty and not added:
-                # Nothing to crawl and nothing past its cooldown yet.
-                delay = max(delay, IDLE_REFILL_FAILED_BACKOFF_SECONDS)
-
-            logger.debug("crawl worker sleeping %.1fs (queue empty)", delay)
-            await asyncio.sleep(delay)
+            except Exception as error:
+                logger.exception("crawl loop error, continuing: %s", error)
+                await asyncio.sleep(IDLE_REFILL_FAILED_BACKOFF_SECONDS)
 
     async def run_domains(self, domains: Sequence[str]) -> BatchOutcome:
         """Seed specific domains and process exactly one batch of them."""

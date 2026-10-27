@@ -421,6 +421,49 @@ correctly and `snippet()` does not. Turso runs a different SQLite that cannot
 be exercised from here, so the window is computed in Python
 (`passage_around_match`) instead: portable, deterministic and covered by tests.
 
+## Worker supervision
+
+A background worker that ends stays dead until the next deploy. `/health` still
+answers and search still serves the existing index, so a stopped crawl looks
+exactly like a crawl with nothing to do.
+
+Two defences, both added after a transient database error stopped the crawler
+in production:
+
+- **Nothing escapes the loop.** `Orchestrator.run_forever()` guards the whole
+  iteration, not just the batch. `refill()` does network and database work of
+  its own, and an exception from it used to end the worker for good.
+- **A supervisor restarts it.** `_supervise()` re-runs a worker whenever it
+  stops — with a 2 s delay doubling to 60 s while it keeps dying, resetting
+  after a run that lasted two minutes.
+
+`/health` now reports `worker_status` per worker (`running`, `restarts`,
+`last_error`) and a total `worker_restarts`, so a dead or restarting worker is
+visible from outside instead of only in the logs.
+
+The startup migration is best-effort for the same reason: a database blip
+during `normalize_legacy_subdomains()` logs a warning and returns, rather than
+preventing the service from booting.
+
+## How fast can the crawl actually go?
+
+Throughput is bounded by database round trips, not by batch size. One batch
+costs about **8 round trips** — dequeue, per-domain counts, storage state,
+persist, failed rows, skipped rows, and the discovery enqueue — and the Turso
+client allows **two requests per second** (`LIBSQL_MIN_INTERVAL_SECONDS`).
+That is a four-second floor per batch, so roughly **10 URLs/second** however
+large `CRAWL_BATCH_SIZE` is.
+
+Two levers, in order of safety:
+
+1. **Fewer round trips per batch.** Combining the three reads at the top of a
+   batch into one `client.batch()` call, and the two write-backs at the end,
+   would take 8 down to about 5 — a 1.6x gain with no new risk.
+2. **A higher request rate.** The 2 req/s cap is self-imposed, not a Turso
+   requirement; lowering `LIBSQL_MIN_INTERVAL_SECONDS` raises the ceiling
+   directly. It is worth watching Turso for 429s if you do, because the real
+   limit is not published.
+
 ## Sitemap discovery
 
 Waiting to rediscover a domain one link at a time is slow. When the frontier
