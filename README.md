@@ -430,6 +430,16 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**Gzipped sitemaps too.** Most large Indian portals publish `sitemap.xml.gz`, so
+the harvester accepts a gzip member wherever it accepts XML — detected by magic
+bytes, not just the file extension — and decompresses through
+`gzip.GzipFile` wrapped in a text stream, so `iterparse` still reads it
+incrementally. `/sitemap.xml.gz` and `/sitemap_index.xml.gz` are in the standard
+path list, and a corrupt or truncated archive yields nothing rather than an
+exception. When the queue falls below `FRONTIER_REFILL_TRIGGER` (50) the refill
+switches to an aggressive harvest across
+`HARVEST_HOSTS_PER_PASS_AGGRESSIVE` (12) domains instead of the usual five.
+
 **Sitemaps feed the frontier.** Before falling back to recycled links, the
 refill harvests a few already-crawled domains: `robots.txt` `Sitemap:` directives
 first, then `/sitemap.xml` and `/sitemap_index.xml`, following one level of
@@ -954,6 +964,16 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**Gzipped sitemaps too.** Most large Indian portals publish `sitemap.xml.gz`, so
+the harvester accepts a gzip member wherever it accepts XML — detected by magic
+bytes, not just the file extension — and decompresses through
+`gzip.GzipFile` wrapped in a text stream, so `iterparse` still reads it
+incrementally. `/sitemap.xml.gz` and `/sitemap_index.xml.gz` are in the standard
+path list, and a corrupt or truncated archive yields nothing rather than an
+exception. When the queue falls below `FRONTIER_REFILL_TRIGGER` (50) the refill
+switches to an aggressive harvest across
+`HARVEST_HOSTS_PER_PASS_AGGRESSIVE` (12) domains instead of the usual five.
 
 **Sitemaps feed the frontier.** Before falling back to recycled links, the
 refill harvests a few already-crawled domains: `robots.txt` `Sitemap:` directives
