@@ -1,0 +1,10 @@
+# Pinned: a Render build must resolve identically to the verified local run.
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+httpx==0.28.1
+pydantic==2.14.1
+pydantic-settings==2.16.1
+python-dotenv==1.2.4
+beautifulsoup4==4.15.0
+pytest==9.1.1
+pytest-asyncio==1.4.1

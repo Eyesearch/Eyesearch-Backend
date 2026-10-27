@@ -1,0 +1,262 @@
+"""The pipeline: one shared HTTP client, six agents, one batch loop.
+
+`Orchestrator` is the only place the agents meet. It owns the pooled
+`httpx.AsyncClient`, pulls a batch of ten URLs from the frontier, runs them
+through fetch → parse → quality → index, and closes or fails each queue row as
+its own outcome dictates.
+
+The counters it reports are honest by construction: `pages` comes from the
+store's confirmed commit, never from the number of documents it handed over.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Sequence
+
+from app.agents import load_agent
+from app.engine.config import Settings, get_settings
+from app.engine.store import IndexStore, PageDocument, QueuedUrl
+from app.indexer.guard import StorageGuard
+from app.libsql_http import LibsqlClient
+
+logger = logging.getLogger(__name__)
+
+_frontier_module = load_agent("01_frontier_agent")
+_fetcher_module = load_agent("02_fetcher_agent")
+_parser_module = load_agent("03_parser_agent")
+_quality_module = load_agent("04_quality_agent")
+_indexer_module = load_agent("05_indexer_agent")
+_revalidation_module = load_agent("06_revalidation_agent")
+
+FrontierAgent = _frontier_module.FrontierAgent
+FetcherAgent = _fetcher_module.FetcherAgent
+ParserAgent = _parser_module.ParserAgent
+QualityAgent = _quality_module.QualityAgent
+IndexerAgent = _indexer_module.IndexerAgent
+RevalidationAgent = _revalidation_module.RevalidationAgent
+
+
+@dataclass
+class BatchOutcome:
+    """What one batch of URLs achieved."""
+
+    attempted: int = 0
+    fetched: int = 0
+    parsed: int = 0
+    accepted: int = 0
+    rejected: int = 0
+    indexed_pages: int = 0
+    queue_closed: int = 0
+    queue_failed: int = 0
+    paused: bool = False
+    skip_reasons: dict[str, int] = field(default_factory=dict)
+    elapsed_ms: int = 0
+
+    @property
+    def empty(self) -> bool:
+        return self.attempted == 0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "attempted": self.attempted,
+            "fetched": self.fetched,
+            "parsed": self.parsed,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "indexed_pages": self.indexed_pages,
+            "queue_closed": self.queue_closed,
+            "queue_failed": self.queue_failed,
+            "paused": self.paused,
+            "skip_reasons": dict(self.skip_reasons),
+            "elapsed_ms": self.elapsed_ms,
+        }
+
+
+class Orchestrator:
+    """Wires the agents together over one client and one store."""
+
+    def __init__(self, client: LibsqlClient, settings: Settings | None = None) -> None:
+        self._settings = settings or get_settings()
+        self._store = IndexStore(client, self._settings)
+        self._guard = StorageGuard(
+            client,
+            limit=self._settings.storage_page_limit,
+            ttl_seconds=self._settings.storage_count_ttl_seconds,
+        )
+        self._fetcher = FetcherAgent(self._settings)
+        self._parser = ParserAgent()
+        self._quality = QualityAgent()
+        self._indexer = IndexerAgent(self._store, self._guard)
+        self._frontier = FrontierAgent(self._store, self._settings)
+        self._revalidation = RevalidationAgent(
+            self._store,
+            self._fetcher,
+            self._settings,
+            parser=self._parser,
+        )
+        self.batches = 0
+        self.pages_indexed = 0
+
+    # -- accessors ---------------------------------------------------------
+
+    @property
+    def store(self) -> IndexStore:
+        return self._store
+
+    @property
+    def guard(self) -> StorageGuard:
+        return self._guard
+
+    @property
+    def frontier(self) -> object:
+        return self._frontier
+
+    @property
+    def fetcher(self) -> object:
+        return self._fetcher
+
+    @property
+    def revalidation(self) -> object:
+        return self._revalidation
+
+    # -- one batch ---------------------------------------------------------
+
+    async def run_batch(self, limit: int | None = None) -> BatchOutcome:
+        """Fetch, parse, gate and store one batch of queued URLs."""
+        started = time.monotonic()
+        outcome = BatchOutcome()
+
+        queue: list[QueuedUrl] = await self._frontier.next_batch(limit)
+        if not queue:
+            return outcome
+
+        outcome.attempted = len(queue)
+
+        # One storage read for the whole batch — never one per URL.
+        state = await self._guard.storage_state()
+        if state.paused:
+            outcome.paused = True
+            logger.warning("batch skipped, storage paused: %s", state.reason)
+            return outcome
+
+        documents: list[PageDocument] = []
+        queue_ids: list[int] = []
+        failed_ids: list[int] = []
+
+        self._quality.reset()
+        results = await self._fetcher.fetch_many([item.url for item in queue])
+
+        for item, result in zip(queue, results):
+            if not result.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, result.reason or "fetch_failed")
+                failed_ids.append(item.rowid)
+                continue
+
+            outcome.fetched += 1
+            parsed = self._parser.parse(item.url, result.html)
+            if not parsed.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, parsed.reason or "parse_failed")
+                failed_ids.append(item.rowid)
+                continue
+
+            outcome.parsed += 1
+            document = PageDocument(
+                url=item.url,
+                domain=item.domain,
+                title=parsed.title,
+                description=parsed.description,
+                body_text=parsed.body_text,
+            )
+            verdict = self._quality.check(document)
+            if not verdict.ok:
+                outcome.rejected += 1
+                self._tally(outcome.skip_reasons, verdict.reason or "rejected")
+                failed_ids.append(item.rowid)
+                continue
+
+            document.digest = verdict.digest
+            document.quality_score = verdict.score
+            documents.append(document)
+            queue_ids.append(item.rowid)
+
+        outcome.accepted = len(documents)
+
+        if failed_ids:
+            outcome.queue_failed = await self._indexer.mark_failed(
+                failed_ids, reason="fetch, parse or quality gate rejected the page"
+            )
+
+        if documents:
+            index_outcome = await self._indexer.persist(documents, queue_ids)
+            if index_outcome.committed:
+                # Only a confirmed commit may move the counters.
+                outcome.indexed_pages = index_outcome.pages_written
+                outcome.queue_closed = index_outcome.queue_closed
+                self.pages_indexed += index_outcome.counted
+                self.batches += 1
+            else:
+                outcome.paused = index_outcome.paused
+                logger.warning("batch not persisted: %s", index_outcome.reason)
+
+        outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.info(
+            "batch done: %d queued, %d fetched, %d accepted, %d rejected, %d indexed (%dms)",
+            outcome.attempted,
+            outcome.fetched,
+            outcome.accepted,
+            outcome.rejected,
+            outcome.indexed_pages,
+            outcome.elapsed_ms,
+        )
+        return outcome
+
+    # -- the loop ----------------------------------------------------------
+
+    async def run_forever(self) -> None:
+        """Consume the frontier until cancelled.
+
+        2.0 s between batches; a 15.0 s non-blocking backoff when the queue is
+        empty, so an idle deployment costs nothing and still recovers the
+        moment there is work.
+        """
+        while True:
+            try:
+                outcome = await self.run_batch()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # a failed batch must not end the loop
+                logger.exception("batch failed: %s", error)
+                outcome = None
+
+            if outcome is not None and not outcome.empty and not outcome.paused:
+                await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)
+                continue
+
+            if outcome is not None and outcome.empty:
+                await self._frontier.refill(minimum=1)
+
+            logger.debug(
+                "crawl worker sleeping %.1fs (queue empty)", self._settings.crawl_empty_backoff_seconds
+            )
+            await asyncio.sleep(self._settings.crawl_empty_backoff_seconds)
+
+    async def run_domains(self, domains: Sequence[str]) -> BatchOutcome:
+        """Seed specific domains and process exactly one batch of them."""
+        await self._frontier.enqueue([f"https://{domain}/" for domain in domains])
+        return await self.run_batch(limit=len(domains) or self._settings.crawl_batch_size)
+
+    async def close(self) -> None:
+        await self._fetcher.aclose()
+
+    @staticmethod
+    def _tally(counter: dict[str, int], reason: str) -> None:
+        counter[reason] = counter.get(reason, 0) + 1
+
+
+__all__ = ["BatchOutcome", "Orchestrator"]

@@ -1,0 +1,37 @@
+# Render blueprint for the EyeSearch gateway (free tier: 1 instance, 512 MB).
+#
+# The database is Turso, not Render: the free instance has no persistent disk,
+# so a local SQLite file would be lost on every deploy. TURSO_DB_URL and
+# TURSO_AUTH_TOKEN are marked `sync: false` and are set in the dashboard.
+services:
+  - type: web
+    name: eyesearch-backend
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: CRAWLER_ENABLED
+        value: "true"
+      - key: REVALIDATION_ENABLED
+        value: "true"
+      - key: STORAGE_PAGE_LIMIT
+        value: "300000"
+      - key: MIGRATE_LEGACY_SCHEMA
+        value: "true"
+      - key: TURSO_DB_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
