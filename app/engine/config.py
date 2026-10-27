@@ -63,6 +63,17 @@ class EngineSettings:
     backlog_max_attempts: int = field(default_factory=lambda: _int("BACKLOG_MAX_ATTEMPTS", 3))
     # How many already-crawled domains to inspect for a sitemap per refill pass.
     harvest_hosts_per_pass: int = field(default_factory=lambda: _int("HARVEST_HOSTS_PER_PASS", 5))
+    # A worker that finds nothing to do sleeps this long before polling again.
+    worker_idle_backoff_seconds: int = field(
+        default_factory=lambda: _int("WORKER_IDLE_BACKOFF_SECONDS", 15)
+    )
+    # Below this depth the scheduler refills the queue before the next pass.
+    frontier_low_water: int = field(default_factory=lambda: _int("FRONTIER_LOW_WATER", 20))
+    # A single discovery pass never runs more batches than this.
+    discovery_max_batches_per_pass: int = field(
+        default_factory=lambda: _int("DISCOVERY_MAX_BATCHES_PER_PASS", 20)
+    )
+
     # Below this queue depth the refill harvests aggressively instead.
     frontier_refill_trigger: int = field(default_factory=lambda: _int("FRONTIER_REFILL_TRIGGER", 50))
     harvest_hosts_per_pass_aggressive: int = field(

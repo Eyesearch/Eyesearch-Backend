@@ -38,14 +38,25 @@ async def run_once(limit: int | None = None) -> dict[str, int]:
 
 async def _loop(settings: EngineSettings) -> None:
     while True:
+        checked = 0
         try:
-            await run_once(settings.revalidate_batch_size)
+            report = await run_once(settings.revalidate_batch_size)
+            checked = int(report.get("checked", 0) or 0)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a bad pass must not kill the worker
             logger.warning("revalidation pass failed: %s", exc)
-        # Jitter keeps a fleet of instances from waking at the same moment.
-        await asyncio.sleep(max(30, settings.revalidate_interval_seconds) + random.uniform(0, 60))
+
+        if checked:
+            # Jitter keeps a fleet of instances from waking at the same moment.
+            await _sleep_logged(
+                max(30, settings.revalidate_interval_seconds) + random.uniform(0, 60),
+                "revalidation worker", "next pass",
+            )
+        else:
+            await _sleep_logged(
+                _idle_seconds(settings), "revalidation worker", "nothing stale"
+            )
 
 
 def start(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
@@ -59,16 +70,72 @@ def start(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
     return _task
 
 
+def _idle_seconds(settings: EngineSettings) -> float:
+    """The minimum gap between two database polls when a worker has no work."""
+    return max(15.0, float(settings.worker_idle_backoff_seconds))
+
+
+async def _sleep_logged(seconds: float, worker: str, reason: str) -> None:
+    """Sleep, saying so — a silent worker looks like a hung one."""
+    logger.info("%s sleeping %.0fs (%s)", worker, seconds, reason)
+    await asyncio.sleep(seconds)
+    logger.info("%s awake", worker)
+
+
+async def _refill_if_low(settings: EngineSettings) -> None:
+    """Top the queue up when it runs dry, and say how much it gained."""
+    from app.indexer.crawler import refill_frontier
+
+    try:
+        frontier_depth = await _queue_depth()
+        if frontier_depth >= settings.frontier_low_water:
+            return
+        logger.info(
+            "frontier low (%d < %d): refilling before the next pass",
+            frontier_depth, settings.frontier_low_water,
+        )
+        result = await refill_frontier(settings=settings)
+        logger.info(
+            "INFO: Frontier refill completed: added %d URLs to crawl_queue. Depth is now %d",
+            int(result.get("after", 0)) - int(result.get("before", 0)),
+            int(result.get("after", 0)),
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("frontier refill failed: %s", exc)
+
+
+async def _queue_depth() -> int:
+    from app.engine.store import get_store
+
+    try:
+        return await get_store().queue_depth()
+    except Exception:
+        return 0
+
+
 async def _backlog_loop(settings: EngineSettings) -> None:
     """Resolve missed queries into indexed documents, off the request path."""
     while True:
+        processed = 0
         try:
-            await run_backlog_once(settings.backlog_batch_queries)
+            report = await run_backlog_once(settings.backlog_batch_queries)
+            processed = int(report.get("queries", 0) or 0)
+            if processed:
+                logger.info("backlog worker: %s", dict(report))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # a bad pass must not kill the worker
             logger.warning("backlog pass failed: %s", exc)
-        await asyncio.sleep(max(60, settings.backlog_interval_seconds) + random.uniform(0, 30))
+
+        if processed:
+            await _sleep_logged(
+                max(60, settings.backlog_interval_seconds) + random.uniform(0, 30),
+                "backlog worker", "next pass",
+            )
+        else:
+            await _sleep_logged(_idle_seconds(settings), "backlog worker", "nothing pending")
 
 
 def start_backlog_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
@@ -129,6 +196,7 @@ async def _discovery_loop(settings: EngineSettings) -> None:
     instance could take longer than the instance lived.
     """
     while True:
+        await _refill_if_low(settings)
         try:
             report = await run_discovery_pass(settings=settings)
             if report.get("attempted"):
@@ -140,9 +208,18 @@ async def _discovery_loop(settings: EngineSettings) -> None:
         from app.indexer.guard import storage_paused
 
         if await storage_paused():
-            await asyncio.sleep(max(300, settings.storage_pause_seconds))
+            await _sleep_logged(
+                max(300, settings.storage_pause_seconds), "discovery worker", "storage paused"
+            )
             continue
-        await asyncio.sleep(max(30, settings.discovery_interval_seconds))
+
+        # A pass that did nothing must not be followed immediately by another.
+        idle = not report.get("attempted")
+        await _sleep_logged(
+            _idle_seconds(settings) if idle else max(30, settings.discovery_interval_seconds),
+            "discovery worker",
+            "queue empty" if idle else "next pass",
+        )
 
 
 def start_discovery_worker(settings: EngineSettings | None = None) -> asyncio.Task[None] | None:
