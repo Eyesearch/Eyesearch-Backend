@@ -486,14 +486,14 @@ class IndexStore:
         return failed, skipped
 
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
-        """Park queue rows that cannot be indexed, so the batch can move on."""
+        """Park permanent/quality failures; they are never auto-retried."""
         if not queue_ids:
             return 0
         statements: list[tuple[str, Sequence[Any]]] = [
             (
-                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1 "
-                "WHERE rowid = ?",
-                (rowid,),
+                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1, "
+                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE rowid = ?",
+                (reason or "permanent_failure", rowid),
             )
             for rowid in queue_ids
         ]
@@ -561,6 +561,46 @@ class IndexStore:
             (f"-{int(cooldown_seconds)} seconds", *domain_args, int(limit)),
         )
         return result.rows_affected
+
+    async def rearm_retryable_failed(
+        self,
+        limit: int = 25,
+        cooldown_seconds: int = 15 * 60,
+        max_retries: int = 3,
+    ) -> int:
+        """Retry only transient fetch failures after a cooldown.
+
+        Permanent HTTP 4xx, blocked hosts, parser failures and quality rejects
+        never match this allowlist. A retry budget prevents dead hosts cycling
+        through the frontier indefinitely.
+        """
+        result = await self._client.execute(
+            "UPDATE crawl_queue SET status = 'pending', processed_at = NULL, last_error = NULL "
+            "WHERE rowid IN ("
+            " SELECT rowid FROM crawl_queue WHERE status = 'failed' AND retry_count <= ? "
+            " AND processed_at IS NOT NULL AND processed_at <= datetime('now', ?) "
+            " AND (last_error = 'timeout' OR last_error LIKE 'http_error:%' "
+            " OR last_error LIKE 'http_status:5%') "
+            " ORDER BY processed_at ASC LIMIT ?)",
+            (int(max_retries), f"-{int(cooldown_seconds)} seconds", int(limit)),
+        )
+        if result.rows_affected:
+            logger.info("re-armed %d transiently failed URLs", result.rows_affected)
+        return result.rows_affected
+
+    async def mark_retryable_failed(self, queue_ids: Sequence[int], reason: str) -> int:
+        """Record a transient fetch failure eligible for bounded re-arming."""
+        if not queue_ids:
+            return 0
+        results = await self._client.batch([
+            (
+                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1, "
+                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE rowid = ?",
+                (reason, rowid),
+            )
+            for rowid in queue_ids
+        ])
+        return sum(1 for result in results if result.rows_affected > 0)
 
     async def update_page(self, document: PageDocument) -> bool:
         """Refresh an existing row in place — the revalidation path.
