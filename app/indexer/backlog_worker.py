@@ -17,6 +17,9 @@ from typing import Any
 
 import httpx
 
+from urllib.parse import urlparse
+
+from app.agents import is_restricted_host
 from app.crawler.crawler import fetch_page
 from app.crawler.seeds import SEED_DOMAINS
 from app.engine.config import EngineSettings, get_engine_settings
@@ -109,15 +112,25 @@ async def resolve_query(
 ) -> dict[str, Any]:
     """Crawl and ingest the pages that should answer `query`."""
     urls = await discover_urls(query, settings, client)
-    outcome: dict[str, Any] = {"query": query, "urls": len(urls), "inserted": 0, "skipped": 0}
+    outcome: dict[str, Any] = {
+        "query": query, "urls": len(urls), "inserted": 0, "skipped": 0, "reason": ""
+    }
     if not urls:
+        outcome["reason"] = "no_candidates"
         return outcome
 
+    blocked = 0
     documents = []
     for url in urls:
+        host = (urlparse(url).netloc or "").lower().removeprefix("www.")
+        if is_restricted_host(host, cooldown_seconds=settings.restriction_cooldown_seconds):
+            blocked += 1
+            outcome["skipped"] += 1
+            continue
         fetched = await fetch_page(client, url, settings)
         if fetched is None:
             outcome["skipped"] += 1
+            blocked += 1
             continue
         html, status = fetched
         document = extract_document(url, html, http_status=status)
@@ -131,6 +144,11 @@ async def resolve_query(
         outcome["inserted"] = int(ingest.get("inserted", 0))
         outcome["skipped"] += int(ingest.get("duplicate", 0)) + int(ingest.get("domain_cap", 0))
         outcome["ingest"] = ingest
+    if not outcome["inserted"]:
+        # every mirror refused us: the query is blocked, not merely unresolved
+        outcome["reason"] = "blocked" if blocked and blocked >= len(urls) - len(documents) else (
+            "nothing_indexable" if documents else "unreachable"
+        )
     return outcome
 
 
@@ -175,10 +193,15 @@ async def run_backlog_once(
             # Nothing indexed this time. Count the attempt; once a query has been
             # blocked or empty too many times it goes to history instead of
             # stalling the queue on every pass.
-            attempts = await index.note_backlog_attempt(
-                query, reason=str(outcome.get("reason") or "unresolved")
-            )
+            reason = str(outcome.get("reason") or "unresolved")
+            attempts = await index.note_backlog_attempt(query, reason=reason)
             limit = max(1, cfg.backlog_max_attempts)
+            if reason == "blocked":
+                # a 403/202 across every mirror: drop it now, do not stall the queue
+                await index.mark_backlog_dropped(query, reason="blocked")
+                report["dropped"] = int(report.get("dropped", 0)) + 1
+                logger.info("backlog query %r dropped immediately: blocked by every mirror", query)
+                continue
             if attempts >= limit:
                 await index.mark_backlog_dropped(query, reason="attempts exhausted")
                 report["dropped"] = int(report.get("dropped", 0)) + 1

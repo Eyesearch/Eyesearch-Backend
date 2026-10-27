@@ -138,6 +138,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # covered, and runs in the background. Startup never waits for it, so the
     # port is bound and /health answers immediately.
     if app.state.db_ready:
+        # Clear queries that only ever got blocked, then make sure the discovery
+        # queue has work before the workers start.
+        try:
+            purged = await database.execute_safe(
+                "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
+                "WHERE COALESCE(kind, 'query') = 'query' AND status = 'pending' "
+                "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
+            )
+            logger.info("startup: blocked backlog queries purged (%s)", type(purged).__name__)
+        except Exception as exc:
+            logger.warning("startup backlog purge failed: %s", exc)
+
+        try:
+            from app.indexer import crawler as seed_crawler
+
+            refill = await seed_crawler.refill_frontier()
+            app.state.queue_depth = refill["after"]
+        except Exception as exc:
+            logger.warning("startup frontier refill failed: %s", exc)
+
         # Prove the database is the right one and writable before anything crawls.
         try:
             probe = await database.verify_database()

@@ -807,6 +807,45 @@ class IndexStore:
             logger.debug("backlog probe failed for %r: %s", query, exc)
             return False
 
+    async def queue_url(self, url: str, *, domain: str = "", reason: str = "discovered") -> None:
+        """Mirror a URL into `crawl_queue` so the buffer is visible."""
+        await execute_safe(
+            "INSERT INTO crawl_queue (url, domain, category, depth, reason, status) "
+            "VALUES (?, ?, NULL, 0, ?, 'pending') "
+            "ON CONFLICT(url) DO UPDATE SET status = 'pending', reason = excluded.reason",
+            [url, domain or None, reason],
+        )
+
+    async def close_queue_url(self, url: str, *, status: str = "processed") -> None:
+        await execute_safe(
+            "UPDATE crawl_queue SET status = ? WHERE url = ?", [status, url]
+        )
+
+    async def queue_depth(self) -> int:
+        result = await execute_safe(
+            "SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'"
+        )
+        rows = getattr(result, "rows", ()) or ()
+        return int(rows[0][0]) if rows else 0
+
+    async def purge_blocked_queries(self) -> int:
+        """Move queries whose only outcome was a block straight to history."""
+        where = (
+            "COALESCE(kind, 'query') = 'query' AND status = 'pending' "
+            "AND (last_error LIKE '%403%' OR last_error LIKE '%202%' OR last_error LIKE '%blocked%')"
+        )
+        counted = await execute_safe(f"SELECT COUNT(*) FROM crawl_backlog WHERE {where}")
+        rows = getattr(counted, "rows", ()) or ()
+        count = int(rows[0][0]) if rows else 0
+        if not count:
+            return 0
+        await execute_safe(
+            "UPDATE crawl_backlog SET status = 'dropped', processed_at = CURRENT_TIMESTAMP "
+            f"WHERE {where}"
+        )
+        logger.info("purged %d blocked backlog queries to history", count)
+        return count
+
     async def note_backlog_attempt(self, query: str, *, reason: str = "") -> int:
         """Record one failed resolution and return the running attempt count."""
         await execute_safe(
