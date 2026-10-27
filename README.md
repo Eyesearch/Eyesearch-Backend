@@ -430,6 +430,16 @@ inspects every step in `results` and raises with the statement text
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
 
+**Sitemaps feed the frontier.** Before falling back to recycled links, the
+refill harvests a few already-crawled domains: `robots.txt` `Sitemap:` directives
+first, then `/sitemap.xml` and `/sitemap_index.xml`, following one level of
+`<sitemapindex>` nesting. URLs are filtered to the same host and to content pages
+(`.pdf`, `.jpg`, `.zip`, `.css`, `.js` and friends are dropped), capped per host
+(`MAX_URLS_PER_HOST` 200, `MAX_SITEMAPS_PER_HOST` 8), and parsed with
+`iterparse` so a 5,000-URL sitemap never becomes a 5,000-item list. A missing,
+blocked or malformed sitemap yields nothing and the pass falls back — no error,
+no stalled queue. Nothing already in `pages` or `crawl_queue` is re-enqueued.
+
 **The frontier never starves.** `refill_frontier()` tops the queue up to
 `FRONTIER_BUFFER_TARGET` (150) from registry seeds first, then from sitelink URLs
 already stored, and mirrors every queued domain into `crawl_queue` so the buffer
@@ -944,6 +954,16 @@ inspects every step in `results` and raises with the statement text
 (`libsql step 1 failed: SQLITE_CONSTRAINT: UNIQUE constraint failed: sites.domain
 (statement: INSERT INTO sites …)`), so an HTTP 200 can no longer hide a failed
 write.
+
+**Sitemaps feed the frontier.** Before falling back to recycled links, the
+refill harvests a few already-crawled domains: `robots.txt` `Sitemap:` directives
+first, then `/sitemap.xml` and `/sitemap_index.xml`, following one level of
+`<sitemapindex>` nesting. URLs are filtered to the same host and to content pages
+(`.pdf`, `.jpg`, `.zip`, `.css`, `.js` and friends are dropped), capped per host
+(`MAX_URLS_PER_HOST` 200, `MAX_SITEMAPS_PER_HOST` 8), and parsed with
+`iterparse` so a 5,000-URL sitemap never becomes a 5,000-item list. A missing,
+blocked or malformed sitemap yields nothing and the pass falls back — no error,
+no stalled queue. Nothing already in `pages` or `crawl_queue` is re-enqueued.
 
 **The frontier never starves.** `refill_frontier()` tops the queue up to
 `FRONTIER_BUFFER_TARGET` (150) from registry seeds first, then from sitelink URLs
