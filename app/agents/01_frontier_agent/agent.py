@@ -11,6 +11,16 @@ import logging
 from typing import Any
 
 from .config import FrontierConfig
+from .sitemap import (
+    MAX_SITEMAPS_PER_HOST,
+    MAX_URLS_PER_HOST,
+    STANDARD_SITEMAP_PATHS,
+    harvest_urls,
+    is_content_url,
+    iter_sitemap_index,
+    looks_like_sitemap,
+    sitemap_urls_from_robots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +81,68 @@ class FrontierAgent:
             await self.store.close_queue_url(f"https://{(host or '').lower().removeprefix('www.')}/")
         except Exception as exc:
             logger.warning("frontier mark failed for %s: %s", host, exc)
+
+    async def harvest(self, host: str, *, fetcher: Any | None = None) -> list[str]:
+        """Content URLs published by a domain's robots.txt or sitemap.
+
+        Never raises: a missing, blocked or malformed sitemap simply yields an
+        empty list and the caller falls back to sitelink discovery.
+        """
+        host = (host or "").lower().removeprefix("www.").strip()
+        if not host:
+            return []
+
+        agent = fetcher
+        owned = False
+        if agent is None:
+            from app.agents import FetcherAgent
+
+            agent = FetcherAgent()
+            owned = True
+
+        base = f"https://{host}/"
+        try:
+            robots = await agent.fetch(base + "robots.txt")
+            sitemaps: list[str] = []
+            if robots.ok and robots.html:
+                sitemaps = sitemap_urls_from_robots(robots.html, base)
+
+            documents: list[tuple[str, str]] = []
+            queue: list[str] = sitemaps[:MAX_SITEMAPS_PER_HOST] or [
+                base + path.lstrip("/") for path in STANDARD_SITEMAP_PATHS
+            ]
+
+            seen_sitemaps: set[str] = set()
+            budget = MAX_SITEMAPS_PER_HOST
+            while queue and budget > 0:
+                url = queue.pop(0)
+                if url in seen_sitemaps:
+                    continue
+                seen_sitemaps.add(url)
+                budget -= 1
+
+                fetched = await agent.fetch(url)
+                if not fetched.ok or not fetched.html:
+                    continue
+                if not looks_like_sitemap(fetched.html):
+                    continue
+
+                documents.append((url, fetched.html))
+                # a sitemap index points at more sitemaps, one level deep
+                for child in iter_sitemap_index(fetched.html):
+                    if child not in seen_sitemaps and len(queue) < MAX_SITEMAPS_PER_HOST:
+                        queue.append(child)
+
+            urls = harvest_urls(documents, host=host, limit=MAX_URLS_PER_HOST)
+            if urls:
+                logger.info("harvested %d sitemap urls from %s", len(urls), host)
+            return urls
+        except Exception as exc:
+            logger.debug("sitemap harvest failed for %s: %s", host, exc)
+            return []
+        finally:
+            if owned:
+                await agent.aclose()
 
     async def queue_depth(self) -> int:
         """How many URLs sit in `crawl_queue`, i.e. how full the buffer is."""
