@@ -25,7 +25,9 @@ app/
 │   ├── 03_parser_agent.py      HTML strip, metadata, 1,000-char body cap
 │   ├── 04_quality_agent.py     80-char density check, anti-junk, SHA-256 dedupe
 │   ├── 05_indexer_agent.py     Fail-closed storage guard, atomic persistence
-│   └── 06_revalidation_agent.py Background stale-page revalidation
+│   ├── 06_revalidation_agent.py Background stale-page revalidation
+│   ├── 07_classifier_agent.py  Ten-category tagging at ingestion
+│   └── 08_language_agent.py    Script detection: en / hi / kn
 ├── engine/
 │   ├── config.py               Pydantic BaseSettings — every knob
 │   └── store.py                IndexStore: atomic batches, FTS5 search, stats
@@ -51,7 +53,7 @@ one wart in the layout, and it is contained in `app/agents/__init__.py`.
 
 | Method | Path | Consumer |
 | --- | --- | --- |
-| GET | `/v1/search?q=&limit=&page=` | result cards for the web UI |
+| GET | `/v1/search?q=&limit=&page=&category=&lang=` | result cards for the web UI |
 | GET | `/v1/search?q=&format=json` | flat meta-search contract |
 | GET | `/v1/suggest?q=&limit=` | address-bar autocomplete (`[query, [items]]`) |
 | GET · POST | `/v1/retrieve` | AI clients — `json` (default) or `markdown` |
@@ -129,6 +131,8 @@ CREATE TABLE IF NOT EXISTS pages (
     body_text TEXT,
     quality_score REAL DEFAULT 1.0,
     digest TEXT,
+    category TEXT DEFAULT 'general_reference',
+    language TEXT DEFAULT 'en',
     indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(site_id) REFERENCES sites(site_id)
 );
@@ -300,6 +304,57 @@ that never happened.
 Measured on a stubbed portal whose every subpage carried the same meta
 description: 10 pages indexed, 10 distinct descriptions.
 
+## Classification and language
+
+Both agents run at ingestion, so a query can be narrowed without a backfill of
+pages that were crawled before the feature existed.
+
+**`07_classifier_agent.py`** assigns one of ten categories, scored from three
+signals in descending order of trust:
+
+| signal | weight | why |
+| --- | --- | --- |
+| public suffix (`.gov.in`, `.ac.in`, `.edu.in` …) | 4 | structural — true whatever the copy says |
+| URL token (`recruitment`, `mandi`, `judgment` …) | 3 | the publisher's own label |
+| keyword in the title or description | 2 | deliberate emphasis |
+| keyword in the body | 1, max 3 per category | a footer mention is not a topic |
+
+Categories: `government`, `education_exams`, `news_media`, `jobs_careers`,
+`legal_judiciary`, `business_finance`, `tech_developer`, `health_medical`,
+`agriculture_rural`, and `general_reference` as the fallback.
+
+URL tokens are matched as **whole words**, not substrings — `example.com`
+contains `exam`, and substring matching classified a plain "About us" page as
+an exam page. A suffix alone (weight 4) beats a single URL token but loses to a
+URL token plus a title keyword, which is what keeps `ssc.nic.in/admit-card` in
+`education_exams` rather than `government`.
+
+**`08_language_agent.py`** detects `en`, `hi` or `kn` from Unicode blocks —
+Kannada `U+0C80–U+0CFF`, Devanagari `U+0900–U+097F` — rather than word lists. A
+script must carry at least 15 % of the letters and at least 3 characters before
+it wins, so an English page with a Kannada menu is not labelled Kannada.
+
+Both columns are added to `pages` by `ensure_columns()` on an existing
+database, and indexed for filtering.
+
+### Filtering
+
+```bash
+curl 'localhost:8000/v1/search?q=metro&category=government&lang=kn'
+```
+
+`category` and `lang` are optional and validated: an unknown value returns
+`400 bad_request` with the usual envelope rather than an empty result set that
+looks like a miss. The response echoes what was applied:
+
+```json
+{"filters": {"category": "government", "language": "kn"}}
+```
+
+`format=json` honours the same filters. Revalidation refreshes a page's content
+but deliberately leaves `category` and `language` alone — otherwise every
+refreshed page would silently reset to the defaults.
+
 ## Upgrading an existing database
 
 The rebuild uses the same table names as the previous backend — `sites`,
@@ -364,6 +419,9 @@ and atomic batches are under test. Nothing touches the network.
 | `test_parser_cap.py` | the 1,000-character cap, word-boundary cuts, tag stripping |
 | `test_quality_gate.py` | the 80-character floor, junk markers, SHA-256 stability and dedupe |
 | `test_persistence_atomic.py` | atomic batches, confirmed-commit counters, queue transitions, guard TTL and fail-closed |
+| `test_link_discovery.py` | link extraction, crawl scope, frontier re-arm |
+| `test_domain_cap_and_description.py` | per-domain cap, page-specific descriptions |
+| `test_classifier_and_language.py` | category and language tagging, search filters |
 
 ## What is not here
 

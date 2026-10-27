@@ -38,6 +38,8 @@ _parser_module = load_agent("03_parser_agent")
 _quality_module = load_agent("04_quality_agent")
 _indexer_module = load_agent("05_indexer_agent")
 _revalidation_module = load_agent("06_revalidation_agent")
+_classifier_module = load_agent("07_classifier_agent")
+_language_module = load_agent("08_language_agent")
 
 FrontierAgent = _frontier_module.FrontierAgent
 FetcherAgent = _fetcher_module.FetcherAgent
@@ -45,6 +47,8 @@ ParserAgent = _parser_module.ParserAgent
 QualityAgent = _quality_module.QualityAgent
 IndexerAgent = _indexer_module.IndexerAgent
 RevalidationAgent = _revalidation_module.RevalidationAgent
+ClassifierAgent = _classifier_module.ClassifierAgent
+LanguageAgent = _language_module.LanguageAgent
 
 
 @dataclass
@@ -106,6 +110,8 @@ class Orchestrator:
         self._fetcher = FetcherAgent(self._settings, transport=transport)
         self._parser = ParserAgent()
         self._quality = QualityAgent()
+        self._classifier = ClassifierAgent()
+        self._language = LanguageAgent()
         self._indexer = IndexerAgent(self._store, self._guard)
         self._frontier = FrontierAgent(self._store, self._settings)
         self._revalidation = RevalidationAgent(
@@ -226,6 +232,19 @@ class Orchestrator:
 
             document.digest = verdict.digest
             document.quality_score = verdict.score
+
+            # Tagged here, at ingestion, so a search can filter without a
+            # backfill later.
+            document.category = self._classifier.classify(
+                item.url,
+                title=document.title,
+                description=document.description,
+                body_text=document.body_text,
+            ).category
+            document.language = self._language.detect(
+                f"{document.title} {document.body_text}"
+            )
+
             documents.append(document)
             queue_ids.append(item.rowid)
             counts[item.domain] = counts.get(item.domain, 0) + 1

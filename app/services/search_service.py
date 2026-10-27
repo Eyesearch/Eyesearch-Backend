@@ -22,7 +22,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.engine.config import Settings, get_settings
+from app.agents import load_agent
 from app.engine.store import IndexStore, SearchHit
+
+CATEGORIES = load_agent("07_classifier_agent").CATEGORIES
+SUPPORTED_LANGUAGES = load_agent("08_language_agent").SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -118,14 +122,27 @@ class SearchService:
         self._store = store
         self._settings = settings or get_settings()
 
-    async def search(self, query: str, limit: int | None = None, page: int = 1) -> dict[str, Any]:
+    async def search(
+        self,
+        query: str,
+        limit: int | None = None,
+        page: int = 1,
+        category: str | None = None,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         """The `GET /v1/search` payload."""
         started = time.perf_counter()
         size = self._clamp_limit(limit)
         page_number = max(1, min(page, self._settings.search_max_page))
         offset = (page_number - 1) * size
 
-        hits = await self._store.search(query, limit=size, offset=offset)
+        hits = await self._store.search(
+            query,
+            limit=size,
+            offset=offset,
+            category=category,
+            language=language,
+        )
         results = [to_result(hit).as_dict() for hit in hits]
         took_ms = int((time.perf_counter() - started) * 1000)
 
@@ -139,14 +156,23 @@ class SearchService:
             "cache_hit": True,
             "providers": {SOURCE_LABEL: len(results)},
             "failed_providers": [],
+            "filters": {"category": category, "language": language},
             "results": results,
         }
 
-    async def search_flat(self, query: str, limit: int | None = None) -> dict[str, Any]:
+    async def search_flat(
+        self,
+        query: str,
+        limit: int | None = None,
+        category: str | None = None,
+        language: str | None = None,
+    ) -> dict[str, Any]:
         """The meta-search contract (`format=json`), shaped like the README."""
         started = time.perf_counter()
         size = self._clamp_limit(limit)
-        hits = await self._store.search(query, limit=size)
+        hits = await self._store.search(
+            query, limit=size, category=category, language=language
+        )
         return {
             "query": query,
             "total_hits": len(hits),
@@ -204,6 +230,26 @@ class SearchService:
         stats = await self._store.stats()
         return stats.as_dict()
 
+    @staticmethod
+    def normalise_category(category: str | None) -> str | None:
+        """Validate a `category` filter, or `None` when it was not supplied."""
+        if category is None or not category.strip():
+            return None
+        value = category.strip().lower()
+        if value not in CATEGORIES:
+            raise ValueError(f"unknown category '{category}'")
+        return value
+
+    @staticmethod
+    def normalise_language(language: str | None) -> str | None:
+        """Validate a `lang` filter, or `None` when it was not supplied."""
+        if language is None or not language.strip():
+            return None
+        value = language.strip().lower()
+        if value not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"unsupported language '{language}'")
+        return value
+
     # -- helpers -----------------------------------------------------------
 
     def _clamp_limit(self, limit: int | None) -> int:
@@ -228,7 +274,9 @@ class SearchService:
 
 
 __all__ = [
+    "CATEGORIES",
     "SOURCE_LABEL",
+    "SUPPORTED_LANGUAGES",
     "SearchResult",
     "SearchService",
     "kind_of",

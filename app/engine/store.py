@@ -39,9 +39,11 @@ class PageDocument:
     body_text: str
     quality_score: float = 1.0
     digest: str = ""
+    category: str = "general_reference"
+    language: str = "en"
 
     def as_row(self) -> tuple[Any, ...]:
-        """The seven bound values the page insert expects, in SQL order.
+        """The nine bound values the page insert expects, in SQL order.
 
         `quality_score` is cast to `float` here rather than trusted from the
         caller: it is a REAL column, and an `int` reaching the encoder would be
@@ -56,6 +58,8 @@ class PageDocument:
             self.body_text,
             float(self.quality_score),
             self.digest,
+            self.category,
+            self.language,
         )
 
 
@@ -210,8 +214,10 @@ class IndexStore:
             statements.append(
                 (
                     "INSERT OR IGNORE INTO pages "
-                    "(site_id, url, title, description, body_text, quality_score, digest, indexed_at) "
-                    "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                    "(site_id, url, title, description, body_text, quality_score, digest, "
+                    "category, language, indexed_at) "
+                    "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, "
+                    "?, ?, CURRENT_TIMESTAMP)",
                     document.as_row(),
                 )
             )
@@ -361,7 +367,12 @@ class IndexStore:
         return result.rows_affected
 
     async def update_page(self, document: PageDocument) -> bool:
-        """Refresh an existing row in place — the revalidation path."""
+        """Refresh an existing row in place — the revalidation path.
+
+        `category` and `language` are deliberately left alone: they are set at
+        ingestion and a revalidation pass would otherwise reset them to their
+        defaults for every refreshed page.
+        """
         result = await self._client.execute(
             "UPDATE pages SET title = ?, description = ?, body_text = ?, "
             "quality_score = ?, digest = ?, indexed_at = CURRENT_TIMESTAMP WHERE url = ?",
@@ -425,20 +436,37 @@ class IndexStore:
 
     # -- search ------------------------------------------------------------
 
-    async def search(self, query: str, limit: int = 10, offset: int = 0) -> list[SearchHit]:
-        """Weighted FTS5 search, best match first."""
+    async def search(
+        self,
+        query: str,
+        limit: int = 10,
+        offset: int = 0,
+        category: str | None = None,
+        language: str | None = None,
+    ) -> list[SearchHit]:
+        """Weighted FTS5 search, best match first, optionally filtered."""
         match = build_match_query(query)
         if not match:
             return []
 
         weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
+        filters = ""
+        extra: list[Any] = []
+        if category:
+            filters += " AND p.category = ?"
+            extra.append(category)
+        if language:
+            filters += " AND p.language = ?"
+            extra.append(language)
+
         sql = (
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
             f"bm25(page_fts, {weights}) AS lexical_score "
             "FROM page_fts JOIN pages p ON p.page_id = page_fts.rowid "
-            "WHERE page_fts MATCH ? ORDER BY lexical_score ASC LIMIT ? OFFSET ?"
+            f"WHERE page_fts MATCH ?{filters} ORDER BY lexical_score ASC LIMIT ? OFFSET ?"
         )
-        result = await self._client.execute(sql, (match, limit, offset))
+
+        result = await self._client.execute(sql, (match, *extra, limit, offset))
         hits = [self._row_to_hit(row) for row in result.rows]
 
         if hits:
@@ -448,7 +476,7 @@ class IndexStore:
         # query. Fall back to OR rather than answering "nothing found".
         loose = build_match_query(query, prefix=True)
         if loose and loose != match:
-            result = await self._client.execute(sql, (loose, limit, offset))
+            result = await self._client.execute(sql, (loose, *extra, limit, offset))
             hits = [self._row_to_hit(row) for row in result.rows]
         return hits
 
@@ -510,7 +538,8 @@ class IndexStore:
 
     async def get_page(self, url: str) -> dict[str, Any] | None:
         result = await self._client.execute(
-            "SELECT page_id, url, title, description, body_text FROM pages WHERE url = ?",
+            "SELECT page_id, url, title, description, body_text, category, language "
+            "FROM pages WHERE url = ?",
             (url,),
         )
         row = result.first()
@@ -522,6 +551,8 @@ class IndexStore:
             "title": str(row[2] or ""),
             "description": str(row[3] or ""),
             "body_text": str(row[4] or ""),
+            "category": str(row[5] or "general_reference"),
+            "language": str(row[6] or "en"),
         }
 
 

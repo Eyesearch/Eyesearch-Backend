@@ -203,7 +203,7 @@ async def root() -> dict[str, Any]:
         "title": SERVICE_TITLE,
         "version": app.version,
         "endpoints": [
-            "/v1/search",
+            "/v1/search?q=&category=&lang=",
             "/v1/suggest",
             "/v1/retrieve",
             "/v1/chat",
@@ -283,14 +283,37 @@ async def search(
     limit: int = Query(default=10, ge=1, le=50),
     page: int = Query(default=1, ge=1, le=20),
     format: str = Query(default="cards", description="cards or json"),
+    category: str | None = Query(
+        default=None,
+        description="restrict to one category, e.g. government, education_exams",
+    ),
+    lang: str | None = Query(default=None, description="restrict to en, hi or kn"),
 ) -> JSONResponse:
     query = require_query(q)
     service = get_service(request)
+
+    try:
+        category_filter = service.normalise_category(category)
+        language_filter = service.normalise_language(lang)
+    except ValueError as error:
+        raise AppError("bad_request", str(error), 400, False) from error
+
     try:
         if format.lower() == "json":
-            payload = await service.search_flat(query, limit=limit)
+            payload = await service.search_flat(
+                query,
+                limit=limit,
+                category=category_filter,
+                language=language_filter,
+            )
         else:
-            payload = await service.search(query, limit=limit, page=page)
+            payload = await service.search(
+                query,
+                limit=limit,
+                page=page,
+                category=category_filter,
+                language=language_filter,
+            )
     except LibsqlError:
         raise
     except Exception as error:

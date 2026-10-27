@@ -39,6 +39,8 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         body_text TEXT,
         quality_score REAL DEFAULT 1.0,
         digest TEXT,
+        category TEXT DEFAULT 'general_reference',
+        language TEXT DEFAULT 'en',
         indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(site_id) REFERENCES sites(site_id)
     )
@@ -100,11 +102,15 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
 #: database created by an earlier build picks them up without a rebuild.
 COLUMN_ADDITIONS: tuple[tuple[str, str, str], ...] = (
     ("crawl_queue", "processed_at", "TIMESTAMP"),
+    ("pages", "category", "TEXT DEFAULT 'general_reference'"),
+    ("pages", "language", "TEXT DEFAULT 'en'"),
 )
 
 #: Statements that need a column from COLUMN_ADDITIONS to exist first.
 POST_COLUMN_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_queue_processed ON crawl_queue(status, processed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_pages_category ON pages(category)",
+    "CREATE INDEX IF NOT EXISTS idx_pages_language ON pages(language)",
 )
 
 COUNT_STATEMENTS: tuple[str, ...] = (
