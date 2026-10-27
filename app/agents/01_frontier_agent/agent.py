@@ -121,15 +121,22 @@ class FrontierAgent:
                 seen_sitemaps.add(url)
                 budget -= 1
 
-                fetched = await agent.fetch(url)
-                if not fetched.ok or not fetched.html:
-                    continue
-                if not looks_like_sitemap(fetched.html):
+                payload: bytes | str | None = None
+                if hasattr(agent, "fetch_raw"):
+                    raw, status = await agent.fetch_raw(url)
+                    if raw and status and status < 400:
+                        payload = raw
+                if payload is None:
+                    fetched = await agent.fetch(url)
+                    if not fetched.ok or not fetched.html:
+                        continue
+                    payload = fetched.html
+                if not looks_like_sitemap(payload):
                     continue
 
-                documents.append((url, fetched.html))
+                documents.append((url, payload))
                 # a sitemap index points at more sitemaps, one level deep
-                for child in iter_sitemap_index(fetched.html):
+                for child in iter_sitemap_index(payload, url=url):
                     if child not in seen_sitemaps and len(queue) < MAX_SITEMAPS_PER_HOST:
                         queue.append(child)
 

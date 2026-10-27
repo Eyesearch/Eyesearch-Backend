@@ -151,6 +151,35 @@ class FetcherAgent:
             if owned:
                 await client.aclose()
 
+    async def fetch_raw(self, url: str) -> tuple[bytes | None, int | None]:
+        """Fetch a URL as raw bytes — for `.xml.gz` sitemaps and other binaries.
+
+        The text path decodes the body, which mangles a gzip member; this one
+        keeps the bytes intact so the harvester can decompress them itself.
+        """
+        host = _host_of(url)
+        if host and is_restricted(host):
+            return None, None
+
+        client = self._client
+        owned = False
+        if client is None:
+            client = crawl_client(self.settings)
+            owned = True
+        try:
+            response = await client.get(url, headers=headers_for(0, user_agent=self.settings.crawl_user_agent))
+            if is_restricting(response.status_code):
+                mark_restricted(host, int(response.status_code))
+            if response.status_code >= 400:
+                return None, response.status_code
+            return response.content, response.status_code
+        except Exception as exc:
+            logger.debug("raw fetch failed for %s: %s", url, exc)
+            return None, None
+        finally:
+            if owned:
+                await client.aclose()
+
     async def fetch_many(self, urls: list[str], *, concurrency: int = 5) -> list[FetchResult]:
         semaphore = asyncio.Semaphore(max(1, concurrency))
 

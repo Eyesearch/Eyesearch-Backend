@@ -11,9 +11,11 @@ entry, so a 50,000-URL sitemap never becomes a 50,000-item list.
 
 from __future__ import annotations
 
+import gzip
 import io
 import logging
-from typing import Iterable, Iterator
+import zlib
+from typing import IO, Iterable, Iterator
 from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
@@ -28,10 +30,45 @@ ASSET_SUFFIXES: tuple[str, ...] = (
     ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".csv",
 )
 
-STANDARD_SITEMAP_PATHS: tuple[str, ...] = ("/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml")
+STANDARD_SITEMAP_PATHS: tuple[str, ...] = (
+    "/sitemap.xml",
+    "/sitemap_index.xml",
+    "/sitemap-index.xml",
+    "/sitemap.xml.gz",
+    "/sitemap_index.xml.gz",
+)
+
+GZIP_MAGIC = b"\x1f\x8b"
 
 MAX_SITEMAPS_PER_HOST = 8
 MAX_URLS_PER_HOST = 200
+
+
+def is_gzip_payload(payload: bytes | str | None) -> bool:
+    """True when the bytes are a gzip member (magic header), whatever the name."""
+    return isinstance(payload, (bytes, bytearray)) and bytes(payload[:2]) == GZIP_MAGIC
+
+
+def open_stream(payload: bytes | str | None, *, url: str = "") -> IO[str] | None:
+    """A text stream over a sitemap, decompressing gzip as it is read.
+
+    `gzip.GzipFile` decompresses lazily, so `iterparse` reads the archive
+    incrementally rather than the whole payload being inflated in memory at once.
+    """
+    if payload is None:
+        return None
+
+    if isinstance(payload, (bytes, bytearray)):
+        raw = bytes(payload)
+        if is_gzip_payload(raw) or url.lower().endswith(".gz"):
+            try:
+                return io.TextIOWrapper(gzip.GzipFile(fileobj=io.BytesIO(raw)), encoding="utf-8", errors="replace")
+            except (OSError, EOFError, zlib.error) as exc:
+                logger.debug("gzip sitemap failed to open (%s): %s", url, exc)
+                return None
+        return io.StringIO(raw.decode("utf-8", "replace"))
+
+    return io.StringIO(payload)
 
 
 def _local(tag: str) -> str:
@@ -86,30 +123,44 @@ def _iter_locs(stream: io.BufferedIOBase | io.StringIO, *, limit: int) -> Iterat
             count += 1
             if count >= limit:
                 return
-    except ElementTree.ParseError as exc:
+    except (ElementTree.ParseError, OSError, EOFError, zlib.error) as exc:
+        # malformed XML, or a gzip member that fails part-way through
         logger.debug("sitemap parse stopped early: %s", exc)
 
 
-def iter_sitemap_urls(xml_text: str, *, limit: int = MAX_URLS_PER_HOST) -> Iterator[str]:
-    """Content URLs from a `<urlset>` sitemap."""
-    if not xml_text or "<urlset" not in xml_text:
+def iter_sitemap_urls(
+    payload: bytes | str | None, *, limit: int = MAX_URLS_PER_HOST, url: str = ""
+) -> Iterator[str]:
+    """Content URLs from a `<urlset>` sitemap, plain or gzipped."""
+    stream = open_stream(payload, url=url)
+    if stream is None:
         return iter(())
-    return _iter_locs(io.StringIO(xml_text), limit=limit)
+    return _iter_locs(stream, limit=limit)
 
 
-def iter_sitemap_index(xml_text: str, *, limit: int = MAX_SITEMAPS_PER_HOST) -> Iterator[str]:
-    """Child sitemap URLs from a `<sitemapindex>`."""
-    if not xml_text or "<sitemapindex" not in xml_text:
+def iter_sitemap_index(
+    payload: bytes | str | None, *, limit: int = MAX_SITEMAPS_PER_HOST, url: str = ""
+) -> Iterator[str]:
+    """Child sitemap URLs from a `<sitemapindex>`, plain or gzipped."""
+    stream = open_stream(payload, url=url)
+    if stream is None:
         return iter(())
-    return _iter_locs(io.StringIO(xml_text), limit=limit)
+    return _iter_locs(stream, limit=limit)
 
 
-def looks_like_sitemap(xml_text: str) -> bool:
-    return bool(xml_text) and ("<urlset" in xml_text or "<sitemapindex" in xml_text)
+def looks_like_sitemap(payload: bytes | str | None) -> bool:
+    """Whether this is a sitemap at all, gzipped or not."""
+    if not payload:
+        return False
+    if is_gzip_payload(payload):
+        return True
+    if isinstance(payload, (bytes, bytearray)):
+        return b"<urlset" in bytes(payload) or b"<sitemapindex" in bytes(payload)
+    return "<urlset" in payload or "<sitemapindex" in payload
 
 
 def harvest_urls(
-    documents: Iterable[tuple[str, str]],
+    documents: Iterable[tuple[str, bytes | str]],
     *,
     host: str,
     limit: int = MAX_URLS_PER_HOST,
@@ -117,8 +168,8 @@ def harvest_urls(
     """Content URLs from a set of already-fetched sitemap documents."""
     collected: list[str] = []
     seen: set[str] = set()
-    for _url, text in documents:
-        for candidate in iter_sitemap_urls(text, limit=limit):
+    for url, text in documents:
+        for candidate in iter_sitemap_urls(text, limit=limit, url=url):
             if len(collected) >= limit:
                 return collected
             if candidate in seen or not is_content_url(candidate, host=host):
@@ -129,6 +180,9 @@ def harvest_urls(
 
 
 __all__ = [
+    "GZIP_MAGIC",
+    "is_gzip_payload",
+    "open_stream",
     "ASSET_SUFFIXES",
     "STANDARD_SITEMAP_PATHS",
     "MAX_SITEMAPS_PER_HOST",
