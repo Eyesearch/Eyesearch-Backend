@@ -100,6 +100,20 @@ async def lifespan(app: FastAPI):
 
     logger.info("starting %s (%s)", SERVICE_TITLE, settings.environment)
     logger.info("database target: %s", describe_database_target(settings))
+    logger.info(
+        "effective crawl settings: enabled=%s batch_size=%d concurrency=%d "
+        "timeout=%.1fs batch_sleep=%.3fs db_min_interval=%.3fs "
+        "domain_page_cap=%d storage_page_limit=%d allow_global_domains=%s",
+        settings.crawler_enabled,
+        settings.crawl_batch_size,
+        settings.crawl_concurrency,
+        settings.crawl_timeout_seconds,
+        settings.crawl_batch_sleep_seconds,
+        settings.libsql_min_interval_seconds,
+        settings.max_pages_per_domain,
+        settings.storage_page_limit,
+        settings.allow_global_domains,
+    )
 
     client: LibsqlClient = build_client(settings)
     await initialize_database(client, allow_legacy_drop=settings.migrate_legacy_schema)
