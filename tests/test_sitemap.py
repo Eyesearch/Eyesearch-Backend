@@ -338,3 +338,146 @@ async def test_a_thin_queue_triggers_the_aggressive_harvest(temp_db, monkeypatch
     assert report["aggressive"] is True
     assert len(harvested_hosts) >= 2, "aggressive mode inspects several domains"
     assert report["after"] >= 100
+
+
+# --- no tight-loop polling -------------------------------------------------
+
+async def test_the_discovery_pass_stops_when_the_same_domains_come_back(temp_db, monkeypatch) -> None:
+    """A domain that is not marked done must not spin the pass."""
+    from app.indexer import crawler as pipeline
+    from app.orchestrator import Orchestrator
+
+    store = temp_db
+    calls = {"batches": 0}
+
+    async def _always_same(self, limit=None):
+        return ["stuck.gov.in"]
+
+    async def _never_done(self, host, *, status="processed"):
+        return None  # pretend the status update failed
+
+    async def _run_domains(self, domains, **kwargs):
+        calls["batches"] += 1
+        return {"domains": len(domains), "indexed_pages": 0, "sites": 0, "accepted": 0,
+                "errors": {}, "reports": {}}
+
+    monkeypatch.setattr(FrontierAgent, "next_batch", _always_same)
+    monkeypatch.setattr(FrontierAgent, "mark_done", _never_done)
+    monkeypatch.setattr(Orchestrator, "run_domains", _run_domains)
+
+    report = await pipeline.run_discovery_pass(
+        store=store,
+        settings=EngineSettings(discovery_batch_size=1, discovery_batch_pause_seconds=0.0,
+                                worker_idle_backoff_seconds=1),
+    )
+
+    assert calls["batches"] == 1, "the repeat must end the pass, not loop"
+    assert report["batches"] == 1
+
+
+async def test_the_discovery_pass_is_capped_per_run(temp_db, monkeypatch) -> None:
+    from app.indexer import crawler as pipeline
+    from app.orchestrator import Orchestrator
+
+    store = temp_db
+    counter = {"n": 0}
+
+    async def _fresh_batch(self, limit=None):
+        counter["n"] += 1
+        return [f"site{counter['n']}.gov.in"]
+
+    async def _run_domains(self, domains, **kwargs):
+        return {"domains": len(domains), "indexed_pages": 0, "sites": 0, "accepted": 0,
+                "errors": {}, "reports": {}}
+
+    monkeypatch.setattr(FrontierAgent, "next_batch", _fresh_batch)
+    monkeypatch.setattr(Orchestrator, "run_domains", _run_domains)
+
+    report = await pipeline.run_discovery_pass(
+        store=store,
+        settings=EngineSettings(discovery_batch_size=1, discovery_batch_pause_seconds=0.0,
+                                worker_idle_backoff_seconds=1, discovery_max_batches_per_pass=3),
+    )
+
+    assert report["batches"] == 3
+
+
+def test_the_idle_backoff_is_at_least_fifteen_seconds() -> None:
+    from app.indexer import scheduler
+
+    assert scheduler._idle_seconds(EngineSettings(worker_idle_backoff_seconds=1)) == 15.0
+    assert scheduler._idle_seconds(EngineSettings(worker_idle_backoff_seconds=45)) == 45.0
+
+
+async def test_a_thin_queue_is_refilled_by_the_scheduler(temp_db, monkeypatch, caplog) -> None:
+    from app.indexer import scheduler
+
+    store = temp_db
+
+    async def _fake_refill(*, target=None, store=None, settings=None):
+        return {"before": 0, "after": 150, "seeds": 150, "sitemap": 0, "links": 0, "target": 150}
+
+    monkeypatch.setattr("app.indexer.crawler.refill_frontier", _fake_refill, raising=False)
+
+    with caplog.at_level("INFO"):
+        await scheduler._refill_if_low(EngineSettings(frontier_low_water=20))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Frontier refill completed: added 150 URLs to crawl_queue. Depth is now 150" in m
+               for m in messages), messages
+
+
+async def test_a_healthy_queue_is_left_alone(temp_db, monkeypatch) -> None:
+    from app.indexer import scheduler
+
+    store = temp_db
+    for i in range(25):
+        await store.queue_url(f"https://site{i}.gov.in/", domain=f"site{i}.gov.in")
+
+    called = {"refill": False}
+
+    async def _fake_refill(*args, **kwargs):
+        called["refill"] = True
+        return {}
+
+    monkeypatch.setattr("app.indexer.crawler.refill_frontier", _fake_refill, raising=False)
+    await scheduler._refill_if_low(EngineSettings(frontier_low_water=20))
+
+    assert called["refill"] is False
+
+
+async def test_a_queued_url_is_consumable_by_the_discovery_pass(temp_db, monkeypatch) -> None:
+    """A full queue must feed the pipeline, not just sit there."""
+    from app.indexer import crawler as pipeline
+
+    store = temp_db
+    await store.ingest_documents(
+        [{"url": "https://eci.gov.in/", "canonical_url": "https://eci.gov.in/",
+          "title": "Election Commission", "description": "Elections.", "payload_bytes": 90}]
+    )
+
+    async def _fake_harvest(self, host, *, fetcher=None):
+        return [f"https://{host}/p{i}" for i in range(15)]
+
+    monkeypatch.setattr(FrontierAgent, "harvest", _fake_harvest)
+    monkeypatch.setattr(pipeline, "seeds_for", lambda categories=None: [])
+
+    await pipeline.refill_frontier(
+        target=15, store=store,
+        settings=EngineSettings(harvest_hosts_per_pass=1, frontier_low_water=20),
+    )
+
+    frontier = FrontierAgent(store=store, config=FrontierConfig())
+    hosts = await frontier.next_batch(5)
+    assert hosts, "the queued URLs must yield crawlable hosts"
+    assert hosts[0] == "eci.gov.in"
+
+
+async def test_pending_queue_hosts_returns_distinct_domains(temp_db) -> None:
+    store = temp_db
+    await store.queue_url("https://a.gov.in/one", domain="a.gov.in")
+    await store.queue_url("https://a.gov.in/two", domain="a.gov.in")
+    await store.queue_url("https://b.gov.in/one", domain="b.gov.in")
+
+    hosts = await store.pending_queue_hosts(10)
+    assert hosts == ["a.gov.in", "b.gov.in"]
