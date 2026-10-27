@@ -405,6 +405,14 @@ async def refill_frontier(
     frontier = orchestrator.frontier
 
     before = await frontier.queue_depth()
+    # A thin queue is an emergency: harvest harder, not just top up.
+    aggressive = before < max(0, cfg.frontier_refill_trigger)
+    host_budget = (
+        max(1, cfg.harvest_hosts_per_pass_aggressive) if aggressive
+        else max(1, cfg.harvest_hosts_per_pass)
+    )
+    if aggressive:
+        logger.info("frontier low (%d < %d): aggressive sitemap harvest", before, cfg.frontier_refill_trigger)
     queued_seeds = 0
     queued_links = 0
     harvested_total = 0
@@ -424,13 +432,13 @@ async def refill_frontier(
             result = await database.execute_safe(
                 "SELECT domain FROM sites WHERE category IS NOT NULL "
                 "ORDER BY COALESCE(domain, '') ASC LIMIT ?",
-                [max(1, cfg.harvest_hosts_per_pass) * 4],
+                [max(1, host_budget) * 6],
             )
             hosts = [str(row[0]) for row in (getattr(result, "rows", ()) or ()) if row and row[0]]
             for host in hosts:
                 if await frontier.queue_depth() >= wanted:
                     break
-                if hosts_used >= max(1, cfg.harvest_hosts_per_pass):
+                if hosts_used >= host_budget:
                     break
                 urls = await frontier.harvest(host)
                 if not urls:
@@ -475,6 +483,7 @@ async def refill_frontier(
     )
     return {
         "before": before,
+        "aggressive": aggressive,
         "after": after,
         "seeds": queued_seeds,
         "sitemap": harvested_total,
