@@ -64,6 +64,28 @@ class FetchResult:
 
 #: Characters left alone when repairing a URL path. `%` is safe so an already
 #: encoded path is not double-encoded.
+#: Where a 200 may land and still be worthless: a soft 404 served with a
+#: success status, or a login wall. Mirrors the frontier's TRAP_RESOLVED_MARKERS;
+#: kept local so the fetcher does not depend on the frontier agent.
+SOFT_404_MARKERS: tuple[str, ...] = (
+    "filenotfound",
+    "errorpage",
+    "commonerrorpage",
+    "aspxerrorpath",
+    "/404.html",
+    "/notfound",
+    "/error.aspx",
+    "/error.php",
+    "/error.html",
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/sessiontimeout",
+)
+
+#: A redirect chain longer than this is a loop, not a move.
+MAX_REDIRECTS = 5
+
 _PATH_SAFE = "/%:@!$&'()*+,;=~-._"
 _QUERY_SAFE = "=&%:@!$'()*+,;/?~-._"
 
@@ -115,6 +137,7 @@ class FetcherAgent:
         self._client = client or httpx.AsyncClient(
             timeout=self._settings.crawl_timeout_seconds,
             follow_redirects=True,
+            max_redirects=MAX_REDIRECTS,
             transport=transport,
             headers={
                 **BOUND_HEADERS,
@@ -171,6 +194,23 @@ class FetcherAgent:
                     last_error = f"fetch_error:{type(error).__name__}"
                 else:
                     last_status = response.status_code
+
+                    # A redirect can land on a soft 404 or a login wall and still
+                    # answer 200. Judge the URL we actually got, not the one we
+                    # asked for, or those pages enter the index as real content.
+                    resolved = str(getattr(response, "url", "") or "").lower()
+                    if resolved and any(
+                        marker in resolved for marker in SOFT_404_MARKERS
+                    ):
+                        logger.debug("fetch %s resolved to a trap: %s", url, resolved)
+                        return FetchResult(
+                            url=url,
+                            ok=False,
+                            status=response.status_code,
+                            error="rejected_soft_404_or_auth_trap",
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                        )
+
                     if response.status_code in BLOCKING_STATUSES:
                         logger.debug("fetch %s blocked with %d", url, response.status_code)
                         return FetchResult(

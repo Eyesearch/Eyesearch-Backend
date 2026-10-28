@@ -144,12 +144,57 @@ JUNK_EXTENSIONS: frozenset[str] = frozenset(
     }
 )
 
-#: Paths that are a form or a session, not a page.
-BLOCKED_PATH_MARKERS: tuple[str, ...] = (
-    "/login", "/signin", "/sign-in", "/signup", "/sign-up", "/logout", "/signout",
-    "/cart", "/checkout", "/basket", "/account", "/wp-admin", "/wp-login",
-    "/search", "/print", "/share", "/rss", "/feed",
+#: Path segments that are a form or a session, not a page.
+#:
+#: Matched as whole segments, not substrings: `"/cart" in path` also blocks
+#: `/cartography`, and `"/login" in path` blocks `/login-help`, which are real
+#: pages on real Indian sites.
+BLOCKED_PATH_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "login", "signin", "sign-in", "signup", "sign-up", "logout", "signout",
+        "cart", "checkout", "basket", "account", "my-account", "wp-admin",
+        "wp-login", "search", "print", "share", "rss", "feed",
+        "register", "auth", "oauth", "sessiontimeout",
+    }
 )
+
+#: Distinctive strings that only ever appear on an error page, so a substring
+#: match is safe and catches them however the path is nested.
+TRAP_PATH_SUBSTRINGS: tuple[str, ...] = (
+    "filenotfound",
+    "errorpage",
+    "commonerrorpage",
+    "aspxerrorpath",
+    "servererror",
+    "exceptionpage",
+    "defaultredirect",
+    "/404.html",
+    "/notfound",
+    "/error.aspx",
+    "/error.php",
+    "/error.html",
+)
+
+#: Where a redirect may land and still be worth keeping. A 200 that resolves to
+#: one of these is a soft 404 or a login wall, not the page we asked for.
+TRAP_RESOLVED_MARKERS: tuple[str, ...] = (
+    "filenotfound",
+    "errorpage",
+    "commonerrorpage",
+    "aspxerrorpath",
+    "/404.html",
+    "/notfound",
+    "/error.aspx",
+    "/error.php",
+    "/error.html",
+    "/login",
+    "/signin",
+    "/sign-in",
+    "/sessiontimeout",
+)
+
+#: Beyond this a URL is almost certainly generated, not authored.
+MAX_URL_LENGTH = 350
 
 #: Query keys that identify a campaign, never a different page.
 TRACKING_PARAMS: frozenset[str] = frozenset(
@@ -338,15 +383,37 @@ def is_crawlable(url: str) -> bool:
     if path.endswith(tuple(JUNK_EXTENSIONS)):
         return False
 
-    depth = len([segment for segment in path.split("/") if segment])
+    if len(url) > MAX_URL_LENGTH:
+        return False
+
+    segments = [segment for segment in path.split("/") if segment]
+
+    depth = len(segments)
     if depth > MAX_PATH_DEPTH:
         return False
 
-    if any(marker in path for marker in BLOCKED_PATH_MARKERS):
+    if any(segment in BLOCKED_PATH_SEGMENTS for segment in segments):
+        return False
+
+    if any(marker in path for marker in TRAP_PATH_SUBSTRINGS):
         return False
 
     # A single unbroken key longer than a URL segment is a session id.
-    if any(len(segment) > 80 for segment in path.split("/")):
+    if any(len(segment) > 80 for segment in segments):
+        return False
+
+    # A repeated segment (`/books/books/books`) is a recursion trap.
+    for previous, current in zip(segments, segments[1:]):
+        if previous == current:
+            return False
+
+    # More than one `?` means a URL was concatenated onto another.
+    if url.count("?") > 1:
+        return False
+
+    # Faceted search generates unbounded combinations of the same page.
+    # Four ampersands is five parameters: past that it is a facet, not a page.
+    if url.count("&") >= 4:
         return False
 
     return True
@@ -764,7 +831,9 @@ __all__ = [
     "TWO_PART_SUFFIXES",
     "discover_sitemap_urls",
     "parse_sitemap_locs",
-    "BLOCKED_PATH_MARKERS",
+    "BLOCKED_PATH_SEGMENTS",
+    "TRAP_PATH_SUBSTRINGS",
+    "TRAP_RESOLVED_MARKERS",
     "FrontierAgent",
     "FrontierItem",
     "JUNK_EXTENSIONS",
