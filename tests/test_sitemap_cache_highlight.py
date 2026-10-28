@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from app.agents import load_agent
@@ -404,7 +406,21 @@ async def test_the_orchestrator_harvests_for_a_newly_discovered_domain(store, cl
         await orchestrator.frontier.enqueue(["https://karnataka.gov.in/"])
         outcome = await orchestrator.run_batch()
 
+        # Harvesting is scheduled, not awaited, so page indexing never waits on
+        # a sitemap fetch. The batch reports the domains it handed over.
         assert outcome.discovered >= 1
-        assert outcome.harvested == 1
+        assert outcome.sitemap_domains_scheduled >= 1
+
+        # The background drain is where the sitemap is actually read; wait for
+        # it and check the URLs really reached the queue.
+        task = orchestrator._sitemap_harvest_task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=5)
+
+        queued = await client.execute(
+            "SELECT url FROM crawl_queue WHERE status = 'pending'"
+        )
+        urls = [str(row[0]) for row in queued.rows]
+        assert any("thehindu.com/news/national" in url for url in urls), urls
     finally:
         await orchestrator.close()

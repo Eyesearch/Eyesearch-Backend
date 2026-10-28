@@ -5,7 +5,6 @@ from __future__ import annotations
 import httpx
 
 from app.agents import load_agent
-from app.engine.config import Settings
 
 frontier_module = load_agent("01_frontier_agent")
 FrontierAgent = frontier_module.FrontierAgent
