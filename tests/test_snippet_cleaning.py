@@ -63,3 +63,64 @@ def test_a_snippet_of_only_boilerplate_becomes_empty():
 
 def test_the_snippet_is_bounded():
     assert len(clean_display_snippet("word " * 200)) <= 300
+
+
+# ---------------------------------------------------------------------------
+# NIC accessibility toolbar and civic social rows
+# ---------------------------------------------------------------------------
+
+
+def test_the_screen_reader_language_toolbar_is_removed():
+    cleaned = clean_display_snippet(
+        "Screen Reader Hindi (हिन्दी) Department of Health publishes notices."
+    )
+    assert cleaned == "Department of Health publishes notices."
+
+
+def test_a_dravidian_language_toolbar_is_removed():
+    cleaned = clean_display_snippet(
+        "Screen Reader Kannada (ಕನ್ನಡ) District office timings."
+    )
+    assert cleaned == "District office timings."
+
+
+def test_a_sentence_about_screen_reader_support_survives():
+    """The supplied `[A-Za-z]+` version ate the first two words of this."""
+    text = "Screen Reader support is available at the helpdesk counter."
+    assert clean_display_snippet(text) == text
+
+
+def test_a_civic_social_row_is_removed():
+    assert clean_display_snippet(
+        "Home Facebook X District office contact details for citizens."
+    ) == "District office contact details for citizens."
+
+
+def test_a_snippet_that_is_only_a_social_row_becomes_empty():
+    assert clean_display_snippet("Facebook X") == ""
+
+
+def test_the_whole_social_row_goes_not_just_the_first_two():
+    """The supplied pattern left 'Instagram YouTube District office timings.'"""
+    assert clean_display_snippet(
+        "Facebook X Instagram YouTube District office timings."
+    ) == "District office timings."
+
+
+def test_social_links_mid_sentence_do_not_leave_a_hole():
+    """Anchoring at the start is what stops 'Follow us on for updates'."""
+    text = "Follow us on Facebook X for updates about pensions."
+    assert clean_display_snippet(text) == text
+
+
+def test_a_lone_x_in_a_sentence_is_not_treated_as_a_social_link():
+    text = "Plan X is available at the counter."
+    assert clean_display_snippet(text) == text
+
+
+def test_a_social_row_behind_the_title_is_still_removed():
+    """Stripping the title can expose boilerplate, so the patterns run again."""
+    assert clean_display_snippet(
+        "Department of Health Facebook X District office timings.",
+        title="Department of Health",
+    ) == "District office timings."

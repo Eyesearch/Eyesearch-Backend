@@ -170,19 +170,38 @@ def kind_of(url: str) -> str:
 #: Boilerplate that Indian government portals repeat on every page — the
 #: accessibility toolbar, the NIC chatbot greeting, the language picker. It is
 #: real page text, so it survives extraction, but it is noise in a result card.
+_LANGUAGES = (
+    "English|Hindi|Kannada|Tamil|Telugu|Marathi|Bengali|Gujarati|Malayalam"
+    "|Odia|Punjabi|Urdu|Assamese|Sanskrit|Konkani|Manipuri|Bodo|Dogri|Kashmiri"
+    "|Sindhi|Maithili|Nepali"
+)
+
+#: The social names a civic page links in its header or footer. `X` is only
+#: matched as part of a run that starts with a longer name, so a sentence
+#: mentioning "plan X" is left alone.
+_SOCIAL_NAMES = "Facebook|Twitter|Instagram|YouTube|LinkedIn|WhatsApp"
+
 JUNK_PATTERNS: tuple[str, ...] = (
     r"Skip to Main Content",
     r"Skip to navigation",
-    r"Screen Reader Access",
+    # "Screen Reader Access", "Screen Reader Hindi (हिन्दी)". It must be
+    # followed by Access or a language name: a bare `[A-Za-z]+`, or both groups
+    # optional, also matched "Screen Reader support" and left
+    # "support is available at the helpdesk counter."
+    rf"Screen Reader(?:\s+Access|\s+(?:{_LANGUAGES}))(?:\s*\([^)]{{0,30}}\))?",
+    # A header/footer social row, anchored at the start so it cannot punch a
+    # hole in a sentence: "Follow us on Facebook X for updates" used to become
+    # "Follow us on for updates". The run must start with a longer name, so a
+    # lone "X" is never stripped, and the whole row goes rather than just the
+    # first two, which left "Instagram YouTube District office timings."
+    rf"^\s*(?:Home\s+)?(?:{_SOCIAL_NAMES})(?:\s+(?:{_SOCIAL_NAMES}|X))*(?=\s|$)",
     r"Virtual Assistance By NIC",
     r"VANI - Virtual Assistance",
     r"I am still learning\.?\s*Please forgive me",
     r"Accessibility Controls",
     # Only the language names themselves: a loose `[^.]{0,40}` here eats the
     # next sentence, turning "... certificate online." into "ficate online.".
-    r"Select Language(?:\s+(?:English|Hindi|Kannada|Tamil|Telugu|Marathi|Bengali"
-    r"|Gujarati|Malayalam|Odia|Punjabi|Urdu|Assamese|Sanskrit|Konkani|Manipuri"
-    r"|Bodo|Dogri|Kashmiri|Sindhi|Maithili|Nepali))*",
+    rf"Select Language(?:\s+(?:{_LANGUAGES}))*",
     r"Dark Contrast Light Contrast",
     r"Resize Text",
     r"Reset Filter",
@@ -200,9 +219,12 @@ def clean_display_snippet(snippet: str, title: str = "", limit: int = 300) -> st
     if not snippet:
         return ""
 
-    clean = snippet
-    for pattern in _JUNK_RE:
-        clean = pattern.sub(" ", clean)
+    def strip_junk(text: str) -> str:
+        for pattern in _JUNK_RE:
+            text = pattern.sub(" ", text)
+        return text
+
+    clean = strip_junk(snippet)
 
     # Portals repeat the page title as the first line of the body text, and
     # sometimes twice; strip it until the snippet starts with real content.
@@ -211,6 +233,9 @@ def clean_display_snippet(snippet: str, title: str = "", limit: int = 300) -> st
         if not heading or not clean.strip().lower().startswith(heading.lower()):
             break
         clean = clean.strip()[len(heading) :].lstrip(" :-|·")
+
+    # Again, because removing the title can expose boilerplate that was behind it.
+    clean = strip_junk(clean)
 
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean[:limit]
