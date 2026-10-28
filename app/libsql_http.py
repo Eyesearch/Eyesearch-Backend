@@ -134,6 +134,22 @@ _NULL = {"type": "null"}
 #: connection running a multi-statement pipeline can exceed the old 20s.
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
 
+#: A cold TLS handshake and a slow query are different failures; timing them
+#: separately is what makes "ConnectTimeout" in a log actionable.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_READ_TIMEOUT_SECONDS = 20.0
+
+#: Transient network failures are retried with exponential backoff. Turso is a
+#: remote service over the public internet, so a dropped connection is a normal
+#: event, not a reason to fail the batch.
+TRANSIENT_RETRY_ATTEMPTS = 3
+TRANSIENT_RETRY_BACKOFF_SECONDS = 0.5
+
+#: Connection pool bounds. The crawl runs at most `crawl_concurrency` requests
+#: at once; these leave headroom without letting the pool grow unbounded.
+DEFAULT_MAX_CONNECTIONS = 50
+DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
+
 
 def retry_after_seconds(
     response: Any, default: float = 1.0, cap: float = 10.0
@@ -223,7 +239,9 @@ class TursoHttpClient:
         token: str = "",
         *,
         limiter: ProcessRateLimiter | None = None,
-        timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        timeout: float | None = None,
+        connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not url:
@@ -231,8 +249,19 @@ class TursoHttpClient:
         self.base_url = rewrite_scheme(url).rstrip("/")
         self.token = token
         self.limiter = limiter or ProcessRateLimiter(0.5)
+
+        read = timeout if timeout is not None else read_timeout
         self._client = httpx.AsyncClient(
-            timeout=timeout,
+            timeout=httpx.Timeout(
+                connect=connect_timeout,
+                read=read,
+                write=connect_timeout,
+                pool=connect_timeout,
+            ),
+            limits=httpx.Limits(
+                max_connections=DEFAULT_MAX_CONNECTIONS,
+                max_keepalive_connections=DEFAULT_MAX_KEEPALIVE_CONNECTIONS,
+            ),
             transport=transport,
             headers=self._headers(),
         )
@@ -246,6 +275,43 @@ class TursoHttpClient:
     async def execute(self, sql: str, args: Sequence[Any] = ()) -> ResultSet:
         results = await self.batch([(sql, args)])
         return results[0]
+
+    async def _post_pipeline(self, payload: dict[str, Any]) -> httpx.Response:
+        """POST the pipeline, retrying transient network failures.
+
+        Each attempt re-acquires the limiter: a retry is a real request against
+        Turso's budget, so it must be counted like one. Only connect/read
+        timeouts and network errors are retried — an HTTP error status or a
+        malformed body is not going to fix itself.
+        """
+        delay = TRANSIENT_RETRY_BACKOFF_SECONDS
+        last_error: Exception | None = None
+
+        for attempt in range(1, TRANSIENT_RETRY_ATTEMPTS + 1):
+            await self.limiter.acquire()
+            try:
+                return await self._client.post(
+                    f"{self.base_url}/v2/pipeline", json=payload
+                )
+            except (httpx.TimeoutException, httpx.NetworkError) as error:
+                last_error = error
+                if attempt >= TRANSIENT_RETRY_ATTEMPTS:
+                    break
+                logger.warning(
+                    "Turso request failed (%s); retry %d of %d in %.1fs",
+                    type(error).__name__,
+                    attempt,
+                    TRANSIENT_RETRY_ATTEMPTS - 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2.0
+            except httpx.HTTPError as error:
+                raise DatabaseUnavailable(f"Turso request failed: {error}") from error
+
+        raise DatabaseUnavailable(
+            f"Turso request failed after {TRANSIENT_RETRY_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
 
     async def batch(self, statements: Sequence[Statement]) -> list[ResultSet]:
         """Run statements in order in one request and check every one of them."""
@@ -266,11 +332,7 @@ class TursoHttpClient:
             ]
         }
 
-        await self.limiter.acquire()
-        try:
-            response = await self._client.post(f"{self.base_url}/v2/pipeline", json=payload)
-        except httpx.HTTPError as error:
-            raise DatabaseUnavailable(f"Turso request failed: {error}") from error
+        response = await self._post_pipeline(payload)
 
         # A 429 is throttling, not a failure. Without this, every request Turso
         # rate-limits fails the whole batch and the crawl makes no progress
@@ -281,13 +343,7 @@ class TursoHttpClient:
             delay = retry_after_seconds(response)
             logger.warning("Turso throttled the pipeline (429); retrying in %.1fs", delay)
             await asyncio.sleep(delay)
-            await self.limiter.acquire()
-            try:
-                response = await self._client.post(
-                    f"{self.base_url}/v2/pipeline", json=payload
-                )
-            except httpx.HTTPError as error:
-                raise DatabaseUnavailable(f"Turso request failed: {error}") from error
+            response = await self._post_pipeline(payload)
 
         if response.status_code >= 400:
             raise DatabaseUnavailable(
@@ -422,6 +478,8 @@ def build_client(settings: Settings | None = None) -> LibsqlClient:
         url,
         settings.turso_auth_token,
         limiter=ProcessRateLimiter(settings.libsql_min_interval_seconds),
+        connect_timeout=settings.turso_connect_timeout_seconds,
+        read_timeout=settings.turso_read_timeout_seconds,
     )
 
 

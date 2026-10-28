@@ -79,7 +79,13 @@ class Settings(BaseSettings):
     # A batch waits for its slowest member, so this bounds the whole batch, not
     # just one request. 4s fails fast on dead hosts; some Indian government
     # portals legitimately take longer, so raise it if the failure rate climbs.
-    crawl_timeout_seconds: float = 2.5
+    crawl_timeout_seconds: float = 7.0
+
+    # --- Turso HTTP timeouts ------------------------------------------------
+    #: A cold TLS handshake to Turso can take longer than a warm read; keeping
+    #: them separate stops a slow connect from being reported as a slow query.
+    turso_connect_timeout_seconds: float = 10.0
+    turso_read_timeout_seconds: float = 20.0
     crawl_max_body_bytes: int = 512_000
     crawl_concurrency: int = 60
     #: How many discovered URLs go into one pipeline request. A batch of 120

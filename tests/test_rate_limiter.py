@@ -353,3 +353,113 @@ def test_retry_after_is_parsed_and_capped():
     assert retry_after_seconds(_Response(None)) == 1.0
     assert retry_after_seconds(_Response("999")) == 10.0
     assert retry_after_seconds(_Response("Wed, 21 Oct 2026 07:28:00 GMT")) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Transient network retries
+# ---------------------------------------------------------------------------
+
+
+async def test_a_connect_timeout_is_retried_then_raises(monkeypatch):
+    import app.libsql_http as module
+
+    monkeypatch.setattr(module, "TRANSIENT_RETRY_BACKOFF_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectTimeout("mock connect timeout")
+
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DatabaseUnavailable) as exc_info:
+            await client.execute("SELECT 1")
+    finally:
+        await client.close()
+
+    assert calls["n"] == module.TRANSIENT_RETRY_ATTEMPTS
+    assert "after 3 attempts" in str(exc_info.value)
+
+
+async def test_a_transient_failure_recovers_without_raising(monkeypatch):
+    import app.libsql_http as module
+
+    monkeypatch.setattr(module, "TRANSIENT_RETRY_BACKOFF_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("blip")
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "type": "ok",
+                        "response": {
+                            "type": "execute",
+                            "result": {
+                                "cols": [{"name": "n"}],
+                                "rows": [[{"type": "integer", "value": "7"}]],
+                                "affected_row_count": 1,
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.execute("SELECT 1")
+    finally:
+        await client.close()
+
+    assert calls["n"] == 2
+    assert int(result.scalar(0)) == 7
+
+
+async def test_an_http_error_status_is_not_retried():
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(400, text="bad request")
+
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DatabaseUnavailable):
+            await client.execute("SELECT 1")
+    finally:
+        await client.close()
+
+    assert calls["n"] == 1, "a 400 will not fix itself"
+
+
+def test_connect_and_read_timeouts_are_configured_separately():
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        connect_timeout=3.0,
+        read_timeout=9.0,
+    )
+    timeout = client._client.timeout
+    assert timeout.connect == 3.0
+    assert timeout.read == 9.0
