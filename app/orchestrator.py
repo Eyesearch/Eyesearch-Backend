@@ -258,19 +258,9 @@ class Orchestrator:
             document.digest = verdict.digest
             document.quality_score = verdict.score
 
-            # Enforce a per-site 10 KiB budget across ALL indexed pages on the
-            # domain, not 10 KiB per page. This measures UTF-8 page-field
-            # payload only; FTS5 and database storage overhead are additional.
-            document_bytes = self._store.page_payload_bytes(document)
-            used_bytes = payload_bytes.get(item.domain, 0)
-            if used_bytes + document_bytes > self._settings.max_site_payload_bytes:
-                outcome.skipped += 1
-                self._tally(outcome.skip_reasons, "site_storage_budget")
-                skipped_ids.append(item.rowid)
-                continue
-
             # Tagged here, at ingestion, so a search can filter without a
-            # backfill later.
+            # backfill later. Compute the payload only after all stored fields
+            # have their final values, so accounting matches what is persisted.
             document.category = self._classifier.classify(
                 item.url,
                 title=document.title,
@@ -280,6 +270,17 @@ class Orchestrator:
             document.language = self._language.detect(
                 f"{document.title} {document.body_text}"
             )
+
+            # Enforce a per-site budget across ALL indexed pages on the domain,
+            # not a separate budget per page. This counts UTF-8 page-field
+            # payload only; FTS5 and database storage overhead are additional.
+            document_bytes = self._store.page_payload_bytes(document)
+            used_bytes = payload_bytes.get(item.domain, 0)
+            if used_bytes + document_bytes > self._settings.max_site_payload_bytes:
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "site_storage_budget")
+                skipped_ids.append(item.rowid)
+                continue
 
             documents.append(document)
             queue_ids.append(item.rowid)
