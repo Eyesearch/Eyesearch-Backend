@@ -75,6 +75,11 @@ class Settings(BaseSettings):
         per_page = max(0.1, self.estimated_kb_per_page)
         return int(self.max_storage_mb * 1024 / per_page)
 
+    @property
+    def max_indexed_pages(self) -> int:
+        """Backward-compatible alias for the effective page ceiling."""
+        return self.effective_storage_page_limit
+
     # --- Turso request shaping ---------------------------------------------
     # One shared limiter covers crawl, revalidation, and search. 0.1s allows
     # up to 10 HTTP pipeline requests/second by default; deployments can raise
