@@ -507,3 +507,39 @@ def test_outbound_links_per_page_are_capped():
     settings = Settings(_env_file=None, environment="test")
     assert settings.max_outbound_links_per_page == 100
     assert 0 < settings.max_outbound_links_per_page <= 1000
+
+
+# ---------------------------------------------------------------------------
+# Global crawl is a flag, not a code change
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_domains_are_out_of_scope_by_default():
+    settings = Settings(_env_file=None, environment="test")
+    assert settings.allow_global_domains is False
+    assert in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in") is False
+
+
+def test_the_global_ring_opens_when_asked():
+    assert (
+        in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in", allow_global=True)
+        is True
+    )
+
+
+def test_indian_and_whitelisted_domains_are_unaffected_by_the_flag():
+    for allow in (False, True):
+        assert in_crawl_scope("https://karnataka.gov.in/a", "karnataka.gov.in", allow_global=allow)
+        assert in_crawl_scope("https://github.com/x", "karnataka.gov.in", allow_global=allow)
+
+
+def test_the_environment_variable_is_what_flips_it(monkeypatch):
+    from app.engine.config import reset_settings_cache
+
+    monkeypatch.setenv("ALLOW_GLOBAL_DOMAINS", "true")
+    reset_settings_cache()
+    try:
+        assert Settings(_env_file=None, environment="test").allow_global_domains is True
+    finally:
+        monkeypatch.delenv("ALLOW_GLOBAL_DOMAINS", raising=False)
+        reset_settings_cache()
