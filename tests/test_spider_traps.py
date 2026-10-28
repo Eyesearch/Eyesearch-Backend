@@ -38,6 +38,10 @@ FetcherAgent = fetcher_module.FetcherAgent
         "https://shop.in/items?a=1&b=2&c=3&d=4&e=5",
         # A URL concatenated onto another.
         "https://x.gov.in/a?b=1?c=2",
+        # ASP.NET error bounces carry the marker in the query string.
+        "https://x.gov.in/page.html?aspxerrorpath=/x",
+        # Infinite calendar navigation.
+        "https://x.gov.in/calendar/2026/10/28/",
     ],
 )
 def test_traps_are_rejected(url):
@@ -55,6 +59,8 @@ def test_traps_are_rejected(url):
         "https://example.in/cartography",
         # Nor `/login` swallow `/login-help`.
         "https://example.in/login-help",
+        # A bare calendar page is a page; only the dated children are a trap.
+        "https://example.in/calendar",
     ],
 )
 def test_real_pages_survive(url):

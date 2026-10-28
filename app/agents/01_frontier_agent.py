@@ -173,6 +173,11 @@ TRAP_PATH_SUBSTRINGS: tuple[str, ...] = (
     "/error.aspx",
     "/error.php",
     "/error.html",
+    # An ASP.NET error bounce carries its origin in the query string, so this
+    # one only matches when the whole URL is searched, not just the path.
+    "aspxerrorpath",
+    # Infinite calendar navigation: /calendar/2026/10/28/ and every sibling.
+    "/calendar/",
 )
 
 #: Where a redirect may land and still be worth keeping. A 200 that resolves to
@@ -395,7 +400,9 @@ def is_crawlable(url: str) -> bool:
     if any(segment in BLOCKED_PATH_SEGMENTS for segment in segments):
         return False
 
-    if any(marker in path for marker in TRAP_PATH_SUBSTRINGS):
+    # Matched against the whole URL, not just the path: `aspxerrorpath` and
+    # friends arrive in the query string, where a path-only test misses them.
+    if any(marker in url.lower() for marker in TRAP_PATH_SUBSTRINGS):
         return False
 
     # A single unbroken key longer than a URL segment is a session id.
