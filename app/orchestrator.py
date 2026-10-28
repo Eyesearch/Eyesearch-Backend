@@ -316,7 +316,11 @@ class Orchestrator:
             discovered = [
                 url
                 for url in discovered
-                if counts.get(_frontier_module.domain_of(url), 0) < cap
+                if (
+                    counts.get(_frontier_module.domain_of(url), 0) < cap
+                    and payload_bytes.get(_frontier_module.domain_of(url), 0)
+                    < self._settings.max_site_payload_bytes
+                )
             ]
 
         if discovered and not outcome.paused:
