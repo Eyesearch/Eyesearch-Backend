@@ -344,8 +344,18 @@ def test_a_domain_outside_the_allowed_tlds_stays_out():
     assert in_crawl_scope("https://bit.ly/abc", "karnataka.gov.in") is False
 
 
-def test_a_whitelisted_domain_sorts_with_the_authoritative_urls():
-    assert priority_of("https://www.thehindu.com/") == 0
+def test_civic_domains_outrank_commercial_portals():
+    """Priority 0 is reserved for Indian civic and public-suffix domains."""
+    # Civic: government, academic, national infrastructure.
+    assert priority_of("https://karnataka.gov.in/") == 0
+    assert priority_of("https://www.iisc.ac.in/") == 0
+    assert priority_of("https://somewhere.in/") == 0
+    assert priority_of("https://bengaluruurban.nic.in/") == 0
+
+    # Allowed, but never ahead of civic sources.
+    assert priority_of("https://www.thehindu.com/") == 1
+    assert priority_of("https://flipkart.com/mobiles") == 1
+    assert priority_of("https://google.com/") == 1
     assert priority_of("https://randomshop.com/") == 1
 
 

@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     #: pages can discover hundreds of links; sending them as one request
     #: overruns the HTTP response window and fails with a ReadTimeout.
     crawl_enqueue_chunk_size: int = 50
+
+    # --- robots.txt ---------------------------------------------------------
+    #: Honour robots.txt. A missing, slow or erroring file means "crawl": the
+    #: per-domain cap is what bounds damage, and refusing because a 2s fetch
+    #: timed out would silently drop whole sites.
+    robots_enabled: bool = True
+    robots_timeout_seconds: float = 2.0
+    robots_cache_entries: int = 2000
+    robots_max_concurrent: int = 10
     #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
     #: as Indian ones. Off by default: the crawl targets the Indian web, and an
     #: open global ring dilutes the index and re-opens the spider-trap surface.

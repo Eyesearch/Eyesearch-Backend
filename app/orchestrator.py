@@ -40,6 +40,7 @@ _indexer_module = load_agent("05_indexer_agent")
 _revalidation_module = load_agent("06_revalidation_agent")
 _classifier_module = load_agent("07_classifier_agent")
 _language_module = load_agent("08_language_agent")
+_robots_module = load_agent("09_robots_agent")
 
 FrontierAgent = _frontier_module.FrontierAgent
 FetcherAgent = _fetcher_module.FetcherAgent
@@ -49,6 +50,7 @@ IndexerAgent = _indexer_module.IndexerAgent
 RevalidationAgent = _revalidation_module.RevalidationAgent
 ClassifierAgent = _classifier_module.ClassifierAgent
 LanguageAgent = _language_module.LanguageAgent
+RobotsCache = _robots_module.RobotsCache
 
 
 @dataclass
@@ -117,6 +119,17 @@ class Orchestrator:
         self._classifier = ClassifierAgent()
         self._language = LanguageAgent()
         self._indexer = IndexerAgent(self._store, self._guard)
+        self._robots = (
+            RobotsCache(
+                self._fetcher.client,
+                user_agent=self._settings.crawl_user_agent,
+                timeout=self._settings.robots_timeout_seconds,
+                max_entries=self._settings.robots_cache_entries,
+                max_concurrent=self._settings.robots_max_concurrent,
+            )
+            if self._settings.robots_enabled
+            else None
+        )
         self._frontier = FrontierAgent(
             self._store, self._settings, client=self._fetcher.client
         )
@@ -192,6 +205,23 @@ class Orchestrator:
                 skipped_ids.append(item.rowid)
             else:
                 eligible.append(item)
+
+        # robots.txt is checked per host, cached for an hour, and fetched
+        # concurrently: a batch of 120 URLs across 100 hosts would otherwise
+        # serialise at up to 2s each. A refusal parks the URL like a cap skip.
+        if self._robots is not None and eligible:
+            verdicts = await asyncio.gather(
+                *[self._robots.allowed(item.url) for item in eligible]
+            )
+            permitted: list[QueuedUrl] = []
+            for item, is_allowed in zip(eligible, verdicts):
+                if is_allowed:
+                    permitted.append(item)
+                else:
+                    outcome.skipped += 1
+                    self._tally(outcome.skip_reasons, "robots_disallow")
+                    skipped_ids.append(item.rowid)
+            eligible = permitted
 
         self._quality.reset()
         results = await self._fetcher.fetch_many([item.url for item in eligible])

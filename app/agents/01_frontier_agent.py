@@ -361,11 +361,23 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
     return False
 
 
-def is_authoritative(host: str) -> bool:
-    """An Indian public suffix, or one of the whitelisted portals."""
-    if any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES):
-        return True
+def is_civic(host: str) -> bool:
+    """An Indian public suffix: civic, academic and national infrastructure.
+
+    These are what the index exists for, so they are the only domains that earn
+    the first queue priority.
+    """
+    return any(host.endswith(suffix) for suffix in PRIORITY_SUFFIXES)
+
+
+def is_whitelisted(host: str) -> bool:
+    """A curated commercial or consumer portal that is allowed but not civic."""
     return any(host == domain or host.endswith(f".{domain}") for domain in WHITELISTED_DOMAINS)
+
+
+def is_authoritative(host: str) -> bool:
+    """In scope by curation: a civic domain or a whitelisted portal."""
+    return is_civic(host) or is_whitelisted(host)
 
 
 #: Domains the frontier must never let go quiet: every seed root plus the
@@ -457,8 +469,14 @@ async def discover_sitemap_urls(
 
 
 def priority_of(url: str) -> int:
-    """Lower sorts first: official public domains, then everything else."""
-    return 0 if is_authoritative(domain_of(url)) else 1
+    """Lower sorts first.
+
+    0 is reserved for Indian civic domains (.gov.in, .nic.in, .ac.in, .res.in
+    and the rest of the public suffixes). The curated commercial and consumer
+    portals sit at 1 alongside everything else: allowed, but never ahead of
+    government, academic or national infrastructure in the queue.
+    """
+    return 0 if is_civic(domain_of(url)) else 1
 
 
 class FrontierAgent:
@@ -743,6 +761,8 @@ __all__ = [
     "domain_of",
     "in_crawl_scope",
     "is_authoritative",
+    "is_civic",
+    "is_whitelisted",
     "is_crawlable",
     "normalise_url",
     "priority_of",

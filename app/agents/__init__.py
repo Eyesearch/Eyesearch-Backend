@@ -27,6 +27,7 @@ AGENT_MODULES: tuple[str, ...] = (
     "06_revalidation_agent",
     "07_classifier_agent",
     "08_language_agent",
+    "09_robots_agent",
 )
 
 
