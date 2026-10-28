@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     public_base_url: str = ""
 
     # --- Storage safety -----------------------------------------------------
+    #: Upper bound on schema/bootstrap work before the app starts serving.
+    #: The port only opens after this, so an unbounded wait here is a failed
+    #: deploy rather than a slow one.
+    boot_db_timeout_seconds: float = 20.0
+
     storage_page_limit: int = 300_000
     storage_count_ttl_seconds: float = 60.0
 

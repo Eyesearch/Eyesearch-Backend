@@ -124,3 +124,104 @@ async def test_a_database_error_does_not_stop_the_startup_migration(client):
             pass
 
     assert await normalize_legacy_subdomains(_Broken()) == 0
+
+
+# ---------------------------------------------------------------------------
+# Boot resilience
+# ---------------------------------------------------------------------------
+
+
+def test_the_app_serves_health_when_the_database_bootstrap_fails(monkeypatch, tmp_path):
+    """A broken database must degrade the app, not fail the deploy.
+
+    The port only opens after the lifespan startup returns, so an exception
+    here is a failed Render deploy with no import error to point at.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from app.engine.config import reset_settings_cache
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ALLOW_LOCAL_DB", "true")
+    monkeypatch.setenv("LOCAL_DB_PATH", str(tmp_path / "degraded.db"))
+    monkeypatch.setenv("CRAWLER_ENABLED", "false")
+    monkeypatch.setenv("REVALIDATION_ENABLED", "false")
+    reset_settings_cache()
+
+    async def boom(client, settings):
+        raise RuntimeError("Turso unreachable")
+
+    monkeypatch.setattr(main_module, "_bootstrap_database", boom)
+
+    try:
+        with TestClient(main_module.app) as client:
+            # Liveness stays 200 so the deploy succeeds; readiness reports down.
+            live = client.get("/health")
+            assert live.status_code == 200
+            assert live.json()["db"] == "down"
+            assert live.json()["status"] == "degraded"
+            assert client.get("/ready").status_code == 503
+            assert main_module.app.state.database_ready is False
+    finally:
+        reset_settings_cache()
+
+
+def test_the_app_serves_health_when_the_bootstrap_times_out(monkeypatch, tmp_path):
+    import asyncio as _asyncio
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from app.engine.config import reset_settings_cache
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ALLOW_LOCAL_DB", "true")
+    monkeypatch.setenv("LOCAL_DB_PATH", str(tmp_path / "slow.db"))
+    monkeypatch.setenv("CRAWLER_ENABLED", "false")
+    monkeypatch.setenv("REVALIDATION_ENABLED", "false")
+    monkeypatch.setenv("BOOT_DB_TIMEOUT_SECONDS", "0.05")
+    reset_settings_cache()
+
+    async def slow(client, settings):
+        await _asyncio.sleep(5)
+
+    monkeypatch.setattr(main_module, "_bootstrap_database", slow)
+
+    try:
+        with TestClient(main_module.app) as client:
+            assert client.get("/health").status_code == 200
+            assert client.get("/ready").status_code == 503
+            assert main_module.app.state.database_ready is False
+    finally:
+        reset_settings_cache()
+
+
+def test_a_normal_boot_initialises_the_database(monkeypatch, tmp_path):
+    """Guards the lifespan itself: a mis-decorated startup silently degrades.
+
+    This is the test that was missing when `@asynccontextmanager` ended up on
+    the bootstrap helper instead of `lifespan`: the app still answered /health
+    with 200, but the schema was never created and every query failed.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from app.engine.config import reset_settings_cache
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ALLOW_LOCAL_DB", "true")
+    monkeypatch.setenv("LOCAL_DB_PATH", str(tmp_path / "normal.db"))
+    monkeypatch.setenv("CRAWLER_ENABLED", "false")
+    monkeypatch.setenv("REVALIDATION_ENABLED", "false")
+    reset_settings_cache()
+
+    try:
+        with TestClient(main_module.app) as client:
+            body = client.get("/health").json()
+            assert body["status"] == "ok", body
+            assert body["db"] == "up", body
+            assert client.get("/ready").status_code == 200
+            assert main_module.app.state.database_ready is True
+    finally:
+        reset_settings_cache()

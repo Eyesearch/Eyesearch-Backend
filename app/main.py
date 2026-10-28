@@ -90,6 +90,18 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _bootstrap_database(client: LibsqlClient, settings: Settings) -> None:
+    """Create the schema and prove the database accepts writes.
+
+    Split out of the lifespan so the caller can bound it: this is a chain of
+    remote round trips, and the port does not open until it returns.
+    """
+    await initialize_database(client, allow_legacy_drop=settings.migrate_legacy_schema)
+    writable = await verify_writable(client)
+    if not writable:
+        logger.error("database rejected the write probe — crawling will stay paused")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -116,10 +128,26 @@ async def lifespan(app: FastAPI):
     )
 
     client: LibsqlClient = build_client(settings)
-    await initialize_database(client, allow_legacy_drop=settings.migrate_legacy_schema)
-    writable = await verify_writable(client)
-    if not writable:
-        logger.error("database rejected the write probe — crawling will stay paused")
+
+    # Everything below runs BEFORE `yield`, and uvicorn does not bind the port
+    # until the lifespan startup returns. So this is the healthcheck's critical
+    # path: a slow or unreachable database here does not make the deploy slow,
+    # it makes it fail — with no import error and nothing in the logs but a
+    # timeout. Bound it, and serve degraded instead of refusing to start.
+    app.state.database_ready = False
+    try:
+        await asyncio.wait_for(
+            _bootstrap_database(client, settings),
+            timeout=settings.boot_db_timeout_seconds,
+        )
+        app.state.database_ready = True
+    except asyncio.TimeoutError:
+        logger.error(
+            "database bootstrap exceeded %.0fs; serving degraded, /health reports db status",
+            settings.boot_db_timeout_seconds,
+        )
+    except Exception as error:  # a broken database must not stop the app booting
+        logger.exception("database bootstrap failed; serving degraded: %s", error)
 
     orchestrator = Orchestrator(client, settings)
     app.state.settings = settings
@@ -284,6 +312,21 @@ async def health_payload(request: Request) -> dict[str, Any]:
 @app.get("/health")
 @app.get("/healthz")
 async def health(request: Request) -> JSONResponse:
+    """Liveness: the process is up and serving.
+
+    Always 200. Render's healthcheck points here, and it decides whether a
+    deploy succeeds — so returning 503 for a database blip turns a recoverable
+    fault into a failed deploy that needs a manual redeploy. The body still
+    reports the truth (`status`, `db`, `error`); anything that must not receive
+    traffic while the database is down should probe `/ready` instead.
+    """
+    payload = await health_payload(request)
+    return JSONResponse(status_code=200, content=payload)
+
+
+@app.get("/ready")
+async def ready(request: Request) -> JSONResponse:
+    """Readiness: 200 only when the database is actually answering."""
     payload = await health_payload(request)
     status = 200 if payload["status"] == "ok" else 503
     return JSONResponse(status_code=status, content=payload)
