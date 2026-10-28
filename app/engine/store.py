@@ -33,6 +33,14 @@ BM25_WEIGHTS = (10.0, 5.0, 1.0)
 #: lower-is-better, so this is subtracted from the score to promote the row.
 TITLE_MATCH_BOOST = 1.0
 
+#: Institutional Indian suffixes that earn a ranking boost.
+AUTHORITY_SUFFIXES: tuple[str, ...] = (".gov.in", ".nic.in", ".ac.in", ".res.in")
+
+#: How much an authoritative domain is worth. Larger than a title match: a
+#: gazette notification on a `.gov.in` host is usually a better answer than a
+#: blog post that happens to repeat the words.
+AUTHORITY_DOMAIN_BOOST = 1.5
+
 #: How many query terms are checked against the title.
 MAX_TITLE_TOKENS = 5
 
@@ -739,15 +747,34 @@ class IndexStore:
         else:
             title_terms = "0"
 
+        # Authority is read from `sites.domain`, the registrable domain the page
+        # was actually indexed under — not from `p.url LIKE '%.gov.in/%'`, which
+        # also matches a foreign page whose query string happens to contain that
+        # text, and misses a bare `https://x.gov.in` with no trailing path.
+        auth_terms = " OR ".join(
+            f"s.domain LIKE '%{suffix}'" for suffix in AUTHORITY_SUFFIXES
+        )
+
         sql = (
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
             f"bm25(page_fts, {weights}) AS lexical_score, "
-            f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit "
+            f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
+            f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit "
             "FROM page_fts JOIN pages p ON p.page_id = page_fts.rowid "
+            "LEFT JOIN sites s ON s.site_id = p.site_id "
             f"WHERE page_fts MATCH ?{filters} "
-            "ORDER BY (lexical_score - ? * title_hit) ASC LIMIT ? OFFSET ?"
+            "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit) ASC "
+            "LIMIT ? OFFSET ?"
         )
-        args = (*title_tokens, match, *extra, TITLE_MATCH_BOOST, limit, offset)
+        args = (
+            *title_tokens,
+            match,
+            *extra,
+            TITLE_MATCH_BOOST,
+            AUTHORITY_DOMAIN_BOOST,
+            limit,
+            offset,
+        )
 
         result = await self._client.execute(sql, args)
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
@@ -760,8 +787,20 @@ class IndexStore:
         # query. Fall back to OR rather than answering "nothing found".
         loose = build_match_query(query, prefix=True)
         if loose and loose != match:
+            # Same SQL, same bind order: the title terms, the MATCH term, the
+            # filters, then both boosts. Leaving a boost out here is a bind-count
+            # mismatch, and it only shows up on queries the strict AND misses.
             result = await self._client.execute(
-                sql, (*title_tokens, loose, *extra, TITLE_MATCH_BOOST, limit, offset)
+                sql,
+                (
+                    *title_tokens,
+                    loose,
+                    *extra,
+                    TITLE_MATCH_BOOST,
+                    AUTHORITY_DOMAIN_BOOST,
+                    limit,
+                    offset,
+                ),
             )
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
             self._rescale_scores(hits)
@@ -770,7 +809,12 @@ class IndexStore:
     @staticmethod
     def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
         title_hit = int(row[6] or 0)
-        boosted = float(row[5] or 0.0) - TITLE_MATCH_BOOST * title_hit
+        auth_hit = int(row[7] or 0)
+        boosted = (
+            float(row[5] or 0.0)
+            - TITLE_MATCH_BOOST * title_hit
+            - AUTHORITY_DOMAIN_BOOST * auth_hit
+        )
         body = str(row[4] or "")
         return SearchHit(
             page_id=int(row[0]),

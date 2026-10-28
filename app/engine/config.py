@@ -97,8 +97,11 @@ class Settings(BaseSettings):
 
     # --- Search -------------------------------------------------------------
     #: No domain may hold more than this many indexed pages, so a single
-    #: large portal cannot crowd out the rest of the index.
-    max_pages_per_domain: int = 10
+    #: large portal cannot crowd out the rest of the index. The index ceiling is
+    #: roughly cap x distinct domains, so this also bounds how long the crawl
+    #: can keep finding new pages: at 10 the frontier starved after ~2,300 pages
+    #: against a 300,000-page storage budget.
+    max_pages_per_domain: int = 25
 
     search_default_limit: int = 10
     search_max_limit: int = 50

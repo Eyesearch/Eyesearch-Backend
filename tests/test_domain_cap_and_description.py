@@ -288,8 +288,8 @@ async def test_the_cap_is_configurable(store, client):
         await orchestrator.close()
 
 
-def test_the_default_cap_is_ten_pages():
-    assert Settings().max_pages_per_domain == 10
+def test_the_default_cap_is_twenty_five_pages():
+    assert Settings().max_pages_per_domain == 25
 
 
 async def test_a_page_under_the_cap_is_still_crawled(store, client):

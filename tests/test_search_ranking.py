@@ -175,3 +175,56 @@ async def test_filters_still_apply_with_the_boost(store):
     hits = await store.search("metro", category="news_media")
 
     assert [hit.title for hit in hits] == ["Metro news"]
+
+
+# ---------------------------------------------------------------------------
+# Authority ranking
+# ---------------------------------------------------------------------------
+
+
+async def test_an_authoritative_domain_outranks_an_equal_commercial_page(store):
+    body = "The state publishes metro fare revisions for commuters across the city."
+    await store.persist_batch(
+        [
+            _doc("https://example.com/metro", "Metro fares", body, digest="d-com"),
+            _doc("https://karnataka.gov.in/metro", "Metro fares", body, digest="d-gov"),
+        ]
+    )
+
+    hits = await store.search("metro")
+
+    assert len(hits) == 2
+    assert "gov.in" in hits[0].url
+
+
+async def test_the_boost_reads_the_domain_not_the_url_text(store):
+    """A query string containing '.gov.in/' must not earn the boost."""
+    body = "The state publishes metro fare revisions for commuters across the city."
+    await store.persist_batch(
+        [
+            _doc("https://example.com/plain", "Metro fares", body, digest="d-plain"),
+            _doc(
+                "https://example.com/spoof?u=.gov.in/x",
+                "Metro fares",
+                body,
+                digest="d-spoof",
+            ),
+        ]
+    )
+
+    hits = await store.search("metro")
+    scores = {hit.url: hit.raw_score for hit in hits}
+
+    # Identical content on the same (non-authoritative) domain: identical score.
+    assert scores["https://example.com/plain"] == scores["https://example.com/spoof?u=.gov.in/x"]
+
+
+async def test_a_query_the_strict_match_misses_still_answers(store):
+    """The OR fallback reuses the SQL, so its bind order must stay in step."""
+    await store.persist_batch(
+        [_doc("https://karnataka.gov.in/a", "Karnataka districts", "A list of districts.", digest="d-fb")]
+    )
+
+    hits = await store.search("karnataka metro")
+
+    assert hits

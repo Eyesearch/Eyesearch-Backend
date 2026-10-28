@@ -224,7 +224,7 @@ async def _seed_capped_domains(store, count: int, cap: int) -> None:
 
 async def test_a_capped_domain_does_not_fill_the_batch(store, client):
     """Round-robin alone let capped domains take every slot."""
-    await _seed_capped_domains(store, 40, 10)
+    await _seed_capped_domains(store, 40, 25)
     await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(40)])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
@@ -236,7 +236,7 @@ async def test_a_capped_domain_does_not_fill_the_batch(store, client):
 
 
 async def test_the_batch_is_empty_when_every_domain_is_capped(store, client):
-    await _seed_capped_domains(store, 3, 10)
+    await _seed_capped_domains(store, 3, 25)
     await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(3)])
 
     assert await store.pending_batch(10) == []
@@ -244,7 +244,7 @@ async def test_the_batch_is_empty_when_every_domain_is_capped(store, client):
 
 async def test_parking_capped_rows_keeps_the_depth_honest(store, client):
     """Pending rows for a capped domain would otherwise look like real work."""
-    await _seed_capped_domains(store, 2, 10)
+    await _seed_capped_domains(store, 2, 25)
     await _queue(client, [(f"https://site{i}.gov.in/extra", f"site{i}.gov.in") for i in range(2)])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
@@ -258,7 +258,7 @@ async def test_parking_capped_rows_keeps_the_depth_honest(store, client):
 
 
 async def test_parking_a_single_domain_leaves_others_alone(store, client):
-    await _seed_capped_domains(store, 1, 10)
+    await _seed_capped_domains(store, 1, 25)
     await _queue(client, [("https://site0.gov.in/extra", "site0.gov.in")])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
