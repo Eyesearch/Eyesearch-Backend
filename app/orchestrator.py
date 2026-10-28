@@ -387,6 +387,23 @@ class Orchestrator:
         empty, so an idle deployment costs nothing and still recovers the
         moment there is work.
         """
+        # A previous version could re-arm processed URLs from domains already
+        # at the page cap. pending_batch() correctly excludes those domains,
+        # but queue_depth() still counted their pending rows; that made the
+        # frontier look non-empty forever while no URL was eligible to crawl.
+        # Reconcile that stale backlog once when the worker starts.
+        try:
+            parked = await self._store.skip_pending_for_capped_domains(
+                cap=self._settings.max_pages_per_domain
+            )
+            if parked:
+                logger.warning(
+                    "startup frontier repair: parked %d pending URLs from capped domains",
+                    parked,
+                )
+        except Exception:
+            logger.exception("startup frontier repair failed; crawler will continue")
+
         while True:
             # The whole iteration is guarded, not just the batch. `refill()`
             # does network and database work of its own, and an exception from
