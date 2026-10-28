@@ -183,7 +183,9 @@ class Orchestrator:
         # Per-domain page cap: one count query for the whole batch, and URLs on
         # a domain that is already full are parked before any fetch happens.
         cap = self._settings.max_pages_per_domain
-        counts = await self._store.domain_page_counts([item.domain for item in queue])
+        domains = [item.domain for item in queue]
+        counts = await self._store.domain_page_counts(domains)
+        payload_bytes = await self._store.domain_payload_bytes(domains)
         eligible: list[QueuedUrl] = []
         for item in queue:
             if counts.get(item.domain, 0) >= cap:
@@ -256,6 +258,17 @@ class Orchestrator:
             document.digest = verdict.digest
             document.quality_score = verdict.score
 
+            # Enforce a per-site 10 KiB budget across ALL indexed pages on the
+            # domain, not 10 KiB per page. This measures UTF-8 page-field
+            # payload only; FTS5 and database storage overhead are additional.
+            document_bytes = self._store.page_payload_bytes(document)
+            used_bytes = payload_bytes.get(item.domain, 0)
+            if used_bytes + document_bytes > self._settings.max_site_payload_bytes:
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "site_storage_budget")
+                skipped_ids.append(item.rowid)
+                continue
+
             # Tagged here, at ingestion, so a search can filter without a
             # backfill later.
             document.category = self._classifier.classify(
@@ -271,6 +284,7 @@ class Orchestrator:
             documents.append(document)
             queue_ids.append(item.rowid)
             counts[item.domain] = counts.get(item.domain, 0) + 1
+            payload_bytes[item.domain] = used_bytes + document_bytes
 
         outcome.accepted = len(documents)
 
