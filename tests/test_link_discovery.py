@@ -500,3 +500,10 @@ def test_the_whitelist_holds_no_subdomains_or_duplicates():
         assert not entry.startswith("www.")
         # A two-label .in host is a public suffix entry, not a portal entry.
         assert not entry.endswith(".in") or entry.count(".") > 1
+
+
+def test_outbound_links_per_page_are_capped():
+    """A page can carry thousands of hrefs; the batch holds them all at once."""
+    settings = Settings(_env_file=None, environment="test")
+    assert settings.max_outbound_links_per_page == 100
+    assert 0 < settings.max_outbound_links_per_page <= 1000

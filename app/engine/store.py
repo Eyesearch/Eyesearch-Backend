@@ -389,6 +389,28 @@ class IndexStore:
         )
         return outcome
 
+    async def prune_queue(self, *, retain_days: int, limit: int) -> int:
+        """Delete terminal queue rows older than the retention window.
+
+        Bounded by `limit` so one call can never be a huge delete. `created_at`
+        and `processed_at` are written by CURRENT_TIMESTAMP, so they compare
+        directly against `datetime('now', ...)` as strings.
+
+        Pruned URLs may be discovered and crawled again later; that is the
+        intended trade for keeping the queue from growing without limit.
+        """
+        if retain_days <= 0 or limit <= 0:
+            return 0
+        result = await self._client.execute(
+            "DELETE FROM crawl_queue WHERE rowid IN ("
+            "  SELECT rowid FROM crawl_queue"
+            "  WHERE status IN ('skipped', 'failed')"
+            "    AND COALESCE(processed_at, created_at) < datetime('now', ?)"
+            "  LIMIT ?)",
+            (f"-{int(retain_days)} days", int(limit)),
+        )
+        return int(result.rows_affected or 0)
+
     async def skip_pending_for_domain(self, domain: str) -> int:
         """Park every remaining pending URL for a domain that is at its cap.
 

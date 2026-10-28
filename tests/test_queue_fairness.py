@@ -328,3 +328,66 @@ async def test_a_single_chunk_when_everything_fits(client):
     await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
 
     assert counting.sizes == [1]
+
+
+# ---------------------------------------------------------------------------
+# Queue retention
+# ---------------------------------------------------------------------------
+
+
+async def test_pruning_removes_only_old_terminal_rows(client):
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await store.enqueue_urls(
+        [(f"https://a.gov.in/{i}", "a.gov.in") for i in range(4)]
+    )
+    await client.execute("UPDATE crawl_queue SET status = 'skipped' WHERE rowid <= 2")
+    await client.execute("UPDATE crawl_queue SET status = 'failed' WHERE rowid = 3")
+    await client.execute(
+        "UPDATE crawl_queue SET processed_at = datetime('now', '-90 days') WHERE rowid <= 3"
+    )
+
+    pruned = await store.prune_queue(retain_days=30, limit=100)
+
+    assert pruned == 3
+    remaining = await client.execute("SELECT status FROM crawl_queue")
+    statuses = [str(row[0]) for row in remaining.rows]
+    assert statuses == ["pending"], "the pending row must survive"
+
+
+async def test_pruning_keeps_recent_terminal_rows(client):
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
+    await client.execute("UPDATE crawl_queue SET status = 'skipped'")
+    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now')")
+
+    assert await store.prune_queue(retain_days=30, limit=100) == 0
+
+
+async def test_pruning_is_bounded_by_the_limit(client):
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await store.enqueue_urls(
+        [(f"https://a.gov.in/{i}", "a.gov.in") for i in range(20)]
+    )
+    await client.execute("UPDATE crawl_queue SET status = 'skipped'")
+    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now', '-90 days')")
+
+    assert await store.prune_queue(retain_days=30, limit=5) == 5
+    remaining = await client.execute("SELECT COUNT(*) FROM crawl_queue")
+    assert int(remaining.scalar(0)) == 15
+
+
+async def test_pruning_can_be_disabled(client):
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
+    await client.execute("UPDATE crawl_queue SET status = 'skipped'")
+    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now', '-900 days')")
+
+    assert await store.prune_queue(retain_days=0, limit=100) == 0

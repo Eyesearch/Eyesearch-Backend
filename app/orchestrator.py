@@ -38,6 +38,10 @@ IDLE_REFILL_FAILED_BACKOFF_SECONDS = 60.0
 #: from a stall.
 LOOP_ERROR_BACKOFF_SECONDS = 5.0
 
+#: How often the loop prunes terminal queue rows. Every batch would spend a
+#: round trip on housekeeping; this is often enough to stay ahead of growth.
+QUEUE_PRUNE_EVERY_BATCHES = 100
+
 _frontier_module = load_agent("01_frontier_agent")
 _fetcher_module = load_agent("02_fetcher_agent")
 _parser_module = load_agent("03_parser_agent")
@@ -269,7 +273,7 @@ class Orchestrator:
             # ones. The frontier applies the crawl-scope rules.
             discovered.extend(
                 self._frontier.filter_links(
-                    parsed.links,
+                    parsed.links[: self._settings.max_outbound_links_per_page],
                     item.url,
                     allow_global=self._settings.allow_global_domains,
                 )
@@ -440,6 +444,8 @@ class Orchestrator:
         except Exception:
             logger.exception("startup frontier repair failed; crawler will continue")
 
+        batches_since_prune = 0
+
         while True:
             # The whole iteration is guarded, not just the batch. `refill()`
             # does network and database work of its own, and an exception from
@@ -460,6 +466,18 @@ class Orchestrator:
                 added = await self._frontier.refill(minimum=1)
                 if added:
                     logger.info("crawler frontier refilled with %d URLs", added)
+
+                # Keep crawl_queue lean. Bounded per call, so this is a slow
+                # steady drip rather than one large delete.
+                batches_since_prune += 1
+                if batches_since_prune >= QUEUE_PRUNE_EVERY_BATCHES:
+                    batches_since_prune = 0
+                    pruned = await self._store.prune_queue(
+                        retain_days=self._settings.queue_retain_days,
+                        limit=self._settings.queue_prune_limit,
+                    )
+                    if pruned:
+                        logger.info("pruned %d terminal queue rows", pruned)
 
                 if outcome is not None and not outcome.empty and not outcome.paused:
                     await asyncio.sleep(self._settings.crawl_batch_sleep_seconds)

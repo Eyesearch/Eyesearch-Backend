@@ -73,7 +73,10 @@ class Settings(BaseSettings):
     #: Throughput is (batch_size / per-batch database floor), so this scales the
     #: crawl directly. It is also the memory ceiling: the fetcher holds every
     #: body in a batch before parsing, so peak ~= batch_size x max_body_bytes.
-    crawl_batch_size: int = 120
+    crawl_batch_size: int = 60
+    #: Outbound links kept from one page before scope filtering. A page can
+    #: carry thousands of hrefs; the batch holds every one of them at once.
+    max_outbound_links_per_page: int = 100
     crawl_batch_sleep_seconds: float = 0.005
     crawl_empty_backoff_seconds: float = 1.0
     # A batch waits for its slowest member, so this bounds the whole batch, not
@@ -101,6 +104,12 @@ class Settings(BaseSettings):
     robots_timeout_seconds: float = 2.0
     robots_cache_entries: int = 2000
     robots_max_concurrent: int = 10
+
+    # --- queue retention ----------------------------------------------------
+    #: Terminal queue rows older than this are pruned, a bounded number at a
+    #: time, so crawl_queue does not grow without limit.
+    queue_retain_days: int = 30
+    queue_prune_limit: int = 5000
     #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
     #: as Indian ones. Off by default: the crawl targets the Indian web, and an
     #: open global ring dilutes the index and re-opens the spider-trap surface.
