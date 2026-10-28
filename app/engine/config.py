@@ -96,9 +96,10 @@ class Settings(BaseSettings):
     revalidation_stale_after_seconds: int = 7 * 24 * 3600
 
     # --- Search -------------------------------------------------------------
-    #: No domain may hold more than this many indexed pages, so a single
-    #: large portal cannot crowd out the rest of the index.
-    max_pages_per_domain: int = 10
+    #: Secondary crawl-safety ceiling. The byte budget is the primary
+    #: per-domain storage control; this separate cap prevents spider traps.
+    #: Raise MAX_PAGES_PER_DOMAIN as the site payload budget grows.
+    max_pages_per_domain: int = 100
     # Raw page fields per domain, measured as UTF-8 payload bytes. FTS5 and
     # SQLite/Turso structural overhead are additional and are measured separately.
     max_site_payload_bytes: int = 10_240
