@@ -167,13 +167,63 @@ def kind_of(url: str) -> str:
     return "web"
 
 
+#: Boilerplate that Indian government portals repeat on every page — the
+#: accessibility toolbar, the NIC chatbot greeting, the language picker. It is
+#: real page text, so it survives extraction, but it is noise in a result card.
+JUNK_PATTERNS: tuple[str, ...] = (
+    r"Skip to Main Content",
+    r"Skip to navigation",
+    r"Screen Reader Access",
+    r"Virtual Assistance By NIC",
+    r"VANI - Virtual Assistance",
+    r"I am still learning\.?\s*Please forgive me",
+    r"Accessibility Controls",
+    # Only the language names themselves: a loose `[^.]{0,40}` here eats the
+    # next sentence, turning "... certificate online." into "ficate online.".
+    r"Select Language(?:\s+(?:English|Hindi|Kannada|Tamil|Telugu|Marathi|Bengali"
+    r"|Gujarati|Malayalam|Odia|Punjabi|Urdu|Assamese|Sanskrit|Konkani|Manipuri"
+    r"|Bodo|Dogri|Kashmiri|Sindhi|Maithili|Nepali))*",
+    r"Dark Contrast Light Contrast",
+    r"Resize Text",
+    r"Reset Filter",
+)
+
+_JUNK_RE = tuple(re.compile(pattern, re.IGNORECASE) for pattern in JUNK_PATTERNS)
+
+
+def clean_display_snippet(snippet: str, title: str = "", limit: int = 300) -> str:
+    """Strip navigation boilerplate from a snippet before it reaches a card.
+
+    Display only: the stored page text, the index and the ranking are untouched,
+    so a cleaned snippet never changes what a query matches or how it ranks.
+    """
+    if not snippet:
+        return ""
+
+    clean = snippet
+    for pattern in _JUNK_RE:
+        clean = pattern.sub(" ", clean)
+
+    # Portals repeat the page title as the first line of the body text, and
+    # sometimes twice; strip it until the snippet starts with real content.
+    heading = (title or "").strip()
+    for _ in range(3):
+        if not heading or not clean.strip().lower().startswith(heading.lower()):
+            break
+        clean = clean.strip()[len(heading) :].lstrip(" :-|·")
+
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:limit]
+
+
 def to_result(hit: SearchHit) -> SearchResult:
     """Map an index row onto the card contract."""
+    title = hit.title or hit.url
     return SearchResult(
         id=f"eyesearch:{hit.page_id}",
-        title=hit.title or hit.url,
+        title=title,
         url=hit.url,
-        snippet=hit.snippet,
+        snippet=clean_display_snippet(hit.snippet, title),
         kind=kind_of(hit.url),
         thumbnail_url=youtube_thumbnail(hit.url),
         score=hit.score,

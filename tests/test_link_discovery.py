@@ -44,7 +44,7 @@ PAGE = """
   <a href="/logo.png">Logo</a>
   <a href="/a/b/c/d/e">Too deep</a>
   <a href="/login">Sign in</a>
-  <a href="https://facebook.com/karnataka">Facebook</a>
+  <a href="https://bbc.com/karnataka">BBC</a>
   <a href="#top">Top</a>
   <a href="mailto:info@karnataka.gov.in">Mail</a>
   <a href="/about#history">About, again</a>
@@ -73,10 +73,10 @@ def test_the_parser_extracts_absolute_links_and_drops_non_navigable_hrefs():
     assert SEED + "a/b/c/d/e/f/g/h" not in kept
 
     # The crawl is India-focused, so an ordinary .com link is dropped...
-    assert "https://facebook.com/karnataka" not in kept
+    assert "https://bbc.com/karnataka" not in kept
     # ...unless the global ring is explicitly switched on.
     with_global = FrontierAgent.filter_links(None, parsed.links, SEED, allow_global=True)
-    assert "https://facebook.com/karnataka" in with_global
+    assert "https://bbc.com/karnataka" in with_global
 
 
 def test_relative_links_are_resolved_against_the_page_url():
@@ -131,7 +131,7 @@ def test_crawl_scope_is_the_source_host_and_the_indian_web():
 def test_the_global_ring_is_opt_in():
     """ALLOW_GLOBAL_DOMAINS=true re-enables the global ring, and only then."""
     for url in (
-        "https://facebook.com/karnataka",
+        "https://bbc.com/karnataka",
         "https://example.com/x",
         "https://randomshop.com/product",
     ):
@@ -152,7 +152,7 @@ def test_filter_links_keeps_only_what_is_in_scope():
         SEED + "a/b/c/d/e/f/g/h",
         SEED + "login",
         "https://india.gov.in/services",
-        "https://facebook.com/karnataka",
+        "https://bbc.com/karnataka",
     ]
 
     accepted = FrontierAgent.filter_links(None, links, SEED)
@@ -163,7 +163,7 @@ def test_filter_links_keeps_only_what_is_in_scope():
     assert with_global == [
         SEED + "about",
         "https://india.gov.in/services",
-        "https://facebook.com/karnataka",
+        "https://bbc.com/karnataka",
     ]
 
 
@@ -548,3 +548,35 @@ def test_the_environment_variable_is_what_flips_it(monkeypatch):
     finally:
         monkeypatch.delenv("ALLOW_GLOBAL_DOMAINS", raising=False)
         reset_settings_cache()
+
+
+# ---------------------------------------------------------------------------
+# Hosts never worth a queue slot
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/foo",
+        "https://www.facebook.com/page",
+        "https://www.instagram.com/p/1",
+        "https://www.reddit.com/r/x",
+        "https://www.tiktok.com/@x/video/1",
+    ],
+)
+def test_login_walled_social_hosts_are_never_admitted(url):
+    """Global crawling admitted these; they are a JS shell or a login wall."""
+    assert in_crawl_scope(url, "karnataka.gov.in", allow_global=True) is False
+    assert in_crawl_scope(url, "karnataka.gov.in") is False
+
+
+def test_a_lookalike_host_is_not_caught_by_the_blocklist():
+    # `notx.com` is a different registrable domain from `x.com`.
+    assert in_crawl_scope("https://notx.com/a", "karnataka.gov.in", allow_global=False) is False
+    assert "x.com" in frontier_module.UNUSABLE_HOSTS
+    assert "notx.com" not in frontier_module.UNUSABLE_HOSTS
+
+
+def test_ordinary_global_domains_still_pass_with_the_flag_on():
+    assert in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in", allow_global=True) is True

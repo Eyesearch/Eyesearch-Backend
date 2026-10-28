@@ -451,6 +451,8 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
     host = domain_of(url)
     if not host:
         return False
+    if host in UNUSABLE_HOSTS:
+        return False
     if host == source_host:
         return True
     if is_authoritative(host):
@@ -478,6 +480,27 @@ def is_authoritative(host: str) -> bool:
     """In scope by curation: a civic domain or a whitelisted portal."""
     return is_civic(host) or is_whitelisted(host)
 
+
+#: Hosts that are never worth a queue slot. Every one of them is a login wall,
+#: a JavaScript shell, or both: the fetch returns a page with no readable text,
+#: so the quality gate rejects it after spending a queue slot, a robots lookup
+#: and a fetch. Turning on global crawling admitted them, which is why they
+#: started appearing in the pending list.
+#:
+#: Matched on the registrable domain, so `x.com.evil.example` is unaffected.
+UNUSABLE_HOSTS: frozenset[str] = frozenset(
+    {
+        "x.com",
+        "twitter.com",
+        "facebook.com",
+        "instagram.com",
+        "tiktok.com",
+        "pinterest.com",
+        "snapchat.com",
+        "threads.net",
+        "reddit.com",
+    }
+)
 
 #: Domains the frontier must never let go quiet: every seed root plus the
 #: whitelisted portals.
@@ -860,6 +883,7 @@ __all__ = [
     "parse_sitemap_locs",
     "BLOCKED_PATH_SEGMENTS",
     "TRAP_PATH_SUBSTRINGS",
+    "UNUSABLE_HOSTS",
     "TRAP_RESOLVED_MARKERS",
     "FrontierAgent",
     "FrontierItem",
