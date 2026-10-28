@@ -374,7 +374,16 @@ def normalise_url(url: str) -> str | None:
         if key.lower() not in TRACKING_PARAMS
     )
 
-    port = f":{parts.port}" if parts.port and parts.port not in (80, 443) else ""
+    # `parts.port` raises lazily on access, not at parse time: a dirty href
+    # like 'http://example.com:\xa0https://other.com' parses fine and then
+    # explodes with ValueError when the port is read. One such link in one page
+    # used to abort normalisation for the whole batch.
+    try:
+        raw_port = parts.port
+    except ValueError:
+        return ""
+    port = f":{raw_port}" if raw_port and raw_port not in (80, 443) else ""
+
     return urlunparse((parts.scheme, f"{host}{port}", path, "", query, ""))
 
 
@@ -657,11 +666,22 @@ class FrontierAgent:
         accepted: list[str] = []
         seen: set[str] = set()
 
+        # Hoisted: normalising the source once instead of once per link.
+        try:
+            normalised_source = normalise_url(source_url)
+        except Exception:
+            normalised_source = ""
+
         for link in links:
-            normalised = normalise_url(link)
+            # Belt and braces. normalise_url() already refuses a bad port, but a
+            # dirty href is page-supplied data and must never cost the batch.
+            try:
+                normalised = normalise_url(link)
+            except Exception:
+                continue
             if not normalised or normalised in seen:
                 continue
-            if normalised == normalise_url(source_url):
+            if normalised == normalised_source:
                 continue
             if not is_crawlable(normalised):
                 continue

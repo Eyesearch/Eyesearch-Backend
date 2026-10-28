@@ -7,6 +7,7 @@ import pytest
 
 from app.agents import load_agent
 from app.engine.config import Settings
+from app.orchestrator import Orchestrator
 
 frontier = load_agent("01_frontier_agent")
 fetcher_module = load_agent("02_fetcher_agent")
@@ -151,3 +152,83 @@ async def test_a_normal_redirect_still_works():
         await agent.aclose()
 
     assert result.ok is True
+
+
+# ---------------------------------------------------------------------------
+# Dirty hrefs: parts.port raises lazily
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # The exact shape from the Render log.
+        "http://example.com:\xa0https://other.com",
+        "https://domain.in:invalid_port/path",
+        "http://test.in:8080foo/test",
+    ],
+)
+def test_an_uncastable_port_returns_empty_instead_of_raising(url):
+    """`parts.port` raises ValueError on access, not at parse time."""
+    assert frontier.normalise_url(url) == ""
+
+
+def test_a_trailing_space_after_the_colon_is_repairable():
+    """`strip()` removes it, so the port is simply absent rather than invalid."""
+    assert frontier.normalise_url("http://x.in: ") == "http://x.in/"
+
+
+def test_a_real_port_is_preserved():
+    assert frontier.normalise_url("http://test.in:8080/a") == "http://test.in:8080/a"
+
+
+def test_the_default_ports_are_dropped():
+    assert frontier.normalise_url("https://test.in:443/a") == "https://test.in/a"
+    assert frontier.normalise_url("http://test.in:80/a") == "http://test.in/a"
+
+
+async def test_one_dirty_link_does_not_cost_the_others(store):
+    from app.engine.store import IndexStore
+
+    agent = frontier.FrontierAgent(IndexStore(store, Settings(environment="test")))
+    links = [
+        "https://karnataka.gov.in/notice",
+        "http://example.com:\xa0https://other.com",
+        "https://iisc.ac.in/admissions",
+    ]
+
+    accepted = agent.filter_links(links, "https://karnataka.gov.in/")
+
+    assert "https://karnataka.gov.in/notice" in accepted
+    assert "https://iisc.ac.in/admissions" in accepted
+    assert len(accepted) == 2
+
+
+async def test_a_page_with_a_dirty_href_still_indexes(store, client):
+    body = (
+        "<html><head><title>District portal</title></head><body>"
+        '<a href="http://example.com:\xa0https://other.com">broken</a>'
+        '<a href="/notices">notices</a>'
+        "<p>The department publishes notifications, citizen services and contact "
+        "details for district offices across the state.</p></body></html>"
+    )
+
+    def handler(request):
+        return httpx.Response(200, text=body)
+
+    settings = Settings(
+        environment="test",
+        crawler_enabled=False,
+        revalidation_enabled=False,
+        libsql_min_interval_seconds=0.0,
+        robots_enabled=False,
+    )
+    orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
+    try:
+        await orchestrator.frontier.enqueue(["https://karnataka.gov.in/"])
+        outcome = await orchestrator.run_batch()
+
+        assert outcome.indexed_pages == 1, "the dirty href must not abort the batch"
+        assert outcome.discovered >= 1, "the good link must still be discovered"
+    finally:
+        await orchestrator.close()
