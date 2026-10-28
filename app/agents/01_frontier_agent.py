@@ -37,22 +37,90 @@ PRIORITY_SUFFIXES: tuple[str, ...] = (
     ".in",
 )
 
-#: Indian portals that are not on an Indian public suffix but are worth
-#: crawling: news, legal reporting, startup and developer media, jobs and open
-#: data. The crawl is India-focused, so this list holds no foreign domains.
+#: Domains worth crawling that are not on an Indian public suffix. Two kinds:
+#: Indian news, legal and developer media, and the consumer and enterprise
+#: services an Indian user actually searches for.
+#:
+#: Every entry is a *registrable* domain, because that is what `domain_of()`
+#: returns and what `is_authoritative()` compares against:
+#: `timesofindia.indiatimes.com` would never match, `indiatimes.com` does.
+#: Anything already under an Indian public suffix (`*.in`, `*.co.in`, ...) is
+#: in scope without being listed here.
+#:
+#: Note these are allowed, not preferred: robots.txt is not consulted, and
+#: several of these hosts disallow crawling in it.
 WHITELISTED_DOMAINS: tuple[str, ...] = (
+    # Indian news, legal, startup and developer media (original set).
     "thehindu.com",
     "indianexpress.com",
     "prajavani.net",
     "vijaykarnataka.com",
     "indiankanoon.org",
-    "livelaw.in",
     "barandbench.com",
     "inc42.com",
     "hasgeek.com",
     "data.gov.in",
     "freejobalert.com",
     "ncs.gov.in",
+
+    # Search, knowledge and developer utilities.
+    "google.com", "youtube.com", "wikipedia.org", "github.com", "stackoverflow.com",
+    "archive.org",
+
+    # News and media.
+    "ndtv.com", "hindustantimes.com", "livemint.com", "moneycontrol.com",
+    "deccanherald.com", "business-standard.com", "firstpost.com", "dnaindia.com",
+    "indiatimes.com",
+
+    # Cinema, streaming and ticketing.
+    "bookmyshow.com", "pvrcinemas.com", "inoxmovies.com", "cinepolisindia.com",
+    "hotstar.com", "jiocinema.com", "sonyliv.com", "zee5.com",
+    "sunnxt.com", "aha.video",
+
+    # Travel, transit and booking.
+    "makemytrip.com", "goibibo.com", "easemytrip.com", "ixigo.com", "yatra.com",
+    "cleartrip.com", "abhibus.com", "agoda.com", "booking.com", "oyorooms.com",
+    "airindia.com", "spicejet.com", "akasaair.com",
+
+    # Food delivery and quick commerce.
+    "zomato.com", "swiggy.com", "bigbasket.com", "blinkit.com", "zeptonow.com",
+    "dunzo.com", "eatclub.com",
+
+    # E-commerce and retail.
+    "flipkart.com", "meesho.com", "myntra.com", "ajio.com", "nykaa.com",
+    "tatacliq.com", "jiomart.com", "snapdeal.com", "firstcry.com", "croma.com",
+    "vijaysales.com", "purplle.com", "boat-lifestyle.com", "lenskart.com",
+
+    # Mobility and logistics.
+    "olacabs.com", "uber.com", "rapido.bike", "blusmart.com", "delhivery.com",
+    "bluedart.com", "xpressbees.com",
+
+    # Fintech, banking and insurance.
+    "zerodha.com", "paytm.com", "phonepe.com", "razorpay.com", "cred.club",
+    "policybazaar.com", "paisabazaar.com", "bankbazaar.com", "hdfcbank.com",
+    "icicibank.com", "axisbank.com", "kotak.com", "sbicard.com", "tatafintech.com",
+
+    # Sports.
+    "espncricinfo.com", "cricbuzz.com", "sportskeeda.com", "khelnow.com", "mykhel.com",
+
+    # Real estate.
+    "99acres.com", "magicbricks.com", "housing.com", "squareyards.com",
+
+    # Healthcare and diagnostics.
+    "1mg.com", "netmeds.com", "apollo247.com", "practo.com", "tata1mg.com",
+    "lalpathlabs.com", "metropolisindia.com",
+
+    # Education, exams and careers.
+    "naukri.com", "linkedin.com", "internshala.com", "shiksha.com", "careers360.com",
+    "jagranjosh.com", "unacademy.com", "byjus.com", "physicswallah.com", "vedantu.com",
+    "geeksforgeeks.org", "javatpoint.com", "tutorialspoint.com",
+
+    # Industry and enterprise.
+    "tatamotors.com", "tatasteel.com", "tcs.com", "reliance.com", "ril.com",
+    "infosys.com", "wipro.com", "hcltech.com", "techmahindra.com",
+    "adanienterprises.com", "adaniports.com", "larsentoubro.com", "mahindra.com",
+    "marutisuzuki.com", "bajajauto.com", "heromotocorp.com", "tvsmotor.com",
+    "vedantalimited.com", "itcportal.com", "godrej.com", "jio.com", "vodafoneidea.com",
 )
 
 #: Ordinary global TLDs. With `allow_global` on, a link to any registrable

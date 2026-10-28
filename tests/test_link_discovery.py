@@ -433,3 +433,60 @@ def test_subdomains_of_one_site_are_in_scope_of_each_other():
     """A link from one project subdomain to another is still same-site."""
     assert in_crawl_scope("https://arduino.fossee.in/x", "fossee.in") is True
     assert in_crawl_scope("https://arduino.fossee.in/x", frontier_module.domain_of("https://python.fossee.in/")) is True
+
+
+# ---------------------------------------------------------------------------
+# Curated consumer and enterprise domains
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bookmyshow.com/bangalore",
+        "https://makemytrip.com/flights",
+        "https://espncricinfo.com/series/ipl",
+        "https://flipkart.com/mobiles",
+        "https://1mg.com/medicines",
+        "https://zomato.com/bangalore",
+        "https://zerodha.com/open-account",
+        "https://99acres.com/flats",
+        "https://naukri.com/it-jobs",
+        "https://tatamotors.com/cars",
+        "https://rapido.bike/ride",
+        "https://cred.club/rewards",
+        "https://aha.video/shows",
+    ],
+)
+def test_curated_indian_services_are_in_scope(url):
+    assert in_crawl_scope(url, "karnataka.gov.in") is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://random-french-bakery.com",
+        "https://brazilian-realestate-xyz.net",
+        "https://python.org/doc",
+        "https://news.ycombinator.com/item",
+    ],
+)
+def test_unlisted_foreign_sites_stay_out_of_scope(url):
+    assert in_crawl_scope(url, "karnataka.gov.in") is False
+
+
+def test_a_subdomain_of_a_whitelisted_portal_matches_its_root():
+    """`domain_of` collapses the host, so the list must hold registrable roots."""
+    assert in_crawl_scope("https://timesofindia.indiatimes.com/news", "karnataka.gov.in") is True
+    assert in_crawl_scope("https://sportstar.thehindu.com/cricket", "karnataka.gov.in") is True
+
+
+def test_the_whitelist_holds_no_subdomains_or_duplicates():
+    """A subdomain entry can never match, because hosts are collapsed to a root."""
+    entries = frontier_module.WHITELISTED_DOMAINS
+    assert len(entries) == len(set(entries))
+    for entry in entries:
+        assert entry.count(".") >= 1
+        assert not entry.startswith("www.")
+        # A two-label .in host is a public suffix entry, not a portal entry.
+        assert not entry.endswith(".in") or entry.count(".") > 1
