@@ -6,7 +6,7 @@ Eyesearch uses a focused, quality-first index rather than attempting to mirror G
 
 Each domain has a configurable budget for the UTF-8 bytes of fields stored in the `pages` table across all indexed pages on that domain. The default is 10 KiB (10,240 bytes).
 
-Set `MAX_SITE_PAYLOAD_BYTES` in the deployment environment to change the budget later; for example, `20480` sets a 20 KiB budget. No code change is needed to raise or lower the configured limit.
+Set `MAX_SITE_PAYLOAD_BYTES` in the deployment environment to change the budget later; for example, `20480` sets a 20 KiB budget. No code change is needed to raise or lower the configured limit. `MAX_PAGES_PER_DOMAIN` is a separate crawl-safety ceiling (default 100) to protect against spider traps; raise it as needed when increasing the byte budget.
 
 The current budget counts URL, title, description, body text, digest, category, and language. It does not count FTS5 index pages, SQLite/Turso row and index overhead, replication, or provider-level storage overhead. Therefore it is a content-payload budget, not a hard 10 KiB guarantee for total database storage.
 
