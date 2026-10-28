@@ -78,9 +78,19 @@ STRIP_TAGS: tuple[str, ...] = (
 WHITESPACE = re.compile(r"\s+")
 
 
+#: Control characters, NUL included. SQLite keeps the bytes but truncates on
+#: them: `length('before\x00after')` is 6, not 12, so everything after a NUL is
+#: silently lost from the stored page. Tab, newline and carriage return are left
+#: for WHITESPACE to collapse.
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
 def collapse(text: str) -> str:
     """Collapse every run of whitespace to one space and trim."""
-    return WHITESPACE.sub(" ", (text or "").replace("\u00a0", " ")).strip()
+    # Replaced with a space, not deleted: dropping the NUL runs "before" and
+    # "after" together and breaks the word boundary for search.
+    cleaned = CONTROL_CHARS.sub(" ", (text or "").replace("\u00a0", " "))
+    return WHITESPACE.sub(" ", cleaned).strip()
 
 
 def snippet_from(text: str, limit: int = DESCRIPTION_SNIPPET_CHARS) -> str:

@@ -86,6 +86,20 @@ SOFT_404_MARKERS: tuple[str, ...] = (
 #: A redirect chain longer than this is a loop, not a move.
 MAX_REDIRECTS = 5
 
+
+def looks_like_html(content_type: str) -> bool:
+    """Whether a response is worth parsing.
+
+    A PDF, an image or a JSON payload served from a path with no file extension
+    reaches BeautifulSoup as binary and comes out as mojibake in the index. A
+    missing header is allowed through: the parser and the quality gate will
+    reject anything with no readable text.
+    """
+    value = (content_type or "").lower()
+    if not value:
+        return True
+    return "html" in value or "xml" in value or value.startswith("text/")
+
 _PATH_SAFE = "/%:@!$&'()*+,;=~-._"
 _QUERY_SAFE = "=&%:@!$'()*+,;/?~-._"
 
@@ -229,6 +243,16 @@ class FetcherAgent:
                         if 400 <= response.status_code < 500:
                             break
                     else:
+                        content_type = response.headers.get("content-type", "")
+                        if not looks_like_html(content_type):
+                            return FetchResult(
+                                url=url,
+                                ok=False,
+                                status=response.status_code,
+                                error=f"not_html:{content_type.split(';')[0][:40]}",
+                                elapsed_ms=int((time.monotonic() - started) * 1000),
+                            )
+
                         html = self._read_capped(response)
                         return FetchResult(
                             url=url,

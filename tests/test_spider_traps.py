@@ -304,3 +304,81 @@ async def test_a_page_with_a_broken_ipv6_href_still_indexes(store, client):
         assert outcome.discovered >= 1
     finally:
         await orchestrator.close()
+
+
+# ---------------------------------------------------------------------------
+# NUL characters and non-HTML bodies
+# ---------------------------------------------------------------------------
+
+
+def test_nul_characters_never_reach_the_database():
+    """SQLite truncates TEXT at a NUL: length('a\\x00b') is 1, not 3."""
+    collapse = load_agent("03_parser_agent").collapse
+
+    assert collapse("Before\x00after\x00and more\x07text") == "Before after and more text"
+    assert "\x00" not in collapse("a\x00b")
+
+
+async def test_a_page_with_a_nul_still_stores_its_full_text(client):
+    """The stored row must not be silently cut at the NUL."""
+    from app.engine.store import IndexStore, PageDocument
+
+    collapse = load_agent("03_parser_agent").collapse
+    store = IndexStore(client, Settings(environment="test"))
+    body = collapse("first half\x00second half of the page text")
+
+    await store.persist_batch(
+        [
+            PageDocument(
+                url="https://a.gov.in/nul",
+                domain="a.gov.in",
+                title="NUL page",
+                description="desc",
+                body_text=body,
+                digest="d-nul",
+            )
+        ]
+    )
+
+    row = await client.execute("SELECT body_text, length(body_text) FROM pages")
+    stored, length = str(row.rows[0][0]), int(row.rows[0][1])
+
+    assert "second half" in stored
+    assert length == len(stored), "the database must not truncate the text"
+
+
+@pytest.mark.parametrize(
+    "content_type,expected",
+    [
+        ("text/html; charset=utf-8", True),
+        ("application/xhtml+xml", True),
+        ("text/plain", True),
+        ("", True),
+        ("application/pdf", False),
+        ("image/png", False),
+        ("application/json", False),
+        ("application/zip", False),
+        ("video/mp4", False),
+    ],
+)
+def test_only_html_like_bodies_are_parsed(content_type, expected):
+    assert fetcher_module.looks_like_html(content_type) is expected
+
+
+async def test_a_pdf_body_is_rejected_before_parsing():
+    def handler(request):
+        return httpx.Response(
+            200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.7 binary"
+        )
+
+    agent = FetcherAgent(
+        Settings(environment="test"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        result = await agent.fetch("https://a.gov.in/report")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is False
+    assert result.error.startswith("not_html:")
