@@ -232,3 +232,75 @@ async def test_a_page_with_a_dirty_href_still_indexes(store, client):
         assert outcome.discovered >= 1, "the good link must still be discovered"
     finally:
         await orchestrator.close()
+
+
+# ---------------------------------------------------------------------------
+# Dirty hrefs: urljoin raises on an unclosed IPv6 literal
+# ---------------------------------------------------------------------------
+
+
+def test_urljoin_survives_an_unclosed_ipv6_href():
+    """`urljoin(base, 'http://[::1/x')` raises ValueError: Invalid IPv6 URL."""
+    parser = load_agent("03_parser_agent").ParserAgent
+    html = (
+        "<html><head><title>District portal</title></head><body>"
+        '<a href="http://[::1/x">broken ipv6</a>'
+        '<a href="/notices">notices</a>'
+        '<a href="https://iisc.ac.in/admissions">admissions</a>'
+        "<p>The department publishes notifications, citizen services and contact "
+        "details for district offices across the state.</p></body></html>"
+    )
+
+    page = parser().parse("https://karnataka.gov.in/", html)
+
+    assert page.ok is True
+    assert page.title == "District portal"
+    assert page.links == [
+        "https://karnataka.gov.in/notices",
+        "https://iisc.ac.in/admissions",
+    ]
+
+
+def test_a_bracket_in_a_query_is_not_dropped():
+    """The pre-check `'[' in href` would discard a legitimate bracketed query."""
+    parser = load_agent("03_parser_agent").ParserAgent
+    html = (
+        "<html><head><title>Search</title></head><body>"
+        '<a href="/filter?tags[]=health">health</a>'
+        "<p>The department publishes notifications, citizen services and contact "
+        "details for district offices across the state.</p></body></html>"
+    )
+
+    page = parser().parse("https://karnataka.gov.in/", html)
+
+    assert page.links == ["https://karnataka.gov.in/filter?tags[]=health"]
+
+
+async def test_a_page_with_a_broken_ipv6_href_still_indexes(store, client):
+    body = (
+        "<html><head><title>District portal</title></head><body>"
+        '<a href="http://[::1/x">broken</a>'
+        '<a href="/notices">notices</a>'
+        "<p>The department publishes notifications, citizen services and contact "
+        "details for district offices across the state.</p></body></html>"
+    )
+
+    def handler(request):
+        return httpx.Response(200, text=body)
+
+    settings = Settings(
+        environment="test",
+        crawler_enabled=False,
+        revalidation_enabled=False,
+        libsql_min_interval_seconds=0.0,
+        robots_enabled=False,
+    )
+    orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
+    try:
+        await orchestrator.frontier.enqueue(["https://karnataka.gov.in/"])
+        outcome = await orchestrator.run_batch()
+
+        assert outcome.indexed_pages == 1
+        assert outcome.discovered >= 1
+    finally:
+        await orchestrator.close()

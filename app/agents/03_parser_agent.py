@@ -225,7 +225,14 @@ class ParserAgent:
             if not href or href.lower().startswith(SKIP_HREF_PREFIXES):
                 continue
 
-            absolute = urljoin(base_url, href)
+            # urljoin raises ValueError on an unclosed IPv6 literal such as
+            # 'http://[::1/x'. A href is page-supplied data, so one dirty link
+            # must cost that link and nothing else.
+            try:
+                absolute = urljoin(base_url, href)
+            except ValueError:
+                continue
+
             if not absolute.lower().startswith(("http://", "https://")):
                 continue
             # The fragment identifies a position in a page, not another page.
