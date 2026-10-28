@@ -38,6 +38,56 @@ IDLE_REFILL_FAILED_BACKOFF_SECONDS = 60.0
 #: from a stall.
 LOOP_ERROR_BACKOFF_SECONDS = 5.0
 
+#: Batches over which the frontier-growth check measures progress. Ten batches
+#: is long enough that one slow or empty pass does not trip it, and short enough
+#: to see a real stall before the storage guard has to pause.
+FRONTIER_STALL_WINDOW = 10
+
+
+class FrontierGrowthWatch:
+    """Warns when the frontier grows while indexing makes no progress.
+
+    The symptom this catches: discovery keeps admitting URLs, nothing reaches
+    the index, and the queue climbs until the storage guard pauses the crawler.
+    By then the cause is buried. This says so in the log while it is happening.
+
+    It uses only what `BatchOutcome` already reports — links discovered and
+    queue rows closed — so it costs no extra database round trip.
+    """
+
+    def __init__(self, window: int = FRONTIER_STALL_WINDOW) -> None:
+        self._window = max(1, window)
+        self._reset()
+
+    def _reset(self) -> None:
+        self._batches = 0
+        self._indexed = 0
+        self._discovered = 0
+        self._closed = 0
+
+    def observe(self, *, indexed: int, discovered: int, closed: int) -> str | None:
+        """Record one batch; return a warning once per window when stalled."""
+        self._batches += 1
+        self._indexed += max(0, indexed)
+        self._discovered += max(0, discovered)
+        self._closed += max(0, closed)
+
+        if self._batches < self._window:
+            return None
+
+        growth = self._discovered - self._closed
+        message: str | None = None
+        if self._indexed == 0 and growth > 0:
+            message = (
+                "frontier growing while indexing is stalled: "
+                f"{self._discovered} discovered, {self._closed} queue rows closed, "
+                f"0 pages indexed over {self._batches} batches"
+            )
+
+        self._reset()
+        return message
+
+
 #: How often the loop prunes terminal queue rows. Every batch would spend a
 #: round trip on housekeeping; this is often enough to stay ahead of growth.
 QUEUE_PRUNE_EVERY_BATCHES = 100
@@ -129,6 +179,7 @@ class Orchestrator:
         self._classifier = ClassifierAgent()
         self._language = LanguageAgent()
         self._indexer = IndexerAgent(self._store, self._guard)
+        self._growth_watch = FrontierGrowthWatch()
         self._robots = (
             RobotsCache(
                 self._fetcher.client,
@@ -466,6 +517,16 @@ class Orchestrator:
                 added = await self._frontier.refill(minimum=1)
                 if added:
                     logger.info("crawler frontier refilled with %d URLs", added)
+
+                # Early warning, before the storage guard has to pause anything.
+                if outcome is not None:
+                    stall = self._growth_watch.observe(
+                        indexed=outcome.indexed_pages,
+                        discovered=outcome.discovered,
+                        closed=outcome.queue_closed,
+                    )
+                    if stall:
+                        logger.warning("%s", stall)
 
                 # Keep crawl_queue lean. Bounded per call, so this is a slow
                 # steady drip rather than one large delete.
