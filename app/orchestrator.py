@@ -120,7 +120,7 @@ class Orchestrator:
         self._store = IndexStore(client, self._settings)
         self._guard = StorageGuard(
             client,
-            limit=self._settings.storage_page_limit,
+            limit=self._settings.effective_storage_page_limit,
             ttl_seconds=self._settings.storage_count_ttl_seconds,
         )
         self._fetcher = FetcherAgent(self._settings, transport=transport)

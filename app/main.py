@@ -123,7 +123,7 @@ async def lifespan(app: FastAPI):
         settings.crawl_batch_sleep_seconds,
         settings.libsql_min_interval_seconds,
         settings.max_pages_per_domain,
-        settings.storage_page_limit,
+        settings.effective_storage_page_limit,
         settings.allow_global_domains,
     )
 
