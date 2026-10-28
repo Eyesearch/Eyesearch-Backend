@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from app.engine.urls import safe_urljoin
 
 from bs4 import BeautifulSoup
 
@@ -235,12 +235,9 @@ class ParserAgent:
             if not href or href.lower().startswith(SKIP_HREF_PREFIXES):
                 continue
 
-            # urljoin raises ValueError on an unclosed IPv6 literal such as
-            # 'http://[::1/x'. A href is page-supplied data, so one dirty link
-            # must cost that link and nothing else.
-            try:
-                absolute = urljoin(base_url, href)
-            except ValueError:
+            # A href is page-supplied data: one dirty link costs that link.
+            absolute = safe_urljoin(base_url, href)
+            if absolute is None:
                 continue
 
             if not absolute.lower().startswith(("http://", "https://")):

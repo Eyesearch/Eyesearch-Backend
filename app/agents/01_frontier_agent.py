@@ -18,9 +18,10 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlunparse
 
 from app.engine.config import Settings, get_settings
+from app.engine.urls import safe_port, safe_urljoin, safe_urlparse
 from app.engine.store import IndexStore, QueuedUrl
 
 logger = logging.getLogger(__name__)
@@ -297,19 +298,6 @@ def _is_ip_address(host: str) -> bool:
     return True
 
 
-def safe_urlparse(url: str):
-    """`urlparse`, but None instead of ValueError for a malformed authority.
-
-    A broken href in a page — most often a truncated IPv6 literal like
-    `http://[::1/ path` — makes urlparse raise, and every caller here treats a
-    URL as data. One bad link must be dropped, not crash discovery.
-    """
-    try:
-        return urlparse(url)
-    except ValueError:
-        return None
-
-
 def domain_of(url: str) -> str:
     """The registrable root domain of a URL.
 
@@ -374,14 +362,16 @@ def normalise_url(url: str) -> str | None:
         if key.lower() not in TRACKING_PARAMS
     )
 
-    # `parts.port` raises lazily on access, not at parse time: a dirty href
-    # like 'http://example.com:\xa0https://other.com' parses fine and then
-    # explodes with ValueError when the port is read. One such link in one page
-    # used to abort normalisation for the whole batch.
-    try:
-        raw_port = parts.port
-    except ValueError:
-        return ""
+    # `parts.port` parses on access, so a dirty authority like
+    # 'example.com:\xa0https:' raises there rather than at parse time. An empty
+    # port ('x.in:') is legitimately absent, not corrupt, so the two are
+    # distinguished by the raw text after the colon.
+    raw_port = safe_port(parts)
+    authority = parts.netloc.rsplit("@", 1)[-1].rsplit("]", 1)[-1]
+    if ":" in authority:
+        port_text = authority.split(":", 1)[1]
+        if port_text and raw_port is None:
+            return ""
     port = f":{raw_port}" if raw_port and raw_port not in (80, 443) else ""
 
     return urlunparse((parts.scheme, f"{host}{port}", path, "", query, ""))
@@ -545,7 +535,10 @@ async def discover_sitemap_urls(
         if fetches >= max_fetches:
             break
         try:
-            response = await client.get(urljoin(base_url, path))
+            target = safe_urljoin(base_url, path)
+            if target is None:
+                continue
+            response = await client.get(target)
             fetches += 1
         except Exception as error:  # network shape is the fetcher's problem
             logger.debug("sitemap fetch failed for %s%s: %s", domain, path, error)
