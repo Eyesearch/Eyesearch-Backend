@@ -160,3 +160,92 @@ def test_discovery_survives_a_malformed_link():
     assert frontier.normalise_url(MALFORMED) is None
     # A good link in the same document still comes through.
     assert frontier.normalise_url("https://karnataka.gov.in/notice") is not None
+
+
+# ---------------------------------------------------------------------------
+# Streaming: never buffer more than the body cap
+# ---------------------------------------------------------------------------
+
+
+class _CountingStream(httpx.AsyncByteStream):
+    """Yields chunks lazily and records how many were actually pulled."""
+
+    def __init__(self, chunks: int, size: int) -> None:
+        self.chunks = chunks
+        self.size = size
+        self.pulled = 0
+
+    async def __aiter__(self):
+        for _ in range(self.chunks):
+            self.pulled += 1
+            yield b"x" * self.size
+
+
+def _agent_with_stream(chunks: int, size: int, status: int = 200, ctype: str = "text/html"):
+    holder: dict[str, _CountingStream] = {}
+
+    def handler(request):
+        stream = _CountingStream(chunks, size)
+        holder["stream"] = stream
+        return httpx.Response(status, headers={"content-type": ctype}, stream=stream)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=True
+    )
+    return FetcherAgent(Settings(environment="test"), client=client), holder
+
+
+async def test_a_huge_body_is_cut_off_at_the_cap():
+    """49 MB on offer, 512 KB wanted: the rest must never be read."""
+    agent, holder = _agent_with_stream(chunks=200, size=256_000)
+    try:
+        result = await agent.fetch("https://a.gov.in/huge")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is True
+    assert len(result.html) == agent._settings.crawl_max_body_bytes
+    # 512 KB / 256 KB per chunk: two chunks, not two hundred.
+    assert holder["stream"].pulled <= 3
+
+
+async def test_a_non_html_body_is_not_downloaded_at_all():
+    agent, holder = _agent_with_stream(chunks=50, size=256_000, ctype="application/pdf")
+    try:
+        result = await agent.fetch("https://a.gov.in/report")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is False
+    assert result.error.startswith("not_html:")
+    assert holder["stream"].pulled == 0, "a rejected body should not be read"
+
+
+async def test_an_error_status_body_is_not_downloaded():
+    agent, holder = _agent_with_stream(chunks=50, size=256_000, status=404)
+    try:
+        result = await agent.fetch("https://a.gov.in/missing")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is False
+    assert holder["stream"].pulled == 0
+
+
+async def test_a_normal_page_still_parses():
+    body = "<html><head><title>Portal</title></head><body><p>" + "x" * 500 + "</p></body></html>"
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=body)
+
+    agent = FetcherAgent(
+        Settings(environment="test"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True),
+    )
+    try:
+        result = await agent.fetch("https://a.gov.in/page")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is True
+    assert "<title>Portal</title>" in result.html

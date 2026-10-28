@@ -196,7 +196,7 @@ class FetcherAgent:
             async with self._semaphore:
                 try:
                     self.fetches += 1
-                    response = await self._client.get(target)
+                    response, html, content_type = await self._stream_get(target)
                 except httpx.TimeoutException:
                     last_error = "timeout"
                 except httpx.HTTPError as error:
@@ -243,7 +243,6 @@ class FetcherAgent:
                         if 400 <= response.status_code < 500:
                             break
                     else:
-                        content_type = response.headers.get("content-type", "")
                         if not looks_like_html(content_type):
                             return FetchResult(
                                 url=url,
@@ -253,7 +252,6 @@ class FetcherAgent:
                                 elapsed_ms=int((time.monotonic() - started) * 1000),
                             )
 
-                        html = self._read_capped(response)
                         return FetchResult(
                             url=url,
                             ok=True,
@@ -273,14 +271,42 @@ class FetcherAgent:
             elapsed_ms=int((time.monotonic() - started) * 1000),
         )
 
-    def _read_capped(self, response: httpx.Response) -> str:
-        """Decode at most `crawl_max_body_bytes`, never the whole stream."""
-        raw = response.content[: self._settings.crawl_max_body_bytes]
-        encoding = response.encoding or "utf-8"
-        try:
-            return raw.decode(encoding, errors="replace")
-        except (LookupError, UnicodeDecodeError):
-            return raw.decode("utf-8", errors="replace")
+    async def _stream_get(
+        self, url: str
+    ) -> tuple[httpx.Response, str, str]:
+        """GET without ever holding more than the body cap in memory.
+
+        `response.content` reads the whole body first and truncates afterwards,
+        so a 40 MB response was fully buffered before the 512 KB slice — enough
+        of those at concurrency 60 and a 512 MB instance is gone. Streaming
+        stops reading at the cap and closes the connection.
+
+        The body is only read when the response is worth parsing: an error
+        status or a non-HTML content type is rejected without downloading it.
+        """
+        cap = self._settings.crawl_max_body_bytes
+
+        async with self._client.stream("GET", url) as response:
+            content_type = response.headers.get("content-type", "")
+            payload = bytearray()
+
+            worth_reading = (
+                response.status_code < 400 and looks_like_html(content_type)
+            )
+            if worth_reading:
+                async for chunk in response.aiter_bytes():
+                    payload.extend(chunk)
+                    if len(payload) >= cap:
+                        break
+
+            encoding = response.encoding or "utf-8"
+            raw = bytes(payload[:cap])
+            try:
+                html = raw.decode(encoding, errors="replace")
+            except (LookupError, UnicodeDecodeError):
+                html = raw.decode("utf-8", errors="replace")
+
+            return response, html, content_type
 
     async def fetch_many(
         self, urls: list[str], *, attempts: int = 2
