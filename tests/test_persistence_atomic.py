@@ -50,6 +50,24 @@ async def test_a_page_write_and_its_queue_transition_land_together(store, client
     assert await _queue_status(client, url) == "processed"
 
 
+async def test_site_payload_budget_counts_utf8_bytes_for_all_stored_fields(store, client):
+    url = "https://karnataka.gov.in/"
+    rowid = await _queue(client, url)
+    document = make_document(
+        url=url,
+        title="ಕರ್ನಾಟಕ",
+        description="Government portal",
+        body_text="ಬೆಂಗಳೂರು ಮಾಹಿತಿ",
+        digest="digest-payload",
+    )
+
+    await store.persist_batch([document], [rowid])
+
+    usage = await store.domain_payload_bytes(["karnataka.gov.in"])
+    assert usage["karnataka.gov.in"] == store.page_payload_bytes(document)
+    assert store.page_payload_bytes(document) > len(document.title) + len(document.body_text)
+
+
 async def test_the_reported_page_count_is_read_back_from_the_database(store, client):
     rowids = [await _queue(client, f"https://a{index}.gov.in/") for index in range(3)]
     documents = [
