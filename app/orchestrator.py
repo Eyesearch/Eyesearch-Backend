@@ -183,7 +183,9 @@ class Orchestrator:
         # Per-domain page cap: one count query for the whole batch, and URLs on
         # a domain that is already full are parked before any fetch happens.
         cap = self._settings.max_pages_per_domain
-        counts = await self._store.domain_page_counts([item.domain for item in queue])
+        domains = [item.domain for item in queue]
+        counts = await self._store.domain_page_counts(domains)
+        payload_bytes = await self._store.domain_payload_bytes(domains)
         eligible: list[QueuedUrl] = []
         for item in queue:
             if counts.get(item.domain, 0) >= cap:
@@ -257,7 +259,8 @@ class Orchestrator:
             document.quality_score = verdict.score
 
             # Tagged here, at ingestion, so a search can filter without a
-            # backfill later.
+            # backfill later. Compute the payload only after all stored fields
+            # have their final values, so accounting matches what is persisted.
             document.category = self._classifier.classify(
                 item.url,
                 title=document.title,
@@ -268,9 +271,21 @@ class Orchestrator:
                 f"{document.title} {document.body_text}"
             )
 
+            # Enforce a per-site budget across ALL indexed pages on the domain,
+            # not a separate budget per page. This counts UTF-8 page-field
+            # payload only; FTS5 and database storage overhead are additional.
+            document_bytes = self._store.page_payload_bytes(document)
+            used_bytes = payload_bytes.get(item.domain, 0)
+            if used_bytes + document_bytes > self._settings.max_site_payload_bytes:
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "site_storage_budget")
+                skipped_ids.append(item.rowid)
+                continue
+
             documents.append(document)
             queue_ids.append(item.rowid)
             counts[item.domain] = counts.get(item.domain, 0) + 1
+            payload_bytes[item.domain] = used_bytes + document_bytes
 
         outcome.accepted = len(documents)
 
@@ -302,7 +317,11 @@ class Orchestrator:
             discovered = [
                 url
                 for url in discovered
-                if counts.get(_frontier_module.domain_of(url), 0) < cap
+                if (
+                    counts.get(_frontier_module.domain_of(url), 0) < cap
+                    and payload_bytes.get(_frontier_module.domain_of(url), 0)
+                    < self._settings.max_site_payload_bytes
+                )
             ]
 
         if discovered and not outcome.paused:

@@ -436,6 +436,48 @@ class IndexStore:
         )
         return {str(row[0]): int(row[1]) for row in result.rows}
 
+    async def domain_payload_bytes(self, domains: Sequence[str]) -> dict[str, int]:
+        """Approximate stored page-field payload bytes per domain.
+
+        Counts UTF-8 bytes for values stored in the pages table. This is the
+        enforceable 10 KiB content budget; FTS5 index pages, SQLite row/index
+        overhead and provider-level storage overhead are not included.
+        """
+        unique = [domain for domain in dict.fromkeys(domains) if domain]
+        if not unique:
+            return {}
+        placeholders = ", ".join("?" for _ in unique)
+        result = await self._client.execute(
+            "SELECT s.domain, COALESCE(SUM("
+            "length(CAST(p.url AS BLOB)) + "
+            "length(CAST(COALESCE(p.title, '') AS BLOB)) + "
+            "length(CAST(COALESCE(p.description, '') AS BLOB)) + "
+            "length(CAST(COALESCE(p.body_text, '') AS BLOB)) + "
+            "length(CAST(COALESCE(p.digest, '') AS BLOB)) + "
+            "length(CAST(COALESCE(p.category, '') AS BLOB)) + "
+            "length(CAST(COALESCE(p.language, '') AS BLOB))"
+            "), 0) FROM pages p JOIN sites s ON s.site_id = p.site_id "
+            f"WHERE s.domain IN ({placeholders}) GROUP BY s.domain",
+            tuple(unique),
+        )
+        return {str(row[0]): int(row[1] or 0) for row in result.rows}
+
+    @staticmethod
+    def page_payload_bytes(document: PageDocument) -> int:
+        """UTF-8 payload bytes for fields persisted for a page."""
+        return sum(
+            len(value.encode("utf-8"))
+            for value in (
+                document.url,
+                document.title,
+                document.description,
+                document.body_text,
+                document.digest,
+                document.category,
+                document.language,
+            )
+        )
+
     async def mark_skipped(self, queue_ids: Sequence[int], reason: str = "") -> int:
         """Park queue rows that are deliberately not crawled.
 
