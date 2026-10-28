@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     #: No domain may hold more than this many indexed pages, so a single
     #: large portal cannot crowd out the rest of the index.
     max_pages_per_domain: int = 10
+    # Raw page fields per domain, measured as UTF-8 payload bytes. FTS5 and
+    # SQLite/Turso structural overhead are additional and are measured separately.
+    max_site_payload_bytes: int = 10_240
 
     search_default_limit: int = 10
     search_max_limit: int = 50
