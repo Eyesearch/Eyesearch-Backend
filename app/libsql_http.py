@@ -130,6 +130,21 @@ class ProcessRateLimiter:
 _NULL = {"type": "null"}
 
 
+def retry_after_seconds(
+    response: Any, default: float = 1.0, cap: float = 10.0
+) -> float:
+    """How long to wait after a 429, from `Retry-After` when it is a number."""
+    raw = ""
+    headers = getattr(response, "headers", None)
+    if headers:
+        raw = headers.get("Retry-After") or headers.get("retry-after") or ""
+    try:
+        value = float(raw) if raw else default
+    except (TypeError, ValueError):
+        value = default  # an HTTP-date form; the default is close enough
+    return max(0.0, min(value, cap))
+
+
 def encode_arg(value: Any) -> dict[str, Any]:
     """Encode a Python value as a Hrana typed value.
 
@@ -251,6 +266,23 @@ class TursoHttpClient:
             response = await self._client.post(f"{self.base_url}/v2/pipeline", json=payload)
         except httpx.HTTPError as error:
             raise DatabaseUnavailable(f"Turso request failed: {error}") from error
+
+        # A 429 is throttling, not a failure. Without this, every request Turso
+        # rate-limits fails the whole batch and the crawl makes no progress
+        # until the window resets — which at the request rates this crawler now
+        # uses would look exactly like a stall. One bounded retry, honouring
+        # Retry-After, turns that into a pause.
+        if response.status_code == 429:
+            delay = retry_after_seconds(response)
+            logger.warning("Turso throttled the pipeline (429); retrying in %.1fs", delay)
+            await asyncio.sleep(delay)
+            await self.limiter.acquire()
+            try:
+                response = await self._client.post(
+                    f"{self.base_url}/v2/pipeline", json=payload
+                )
+            except httpx.HTTPError as error:
+                raise DatabaseUnavailable(f"Turso request failed: {error}") from error
 
         if response.status_code >= 400:
             raise DatabaseUnavailable(
@@ -405,5 +437,6 @@ __all__ = [
     "build_client",
     "decode_cell",
     "encode_arg",
+    "retry_after_seconds",
     "rewrite_scheme",
 ]

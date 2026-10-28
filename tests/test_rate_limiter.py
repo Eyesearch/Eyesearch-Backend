@@ -17,6 +17,7 @@ from app.engine.config import Settings
 from app.engine.store import IndexStore, PageDocument
 
 from app.libsql_http import (
+    retry_after_seconds,
     DatabaseUnavailable,
     LibsqlError,
     ProcessRateLimiter,
@@ -55,9 +56,9 @@ async def test_limiter_default_is_two_requests_per_second():
     assert limiter.interval_seconds == 0.5
 
 
-def test_runtime_settings_use_a_ten_requests_per_second_default():
+def test_runtime_settings_use_a_twenty_requests_per_second_default():
     settings = Settings(_env_file=None, environment="test")
-    assert settings.libsql_min_interval_seconds == 0.1
+    assert settings.libsql_min_interval_seconds == 0.05
 
 
 def test_limiter_rejects_a_negative_interval():
@@ -277,3 +278,78 @@ async def test_a_page_write_sends_quality_score_as_a_json_number():
     for index, arg in enumerate(page_args):
         if arg.get("type") == "float":
             assert isinstance(arg["value"], float), f"arg {index} sent a float as a string"
+
+
+# ---------------------------------------------------------------------------
+# 429 handling
+# ---------------------------------------------------------------------------
+
+
+async def test_a_throttled_request_is_retried_once():
+    """A 429 is throttling, not a failed batch."""
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, text="slow down")
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "type": "ok",
+                        "response": {
+                            "type": "execute",
+                            "result": {
+                                "cols": [{"name": "n"}],
+                                "rows": [[{"type": "integer", "value": "1"}]],
+                                "affected_row_count": 1,
+                            },
+                        },
+                    }
+                ]
+            },
+        )
+
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        results = await client.execute("SELECT 1")
+    finally:
+        await client.close()
+
+    assert calls["n"] == 2
+    assert int(results.scalar(0)) == 1
+
+
+async def test_a_persistent_429_still_raises_after_one_retry():
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "0"}, text="still throttled")
+
+    client = TursoHttpClient(
+        "libsql://db.turso.io",
+        "token",
+        limiter=ProcessRateLimiter(0.0),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DatabaseUnavailable):
+            await client.execute("SELECT 1")
+    finally:
+        await client.close()
+
+
+def test_retry_after_is_parsed_and_capped():
+    class _Response:
+        def __init__(self, value):
+            self.headers = {"Retry-After": value} if value is not None else {}
+
+    assert retry_after_seconds(_Response("3")) == 3.0
+    assert retry_after_seconds(_Response(None)) == 1.0
+    assert retry_after_seconds(_Response("999")) == 10.0
+    assert retry_after_seconds(_Response("Wed, 21 Oct 2026 07:28:00 GMT")) == 1.0
