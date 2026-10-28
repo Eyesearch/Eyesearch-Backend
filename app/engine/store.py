@@ -511,22 +511,44 @@ class IndexStore:
             logger.warning("marked %d queue rows failed: %s", failed, reason)
         return failed
 
-    async def enqueue_urls(self, urls: Iterable[tuple[str, str]]) -> int:
-        """Queue `(url, domain)` pairs; already-known URLs are ignored."""
+    async def enqueue_urls(
+        self,
+        urls: Iterable[tuple[str, str]],
+        chunk_size: int | None = None,
+    ) -> int:
+        """Queue `(url, domain)` pairs; already-known URLs are ignored.
+
+        Sent in bounded chunks. A 120-page batch can discover hundreds of links,
+        and one pipeline request carrying all of them overruns the HTTP response
+        window — Turso answers too slowly and the client raises a ReadTimeout,
+        losing the whole batch's discoveries. Chunking costs one extra request
+        per fifty URLs against the rate limiter, which is far cheaper.
+
+        Safe to split: these are INSERT OR IGNORE, so a retry or a partial run
+        cannot duplicate a row.
+        """
         pairs = list(urls)
         if not pairs:
             return 0
-        results = await self._client.batch(
-            [
-                (
-                    "INSERT OR IGNORE INTO crawl_queue (url, domain, status) "
-                    "VALUES (?, ?, 'pending')",
-                    (url, domain),
-                )
-                for url, domain in pairs
-            ]
-        )
-        return sum(1 for result in results if result.rows_affected > 0)
+
+        size = chunk_size or self._settings.crawl_enqueue_chunk_size
+        size = max(1, size)
+
+        added = 0
+        for start in range(0, len(pairs), size):
+            chunk = pairs[start : start + size]
+            results = await self._client.batch(
+                [
+                    (
+                        "INSERT OR IGNORE INTO crawl_queue (url, domain, status) "
+                        "VALUES (?, ?, 'pending')",
+                        (url, domain),
+                    )
+                    for url, domain in chunk
+                ]
+            )
+            added += sum(1 for result in results if result.rows_affected > 0)
+        return added
 
     async def pending_domains(self, limit: int = 200) -> list[str]:
         """Which domains currently have work waiting."""

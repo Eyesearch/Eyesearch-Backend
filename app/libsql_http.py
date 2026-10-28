@@ -130,6 +130,11 @@ class ProcessRateLimiter:
 _NULL = {"type": "null"}
 
 
+#: How long to wait for Turso to answer one pipeline request. A cold
+#: connection running a multi-statement pipeline can exceed the old 20s.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30.0
+
+
 def retry_after_seconds(
     response: Any, default: float = 1.0, cap: float = 10.0
 ) -> float:
@@ -218,7 +223,7 @@ class TursoHttpClient:
         token: str = "",
         *,
         limiter: ProcessRateLimiter | None = None,
-        timeout: float = 20.0,
+        timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not url:

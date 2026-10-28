@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     crawl_timeout_seconds: float = 2.5
     crawl_max_body_bytes: int = 512_000
     crawl_concurrency: int = 60
+    #: How many discovered URLs go into one pipeline request. A batch of 120
+    #: pages can discover hundreds of links; sending them as one request
+    #: overruns the HTTP response window and fails with a ReadTimeout.
+    crawl_enqueue_chunk_size: int = 50
     #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
     #: as Indian ones. Off by default: the crawl targets the Indian web, and an
     #: open global ring dilutes the index and re-opens the spider-trap surface.

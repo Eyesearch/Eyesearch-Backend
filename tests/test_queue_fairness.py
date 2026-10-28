@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from app.agents import load_agent
 from app.database import initialize_database, verify_writable
+from app.engine.config import Settings
 from app.libsql_http import LocalSqliteClient
 
 FrontierAgent = load_agent("01_frontier_agent").FrontierAgent
@@ -266,3 +267,64 @@ async def test_parking_a_single_domain_leaves_others_alone(store, client):
 
     assert parked == 1
     assert await store.pending_domains() == ["fresh.gov.in"]
+
+
+# ---------------------------------------------------------------------------
+# Bounded enqueue
+# ---------------------------------------------------------------------------
+
+
+class _CountingClient:
+    """Wraps a client and records how large each pipeline request was."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.sizes: list[int] = []
+
+    async def execute(self, sql, args=()):
+        return await self.inner.execute(sql, args)
+
+    async def batch(self, statements):
+        self.sizes.append(len(statements))
+        return await self.inner.batch(statements)
+
+    async def close(self):
+        await self.inner.close()
+
+
+async def test_discovered_urls_are_enqueued_in_bounded_chunks(client):
+    """One request carrying hundreds of INSERTs overruns Turso's window."""
+    from app.engine.store import IndexStore
+
+    counting = _CountingClient(client)
+    store = IndexStore(counting, Settings(environment="test", crawl_enqueue_chunk_size=50))
+
+    pairs = [(f"https://site{i}.gov.in/p", f"site{i}.gov.in") for i in range(120)]
+    added = await store.enqueue_urls(pairs)
+
+    assert added == 120
+    assert counting.sizes == [50, 50, 20]
+
+
+async def test_chunking_does_not_change_the_added_count(client):
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test", crawl_enqueue_chunk_size=7))
+    pairs = [(f"https://site{i}.gov.in/p", f"site{i}.gov.in") for i in range(20)]
+
+    first = await store.enqueue_urls(pairs)
+    second = await store.enqueue_urls(pairs)
+
+    assert first == 20
+    assert second == 0  # INSERT OR IGNORE: the second pass adds nothing
+
+
+async def test_a_single_chunk_when_everything_fits(client):
+    from app.engine.store import IndexStore
+
+    counting = _CountingClient(client)
+    store = IndexStore(counting, Settings(environment="test", crawl_enqueue_chunk_size=50))
+
+    await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
+
+    assert counting.sizes == [1]
