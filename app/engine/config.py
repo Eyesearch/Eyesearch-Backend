@@ -135,10 +135,11 @@ class Settings(BaseSettings):
     queue_retain_days: int = 30
     queue_prune_limit: int = 5000
     #: Follow links to ordinary global domains (.com, .org, .io, ...) as well
-    #: as Indian ones. Off by default: the crawl targets the Indian web, and an
-    #: open global ring dilutes the index and re-opens the spider-trap surface.
-    #: ALLOW_GLOBAL_DOMAINS=true turns it back on.
-    allow_global_domains: bool = False
+    #: as Indian ones. On: the index is no longer India-only, so foreign pages
+    #: enter it and the spider-trap surface is wider. Indian civic domains still
+    #: sort first in the queue, and the per-domain cap and trap filters still
+    #: bound every host. ALLOW_GLOBAL_DOMAINS=false reverts to India-only.
+    allow_global_domains: bool = True
     # When the frontier runs dry and every seed is already indexed, the
     # stalest crawled URLs return to 'pending' after this cooldown.
     rearm_cooldown_seconds: int = 6 * 3600

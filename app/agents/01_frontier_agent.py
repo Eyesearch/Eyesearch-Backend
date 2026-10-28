@@ -442,11 +442,11 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
     domain under an Indian public suffix (`.in`, `.gov.in`, `.nic.in`, `.ac.in`,
     `.res.in`, `.edu.in`, `.org.in`, `.co.in`), or a whitelisted Indian portal.
 
-    `allow_global=True` adds a ring for ordinary global TLDs. It is off by
-    default — turning it on makes this a general web crawler, dilutes the index
-    with foreign pages, and opens the largest trap surface there is. It is kept
-    behind `ALLOW_GLOBAL_DOMAINS` so the decision stays reversible rather than
-    being a one-way code change.
+    `allow_global=True` adds a ring for ordinary global TLDs. It is now on by
+    default, which makes this a general web crawler: the index is no longer
+    India-only, and this ring is the largest spider-trap surface there is. It
+    stays behind `ALLOW_GLOBAL_DOMAINS` so the decision remains reversible —
+    set it to false for the previous India-only behaviour.
     """
     host = domain_of(url)
     if not host:

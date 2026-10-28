@@ -514,10 +514,15 @@ def test_outbound_links_per_page_are_capped():
 # ---------------------------------------------------------------------------
 
 
-def test_foreign_domains_are_out_of_scope_by_default():
+def test_global_crawl_is_on_by_default():
     settings = Settings(_env_file=None, environment="test")
-    assert settings.allow_global_domains is False
+    assert settings.allow_global_domains is True
+    # The function default stays opt-in; the setting is what turns it on.
     assert in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in") is False
+    assert (
+        in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in", allow_global=True)
+        is True
+    )
 
 
 def test_the_global_ring_opens_when_asked():
