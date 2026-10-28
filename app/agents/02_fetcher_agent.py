@@ -15,6 +15,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -59,6 +60,45 @@ class FetchResult:
         if self.status:
             return f"http_status:{self.status}"
         return self.error or "fetch_failed"
+
+
+#: Characters left alone when repairing a URL path. `%` is safe so an already
+#: encoded path is not double-encoded.
+_PATH_SAFE = "/%:@!$&'()*+,;=~-._"
+_QUERY_SAFE = "=&%:@!$'()*+,;/?~-._"
+
+
+def sanitise_url(url: str) -> str | None:
+    """Make `url` something httpx will accept, or None if it cannot be repaired.
+
+    A malformed href in a page — an unencoded space, a relative path with no
+    leading slash, a broken IPv6 literal — otherwise raises `httpx.InvalidURL`,
+    which is not an `HTTPError` and so escapes every handler below it. Returning
+    None lets the caller record a clean failure instead.
+    """
+    if not url or not url.strip():
+        return None
+    try:
+        parts = urlsplit(url.strip())
+        netloc = parts.netloc
+    except ValueError:
+        return None
+    if not netloc:
+        return None
+
+    path = parts.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+
+    return urlunsplit(
+        (
+            parts.scheme or "https",
+            netloc,
+            quote(path, safe=_PATH_SAFE),
+            quote(parts.query, safe=_QUERY_SAFE),
+            parts.fragment,
+        )
+    )
 
 
 class FetcherAgent:
@@ -106,15 +146,29 @@ class FetcherAgent:
         last_error = ""
         last_status = 0
 
+        target = sanitise_url(url)
+        if target is None:
+            return FetchResult(
+                url=url,
+                ok=False,
+                error="invalid_url",
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+            )
+
         for attempt in range(1, max(1, attempts) + 1):
             async with self._semaphore:
                 try:
                     self.fetches += 1
-                    response = await self._client.get(url)
+                    response = await self._client.get(target)
                 except httpx.TimeoutException:
                     last_error = "timeout"
                 except httpx.HTTPError as error:
                     last_error = f"http_error:{type(error).__name__}"
+                except Exception as error:
+                    # httpx.InvalidURL subclasses Exception, not HTTPError, so
+                    # without this it escapes fetch(), kills the whole gather in
+                    # fetch_many(), and stops the crawl loop for a full minute.
+                    last_error = f"fetch_error:{type(error).__name__}"
                 else:
                     last_status = response.status_code
                     if response.status_code in BLOCKING_STATUSES:
@@ -174,9 +228,23 @@ class FetcherAgent:
         """
         if not urls:
             return []
-        return list(
-            await asyncio.gather(*(self.fetch(url, attempts=attempts) for url in urls))
+        raw = await asyncio.gather(
+            *(self.fetch(url, attempts=attempts) for url in urls),
+            return_exceptions=True,
         )
+
+        results: list[FetchResult] = []
+        for url, item in zip(urls, raw):
+            if isinstance(item, BaseException):
+                # Belt and braces: fetch() already refuses to raise, but a bug
+                # there must cost one URL, never the batch.
+                logger.debug("fetch of %s raised %s", url, type(item).__name__)
+                results.append(
+                    FetchResult(url=url, ok=False, error=f"gather_error:{type(item).__name__}")
+                )
+            else:
+                results.append(item)
+        return results
 
     async def aclose(self) -> None:
         if self._owns_client:

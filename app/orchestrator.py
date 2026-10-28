@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 #: every 15 seconds for the whole of a six-hour cooldown.
 IDLE_REFILL_FAILED_BACKOFF_SECONDS = 60.0
 
+#: Backoff after an unexpected error escapes a batch. Long enough that a
+#: persistent bug cannot spin the loop and flood the logs, short enough that a
+#: transient fault does not look like a dead crawler: 60s was indistinguishable
+#: from a stall.
+LOOP_ERROR_BACKOFF_SECONDS = 5.0
+
 _frontier_module = load_agent("01_frontier_agent")
 _fetcher_module = load_agent("02_fetcher_agent")
 _parser_module = load_agent("03_parser_agent")

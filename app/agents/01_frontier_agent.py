@@ -247,6 +247,19 @@ def _is_ip_address(host: str) -> bool:
     return True
 
 
+def safe_urlparse(url: str):
+    """`urlparse`, but None instead of ValueError for a malformed authority.
+
+    A broken href in a page — most often a truncated IPv6 literal like
+    `http://[::1/ path` — makes urlparse raise, and every caller here treats a
+    URL as data. One bad link must be dropped, not crash discovery.
+    """
+    try:
+        return urlparse(url)
+    except ValueError:
+        return None
+
+
 def domain_of(url: str) -> str:
     """The registrable root domain of a URL.
 
@@ -261,7 +274,8 @@ def domain_of(url: str) -> str:
     single-label hosts are returned unchanged, because there is no registrable
     domain to extract.
     """
-    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    parts = safe_urlparse(url)
+    host = (parts.hostname or "").lower().rstrip(".") if parts else ""
     if not host:
         return ""
     if host.startswith("www."):
@@ -290,8 +304,8 @@ def normalise_url(url: str) -> str | None:
     if not url:
         return None
 
-    parts = urlparse(url.strip())
-    if parts.scheme not in ("http", "https"):
+    parts = safe_urlparse(url.strip())
+    if parts is None or parts.scheme not in ("http", "https"):
         return None
 
     host = (parts.hostname or "").lower()
@@ -316,7 +330,9 @@ def normalise_url(url: str) -> str | None:
 
 def is_crawlable(url: str) -> bool:
     """Crawl-scope rules: depth, extension, and form/session paths."""
-    parts = urlparse(url)
+    parts = safe_urlparse(url)
+    if parts is None:
+        return False
     path = (parts.path or "/").lower()
 
     if path.endswith(tuple(JUNK_EXTENSIONS)):
@@ -759,6 +775,7 @@ __all__ = [
     "TRACKING_PARAMS",
     "WHITELISTED_DOMAINS",
     "domain_of",
+    "safe_urlparse",
     "in_crawl_scope",
     "is_authoritative",
     "is_civic",
