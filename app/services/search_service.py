@@ -44,7 +44,7 @@ _YOUTUBE_ID = re.compile(r"(?:v=|/)([A-Za-z0-9_-]{11})(?:[&?/]|$)")
 
 
 #: How long a search result stays usable, and how many are kept.
-CACHE_TTL_SECONDS = 120.0
+CACHE_TTL_SECONDS = 60.0
 CACHE_MAX_ENTRIES = 1000
 
 

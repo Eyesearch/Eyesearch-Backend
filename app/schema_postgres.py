@@ -152,6 +152,10 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # Existing rows: derive the link from the text they already carry.
     "UPDATE pages SET category = category WHERE category_id IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_pages_category_id ON pages(category_id)",
+    # Filtered search orders by quality within a category; the composite
+    # lets PostgreSQL walk the index instead of sorting the matches.
+    "CREATE INDEX IF NOT EXISTS idx_pages_category_quality "
+    "ON pages(category_id, quality_score DESC)",
     "CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN (search_vector)",
     "CREATE INDEX IF NOT EXISTS idx_pages_site ON pages(site_id)",
     # Partial unique index: the database itself enforces SHA-256 deduplication

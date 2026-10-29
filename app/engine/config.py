@@ -55,8 +55,10 @@ class Settings(BaseSettings):
     #: connection and starve the API. These bound that pool, not the crawler's.
     search_pool_min_size: int = 1
     search_pool_max_size: int = 5
-    #: Tighter than the crawler's 4s: a person is waiting on this one.
-    search_statement_timeout_ms: int = 3000
+    #: Tighter than the crawler's 4s: a person is waiting on this one. 1.5s is
+    #: the ceiling — a search that cannot answer in that time is failing, and
+    #: holding the connection longer only starves the next request.
+    search_statement_timeout_ms: int = 1500
     search_acquire_timeout_seconds: float = 1.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
