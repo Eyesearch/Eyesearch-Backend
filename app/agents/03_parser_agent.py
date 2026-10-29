@@ -8,9 +8,12 @@ storage budget and a card never shows half a word.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
+from urllib.parse import unquote, urlsplit
+
 from app.engine.urls import safe_urljoin
 
 from bs4 import BeautifulSoup
@@ -21,6 +24,9 @@ logger = logging.getLogger(__name__)
 BODY_CHAR_CAP = 1000
 
 #: Ceilings for the two metadata fields.
+BRAND_CHAR_CAP = 80
+CLEAN_URL_CHAR_CAP = 160
+ACTION_TITLE_CHAR_CAP = 120
 TITLE_CHAR_CAP = 200
 DESCRIPTION_CHAR_CAP = 400
 
@@ -143,6 +149,137 @@ def build_description(title: str, meta_description: str, body_text: str) -> str:
     return (snippet or meta or collapse(title))[:DESCRIPTION_CHAR_CAP]
 
 
+# ---------------------------------------------------------------------------
+# Card-oriented extraction: brand, breadcrumb, action title
+# ---------------------------------------------------------------------------
+
+#: Separators that sites stuff keywords into a <title> with. Each one splits
+#: "Karnataka Health Department | Notifications | Apply Online | Official Site"
+#: into parts, of which only the first is usually the page's actual subject.
+TITLE_SEPARATORS = ("|", " - ", " – ", " — ", " :: ", " · ", " • ", " » ")
+
+#: Words that say nothing about what the page does.
+EMPTY_TITLE_WORDS = frozenset(
+    {"home", "homepage", "welcome", "index", "untitled", "official site",
+     "official website", "click here", "page", "website"}
+)
+
+#: How many words an action title may run to.
+ACTION_TITLE_WORDS = 4
+
+#: Path segments that carry no meaning for a reader.
+NOISE_SEGMENTS = frozenset(
+    {"index", "index.html", "index.php", "index.aspx", "default", "default.aspx",
+     "home", "main", "en", "english", "www", "pages", "page"}
+)
+
+
+def domain_root(url: str) -> str:
+    """The registrable name without `www.` or a public suffix tail."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    parts = [part for part in host.split(".") if part]
+    if len(parts) >= 3 and parts[-2] in {"gov", "nic", "ac", "co", "org", "net", "edu", "res"}:
+        # karnataka.gov.in -> karnataka
+        return parts[-3]
+    return parts[0] if parts else ""
+
+
+def brand_from_domain(url: str) -> str:
+    """A readable fallback brand: 'thehindu.com' -> 'The Hindu' is not derivable,
+    but 'karnataka.gov.in' -> 'Karnataka' is, and that is better than nothing."""
+    root = domain_root(url)
+    if not root:
+        return ""
+    label = root.replace("-", " ").replace("_", " ").strip()
+    if not label:
+        return ""
+    if len(label) <= 4:
+        return label.upper()
+    return " ".join(word.capitalize() for word in label.split())
+
+
+def clean_url_for(url: str, max_segments: int = 3) -> str:
+    """A Google-style breadcrumb: 'karnataka.gov.in › health › notifications'."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    host = (parts.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return ""
+
+    segments: list[str] = []
+    for raw in parts.path.split("/"):
+        if not raw:
+            continue
+        try:
+            text = unquote(raw)
+        except Exception:
+            text = raw
+        text = re.sub(r"\.(html?|php|aspx?|jsp|txt)$", "", text, flags=re.I)
+        text = text.replace("-", " ").replace("_", " ").strip()
+        text = collapse(text)
+        if not text or text.lower() in NOISE_SEGMENTS:
+            continue
+        if len(text) > 40:
+            text = text[:39].rstrip() + "…"
+        segments.append(text)
+        if len(segments) >= max_segments:
+            break
+
+    return " › ".join([host, *segments]) if segments else host
+
+
+def _split_title(title: str) -> list[str]:
+    """Split a stuffed title into its parts."""
+    parts = [title]
+    for separator in TITLE_SEPARATORS:
+        parts = [piece for part in parts for piece in part.split(separator)]
+    return [collapse(piece).strip(" .,:;·•»-") for piece in parts if collapse(piece)]
+
+
+def action_title_from(title: str, h1: str = "", brand: str = "") -> str:
+    """The 2-4 word statement of what the page is for.
+
+    An H1 wins when there is one, because it is what the page itself calls
+    itself. Otherwise the title is split on the usual stuffing separators and
+    the first part that is not just the site's own name is used.
+    """
+    heading = collapse(h1 or "")
+    if heading and 1 < len(heading.split()) <= 12 and heading.lower() not in EMPTY_TITLE_WORDS:
+        candidate = heading
+    else:
+        candidate = ""
+        parts = _split_title(collapse(title or ""))
+        for part in parts:
+            lowered = part.lower()
+            if lowered in EMPTY_TITLE_WORDS:
+                continue
+            if brand and lowered == brand.lower():
+                continue
+            if len(part.split()) < 2:
+                continue
+            candidate = part
+            break
+        if not candidate and parts:
+            candidate = parts[0]
+
+    if not candidate:
+        return ""
+
+    words = candidate.split()
+    if len(words) > ACTION_TITLE_WORDS:
+        words = words[:ACTION_TITLE_WORDS]
+    return collapse(" ".join(words)).strip(" .,:;-")
+
+
 def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
     """Cut `text` to at most `cap` characters at a word boundary.
 
@@ -172,6 +309,10 @@ class ParsedPage:
     body_text: str = ""
     reason: str = ""
     links: list[str] = field(default_factory=list)
+    #: What the card shows instead of a raw <title> and a bare URL.
+    brand_name: str = ""
+    clean_url: str = ""
+    action_title: str = ""
 
     @property
     def char_count(self) -> int:
@@ -194,13 +335,23 @@ class ParserAgent:
             logger.debug("parse failed for %s: %s", url, error)
             return ParsedPage(url=url, ok=False, reason="unparseable")
 
+        # Read the brand first: JSON-LD lives in a <script>, which the strip
+        # below removes before anything else can see it.
+        brand_name = self._brand_name(soup, url)
+
         for tag in soup.find_all(STRIP_TAGS):
             tag.decompose()
 
         title = self._title(soup)
-        body_text = truncate_body(soup.get_text(" "), self.body_char_cap)
+        # Read the body only: `soup.get_text()` also returns the contents of
+        # <head>, so the keyword-stuffed <title> and every <meta> description
+        # ended up at the front of body_text and showed up in snippets.
+        body_source = soup.body or soup
+        body_text = truncate_body(body_source.get_text(" "), self.body_char_cap)
         description = build_description(title, self._description(soup), body_text)
         links = self.extract_links(soup, url)
+        action_title = action_title_from(title, self._h1(soup), brand_name)
+        clean_url = clean_url_for(url)
 
         if not title and not body_text:
             return ParsedPage(url=url, ok=False, reason="no_content")
@@ -212,6 +363,9 @@ class ParserAgent:
             description=description[:DESCRIPTION_CHAR_CAP],
             body_text=body_text,
             links=links,
+            brand_name=brand_name[:BRAND_CHAR_CAP],
+            clean_url=clean_url[:CLEAN_URL_CHAR_CAP],
+            action_title=(action_title or title)[:ACTION_TITLE_CHAR_CAP],
         )
 
     @staticmethod
@@ -272,6 +426,51 @@ class ParserAgent:
         if heading:
             return collapse(heading.get_text(" "))
         return ""
+
+    @staticmethod
+    def _h1(soup: BeautifulSoup) -> str:
+        """The page's own heading, when it has exactly one obvious one."""
+        heading = soup.find("h1")
+        if heading is None:
+            return ""
+        return collapse(heading.get_text(" "))
+
+    @staticmethod
+    def _brand_name(soup: BeautifulSoup, url: str) -> str:
+        """The site's own name: og:site_name, then JSON-LD, then the domain.
+
+        og:site_name is what the publisher calls itself, so it beats anything
+        derived from the host. JSON-LD carries the same idea for sites that
+        never set the Open Graph tag.
+        """
+        meta = soup.find("meta", attrs={"property": "og:site_name"})
+        if meta and meta.get("content"):
+            name = collapse(meta["content"])
+            if name:
+                return name
+
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw = script.string or script.get_text() or ""
+            if not raw.strip():
+                continue
+            try:
+                data = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            for node in data if isinstance(data, list) else [data]:
+                if not isinstance(node, dict):
+                    continue
+                publisher = node.get("publisher") or node.get("sourceOrganization")
+                if isinstance(publisher, dict) and publisher.get("name"):
+                    name = collapse(str(publisher["name"]))
+                    if name:
+                        return name
+                if node.get("@type") in ("Organization", "WebSite") and node.get("name"):
+                    name = collapse(str(node["name"]))
+                    if name:
+                        return name
+
+        return brand_from_domain(url)
 
     @staticmethod
     def _description(soup: BeautifulSoup) -> str:

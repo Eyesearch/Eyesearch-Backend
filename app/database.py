@@ -43,6 +43,9 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         category TEXT DEFAULT 'general_reference',
         language TEXT DEFAULT 'en',
         indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        brand_name TEXT,
+        clean_url TEXT,
+        action_title TEXT,
         FOREIGN KEY(site_id) REFERENCES sites(site_id)
     )
     """,
@@ -106,6 +109,9 @@ COLUMN_ADDITIONS: tuple[tuple[str, str, str], ...] = (
     ("crawl_queue", "last_error", "TEXT"),
     ("pages", "category", "TEXT DEFAULT 'general_reference'"),
     ("pages", "language", "TEXT DEFAULT 'en'"),
+    ("pages", "brand_name", "TEXT"),
+    ("pages", "clean_url", "TEXT"),
+    ("pages", "action_title", "TEXT"),
 )
 
 #: Statements that need a column from COLUMN_ADDITIONS to exist first.

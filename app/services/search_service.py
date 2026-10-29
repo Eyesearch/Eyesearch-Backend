@@ -119,6 +119,9 @@ class SearchResult:
     thumbnail_url: str | None = None
     published_at: str | None = None
     score: float = 0.0
+    #: The publisher's own name, and a breadcrumb instead of a bare URL.
+    brand_name: str = ""
+    clean_url: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -132,6 +135,8 @@ class SearchResult:
             "thumbnail_url": self.thumbnail_url,
             "published_at": self.published_at,
             "score": self.score,
+            "brand_name": self.brand_name,
+            "clean_url": self.clean_url,
         }
 
 
@@ -242,8 +247,14 @@ def clean_display_snippet(snippet: str, title: str = "", limit: int = 300) -> st
 
 
 def to_result(hit: SearchHit) -> SearchResult:
-    """Map an index row onto the card contract."""
-    title = hit.title or hit.url
+    """Map an index row onto the card contract.
+
+    The card shows the action title — the parser's short statement of what the
+    page is for — and falls back to the raw title for rows indexed before that
+    field existed.
+    """
+    raw_title = hit.title or hit.url
+    title = (hit.action_title or "").strip() or raw_title
     return SearchResult(
         id=f"eyesearch:{hit.page_id}",
         title=title,
@@ -252,6 +263,8 @@ def to_result(hit: SearchHit) -> SearchResult:
         kind=kind_of(hit.url),
         thumbnail_url=youtube_thumbnail(hit.url),
         score=hit.score,
+        brand_name=hit.brand_name or "",
+        clean_url=hit.clean_url or "",
     )
 
 

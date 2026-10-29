@@ -63,9 +63,14 @@ class PageDocument:
     digest: str = ""
     category: str = "general_reference"
     language: str = "en"
+    #: What the card shows: the publisher's own name, a breadcrumb, and a short
+    #: action-oriented title instead of a keyword-stuffed <title>.
+    brand_name: str = ""
+    clean_url: str = ""
+    action_title: str = ""
 
     def as_row(self) -> tuple[Any, ...]:
-        """The nine bound values the page insert expects, in SQL order.
+        """The twelve bound values the page insert expects, in SQL order.
 
         `quality_score` is cast to `float` here rather than trusted from the
         caller: it is a REAL column, and an `int` reaching the encoder would be
@@ -82,6 +87,9 @@ class PageDocument:
             self.digest,
             self.category,
             self.language,
+            self.brand_name,
+            self.clean_url,
+            self.action_title,
         )
 
 
@@ -120,6 +128,9 @@ class SearchHit:
     score: float = 0.0
     match_snippet: str = ""
     raw_score: float = 0.0
+    brand_name: str = ""
+    clean_url: str = ""
+    action_title: str = ""
 
     @property
     def snippet(self) -> str:
@@ -354,9 +365,9 @@ class IndexStore:
                 (
                     "INSERT INTO pages "
                     "(site_id, url, title, description, body_text, quality_score, digest, "
-                    "category, language, indexed_at) "
+                    "category, language, brand_name, clean_url, action_title, indexed_at) "
                     "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, "
-                    "?, ?, CURRENT_TIMESTAMP) "
+                    "?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
                     # SQLite's INSERT OR IGNORE ignored any conflict; bare
                     # ON CONFLICT DO NOTHING keeps that behaviour for both the
                     # url and the digest unique index.
@@ -696,13 +707,17 @@ class IndexStore:
         """
         result = await self._client.execute(
             "UPDATE pages SET title = ?, description = ?, body_text = ?, "
-            "quality_score = ?, digest = ?, indexed_at = CURRENT_TIMESTAMP WHERE url = ?",
+            "quality_score = ?, digest = ?, brand_name = ?, clean_url = ?, "
+            "action_title = ?, indexed_at = CURRENT_TIMESTAMP WHERE url = ?",
             (
                 document.title,
                 document.description,
                 document.body_text,
                 document.quality_score,
                 document.digest,
+                document.brand_name,
+                document.clean_url,
+                document.action_title,
                 document.url,
             ),
         )
@@ -839,6 +854,7 @@ class IndexStore:
         sql = (
             "SELECT * FROM ("
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
+            "p.brand_name, p.clean_url, p.action_title, "
             f"(-ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?))) "
             "AS lexical_score, "
             f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
@@ -894,10 +910,13 @@ class IndexStore:
 
     @staticmethod
     def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
-        title_hit = int(row[6] or 0)
-        auth_hit = int(row[7] or 0)
+        # Column order, from the SELECT in `search`: 0 page_id, 1 url, 2 title,
+        # 3 description, 4 body_text, 5 brand_name, 6 clean_url, 7 action_title,
+        # 8 lexical_score, 9 title_hit, 10 auth_hit.
+        title_hit = int(row[9] or 0)
+        auth_hit = int(row[10] or 0)
         boosted = (
-            float(row[5] or 0.0)
+            float(row[8] or 0.0)
             - TITLE_MATCH_BOOST * title_hit
             - AUTHORITY_DOMAIN_BOOST * auth_hit
         )
@@ -911,6 +930,9 @@ class IndexStore:
             score=normalise_score(boosted),
             match_snippet=passage_around_match(body, tokens),
             raw_score=boosted,
+            brand_name=str(row[5] or ""),
+            clean_url=str(row[6] or ""),
+            action_title=str(row[7] or ""),
         )
 
     @staticmethod

@@ -82,6 +82,9 @@ class RevalidationAgent:
                     title=parsed.title,
                     description=parsed.description,
                     body_text=parsed.body_text,
+                    brand_name=parsed.brand_name,
+                    clean_url=parsed.clean_url,
+                    action_title=parsed.action_title,
                 )
                 verdict = self._quality.check(document)
                 if not verdict.ok:

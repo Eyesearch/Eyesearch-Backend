@@ -44,6 +44,9 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
         category TEXT DEFAULT 'general_reference',
         language TEXT DEFAULT 'en',
         indexed_at TIMESTAMPTZ DEFAULT now(),
+        brand_name TEXT,
+        clean_url TEXT,
+        action_title TEXT,
         search_vector tsvector
     )
     """,
