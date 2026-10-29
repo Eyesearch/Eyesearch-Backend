@@ -1,0 +1,70 @@
+# Production stack for the GCP VM.
+#
+# PostgreSQL is already running on this VM and listens on 127.0.0.1 only, which
+# is the secure default. `network_mode: host` puts the container in the VM's own
+# network namespace so `127.0.0.1:5432` means the database, and nothing has to be
+# exposed on the public interface. The trade-off is that `ports:` is ignored —
+# uvicorn binds port 8000 on the host directly, which is what we want anyway.
+#
+# The alternative, if you would rather not use host networking, is the commented
+# bridge block below; it needs PostgreSQL to listen on the docker bridge too.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eyesearch-backend:latest
+    container_name: eyesearch-backend
+    restart: unless-stopped
+    network_mode: host
+
+    env_file:
+      - .env
+    environment:
+      # Explicit here rather than relying on .env, because these decide whether
+      # the process crawls and whether it will accept a local database.
+      ENVIRONMENT: production
+      PORT: "8000"
+      # Inside the VM's network namespace this is the local PostgreSQL.
+      DATABASE_URL: postgresql://eyesearch:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:5432/eyesearch
+      ALLOW_LOCAL_DB: "false"
+      # Set to "false" to run the API only, with no crawling at all.
+      CRAWLER_ENABLED: "${CRAWLER_ENABLED:-true}"
+      REVALIDATION_ENABLED: "${REVALIDATION_ENABLED:-true}"
+
+    # Cap the log growth: the crawler is chatty and this VM's disk is also
+    # holding the database.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # The parser handles untrusted HTML; a runaway page should not be able to
+    # exhaust the VM.
+    mem_limit: 1500m
+    cpus: "1.5"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+  # --- Bridge alternative ---------------------------------------------------
+  # Uncomment this instead of `network_mode: host`, and in .env point
+  # DATABASE_URL at host.docker.internal. PostgreSQL must then accept
+  # connections from the docker bridge:
+  #   postgresql.conf: listen_addresses = 'localhost,172.17.0.1'
+  #   pg_hba.conf:     host all all 172.17.0.0/16 scram-sha-256
+  #
+  # backend:
+  #   build: .
+  #   restart: unless-stopped
+  #   env_file: [.env]
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"
+  #   ports:
+  #     - "127.0.0.1:8000:8000"
