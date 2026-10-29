@@ -89,8 +89,48 @@ def test_the_action_title_strips_dash_stuffing():
     assert action_title_from("Income Tax Return Filing - File Online - Department") == "Income Tax Return Filing"
 
 
-def test_the_action_title_is_capped_at_four_words():
-    assert action_title_from("Apply for a new passport online today") == "Apply for a new"
+def test_the_action_title_is_capped_at_120_characters():
+    long_title = "Apply for a new passport " * 12
+    resolved = action_title_from(long_title)
+    assert len(resolved) <= 120
+    assert resolved.startswith("Apply for a new passport")
+
+
+def test_the_action_title_prefers_og_title_over_the_h1_and_title():
+    assert (
+        action_title_from(
+            "Raw title | Site",
+            h1="Heading on the page",
+            og_title="Running Shoes Online",
+        )
+        == "Running Shoes Online"
+    )
+
+
+def test_the_action_title_uses_the_h1_only_when_it_is_longer_than_five_characters():
+    # "Help" is four characters, so it is not a usable title on its own.
+    assert action_title_from("Passport Application", h1="Help") == "Passport Application"
+    assert action_title_from("Raw | Site", h1="Passport Renewal") == "Passport Renewal"
+
+
+def test_the_action_title_drops_the_brand_it_already_shows_elsewhere():
+    """The card prints the brand on its own line, so the title must not repeat it."""
+    assert action_title_from("Running Shoes Online | Amazon.in", brand="Amazon.in") == "Running Shoes Online"
+    assert action_title_from("Amazon.in | Running Shoes Online", brand="Amazon.in") == "Running Shoes Online"
+
+
+def test_the_action_title_drops_a_part_that_is_only_the_site_root():
+    assert action_title_from("Karnataka news - thehindu", url="https://thehindu.com/news") == "Karnataka news"
+
+
+def test_the_action_title_falls_back_to_the_url_slug():
+    """A page whose title is useless still gets a readable label."""
+    assert action_title_from("Home", url="https://example.com/apply-for-a-passport") == "apply for a passport"
+
+
+def test_the_slug_fallback_skips_noise_segments():
+    assert action_title_from("", url="https://example.com/index.html") == ""
+    assert action_title_from("", url="https://example.com/news/2026/budget-2026.html") == "budget 2026"
 
 
 def test_the_action_title_skips_a_title_that_is_only_the_brand():

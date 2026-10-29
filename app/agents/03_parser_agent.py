@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 #: Hard ceiling on stored body text, ellipsis included.
 BODY_CHAR_CAP = 1000
 
-#: Ceilings for the two metadata fields.
+#: Ceilings for the card metadata fields. The brand sits on its own line now,
+#: so the title carries the whole subject rather than four words of it.
 BRAND_CHAR_CAP = 80
 CLEAN_URL_CHAR_CAP = 160
 ACTION_TITLE_CHAR_CAP = 120
@@ -164,9 +165,6 @@ EMPTY_TITLE_WORDS = frozenset(
      "official website", "click here", "page", "website"}
 )
 
-#: How many words an action title may run to.
-ACTION_TITLE_WORDS = 4
-
 #: Path segments that carry no meaning for a reader.
 NOISE_SEGMENTS = frozenset(
     {"index", "index.html", "index.php", "index.aspx", "default", "default.aspx",
@@ -245,39 +243,79 @@ def _split_title(title: str) -> list[str]:
     return [collapse(piece).strip(" .,:;·•»-") for piece in parts if collapse(piece)]
 
 
-def action_title_from(title: str, h1: str = "", brand: str = "") -> str:
-    """The 2-4 word statement of what the page is for.
+def _title_key(value: str) -> str:
+    """A comparable form of a name: lower case, letters and digits only.
 
-    An H1 wins when there is one, because it is what the page itself calls
-    itself. Otherwise the title is split on the usual stuffing separators and
-    the first part that is not just the site's own name is used.
+    "Amazon.in", "Amazon in" and "amazon.in" all collapse to "amazonin", so a
+    brand is recognised however the page punctuates it.
     """
-    heading = collapse(h1 or "")
-    if heading and 1 < len(heading.split()) <= 12 and heading.lower() not in EMPTY_TITLE_WORDS:
-        candidate = heading
-    else:
-        candidate = ""
-        parts = _split_title(collapse(title or ""))
-        for part in parts:
-            lowered = part.lower()
-            if lowered in EMPTY_TITLE_WORDS:
-                continue
-            if brand and lowered == brand.lower():
-                continue
-            if len(part.split()) < 2:
-                continue
-            candidate = part
-            break
-        if not candidate and parts:
-            candidate = parts[0]
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
 
-    if not candidate:
+
+def _is_brand_part(part: str, brand: str, root: str) -> bool:
+    key = _title_key(part)
+    if not key:
+        return True
+    for name in (brand, root):
+        other = _title_key(name)
+        if other and key == other:
+            return True
+    return False
+
+
+def slug_title(url: str) -> str:
+    """A readable title from the last meaningful path segment."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
         return ""
+    for raw in reversed([segment for segment in path.split("/") if segment]):
+        text = unquote(raw)
+        text = re.sub(r"\.(html?|php|aspx?|jsp|txt)$", "", text, flags=re.I)
+        text = collapse(text.replace("-", " ").replace("_", " "))
+        text = text.strip(" .,:;-")
+        if text and text.lower() not in NOISE_SEGMENTS:
+            return text[:ACTION_TITLE_CHAR_CAP]
+    return ""
 
-    words = candidate.split()
-    if len(words) > ACTION_TITLE_WORDS:
-        words = words[:ACTION_TITLE_WORDS]
-    return collapse(" ".join(words)).strip(" .,:;-")
+
+def action_title_from(
+    title: str,
+    h1: str = "",
+    brand: str = "",
+    og_title: str = "",
+    url: str = "",
+) -> str:
+    """The clean subject of the page, with the brand stripped out.
+
+    The card already prints the brand on its own line, so repeating it in the
+    title is noise. Candidates are tried in order — og:title, then the H1, then
+    the <title> — and each is split on the separators sites stuff keywords with.
+    Parts that are just the site's name are dropped, and what remains is the
+    subject. A page with nothing usable falls back to its URL slug.
+    """
+    root = domain_root(url) if url else ""
+    heading = collapse(h1 or "")
+    candidates = [
+        collapse(og_title or ""),
+        heading if len(heading) > 5 else "",
+        collapse(title or ""),
+    ]
+
+    for candidate in candidates:
+        if not candidate or candidate.lower() in EMPTY_TITLE_WORDS:
+            continue
+        parts = [part for part in _split_title(candidate)]
+        kept = [part for part in parts if not _is_brand_part(part, brand, root)]
+        if not kept:
+            continue
+        # The first surviving part is the subject; anything after it was the
+        # brand or keyword filler.
+        chosen = kept[0].strip(" .,:;-")
+        if len(chosen) > 1:
+            return chosen[:ACTION_TITLE_CHAR_CAP]
+
+    return slug_title(url)[:ACTION_TITLE_CHAR_CAP]
 
 
 def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
@@ -350,7 +388,9 @@ class ParserAgent:
         body_text = truncate_body(body_source.get_text(" "), self.body_char_cap)
         description = build_description(title, self._description(soup), body_text)
         links = self.extract_links(soup, url)
-        action_title = action_title_from(title, self._h1(soup), brand_name)
+        action_title = action_title_from(
+            title, self._h1(soup), brand_name, og_title=self._og_title(soup), url=url
+        )
         clean_url = clean_url_for(url)
 
         if not title and not body_text:
@@ -425,6 +465,17 @@ class ParserAgent:
         heading = soup.find("h1")
         if heading:
             return collapse(heading.get_text(" "))
+        return ""
+
+    @staticmethod
+    def _og_title(soup: BeautifulSoup) -> str:
+        """The publisher's own title for the page, when it sets one."""
+        for attribute, key in (("property", "og:title"), ("name", "twitter:title")):
+            meta = soup.find("meta", attrs={attribute: key})
+            if meta and meta.get("content"):
+                text = collapse(meta["content"])
+                if text:
+                    return text
         return ""
 
     @staticmethod
