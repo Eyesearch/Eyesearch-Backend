@@ -105,6 +105,34 @@ class SearchCache:
             return len(self._entries)
 
 
+#: The short upper-case code the card chip shows for each index category. The
+#: classifier's names are precise but long, and a chip has room for three or
+#: four letters.
+CATEGORY_CODES: dict[str, str] = {
+    "government": "GOV",
+    "education_exams": "EDU",
+    "news_media": "NEWS",
+    "jobs_careers": "JOBS",
+    "legal_judiciary": "LEGAL",
+    "business_finance": "FINANCE",
+    "tech_developer": "TECH",
+    "health_medical": "HEALTH",
+    "agriculture_rural": "AGRI",
+    "general_reference": "WEB",
+}
+
+#: The code shown when a row carries no category at all.
+FALLBACK_CATEGORY_CODE = "WEB"
+
+
+def category_code(category: str | None) -> str:
+    """The chip label for an index category, never empty."""
+    value = (category or "").strip().lower()
+    if not value:
+        return FALLBACK_CATEGORY_CODE
+    return CATEGORY_CODES.get(value, value.upper())
+
+
 @dataclass
 class SearchResult:
     """One result card."""
@@ -122,6 +150,8 @@ class SearchResult:
     #: The publisher's own name, and a breadcrumb instead of a bare URL.
     brand_name: str = ""
     clean_url: str = ""
+    #: Short upper-case category code, e.g. GOV or TECH.
+    category: str = FALLBACK_CATEGORY_CODE
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +167,7 @@ class SearchResult:
             "score": self.score,
             "brand_name": self.brand_name,
             "clean_url": self.clean_url,
+            "category": self.category,
         }
 
 
@@ -265,6 +296,7 @@ def to_result(hit: SearchHit) -> SearchResult:
         score=hit.score,
         brand_name=hit.brand_name or "",
         clean_url=hit.clean_url or "",
+        category=category_code(hit.category),
     )
 
 
@@ -425,9 +457,13 @@ class SearchService:
         if category is None or not category.strip():
             return None
         value = category.strip().lower()
-        if value not in CATEGORIES:
-            raise ValueError(f"unknown category '{category}'")
-        return value
+        if value in CATEGORIES:
+            return value
+        # The UI shows GOV/TECH/..., so accept what the user just read on a chip.
+        for name, code in CATEGORY_CODES.items():
+            if value == code.lower():
+                return name
+        raise ValueError(f"unknown category '{category}'")
 
     @staticmethod
     def normalise_language(language: str | None) -> str | None:

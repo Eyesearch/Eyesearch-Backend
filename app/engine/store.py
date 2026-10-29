@@ -68,6 +68,7 @@ class PageDocument:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    category: str = ""
 
     def as_row(self) -> tuple[Any, ...]:
         """The twelve bound values the page insert expects, in SQL order.
@@ -131,6 +132,7 @@ class SearchHit:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    category: str = ""
 
     @property
     def snippet(self) -> str:
@@ -858,7 +860,10 @@ class IndexStore:
             f"(-ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?))) "
             "AS lexical_score, "
             f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
-            f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit "
+            f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit, "
+            # Appended last on purpose: the row mapper reads by position, and
+            # inserting it earlier would shift every index after it.
+            "p.category "
             "FROM pages p "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
             f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
@@ -912,7 +917,7 @@ class IndexStore:
     def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
         # Column order, from the SELECT in `search`: 0 page_id, 1 url, 2 title,
         # 3 description, 4 body_text, 5 brand_name, 6 clean_url, 7 action_title,
-        # 8 lexical_score, 9 title_hit, 10 auth_hit.
+        # 8 lexical_score, 9 title_hit, 10 auth_hit, 11 category.
         title_hit = int(row[9] or 0)
         auth_hit = int(row[10] or 0)
         boosted = (
@@ -933,6 +938,7 @@ class IndexStore:
             brand_name=str(row[5] or ""),
             clean_url=str(row[6] or ""),
             action_title=str(row[7] or ""),
+            category=str(row[11] or ""),
         )
 
     @staticmethod
