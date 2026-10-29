@@ -30,7 +30,7 @@ services:
       DATABASE_URL: postgresql://eyesearch:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:5432/eyesearch
       ALLOW_LOCAL_DB: "false"
       # Set to "false" to run the API only, with no crawling at all.
-      CRAWLER_ENABLED: "${CRAWLER_ENABLED:-true}"
+      CRAWLER_ENABLED: "${CRAWLER_ENABLED:-false}"
       REVALIDATION_ENABLED: "${REVALIDATION_ENABLED:-true}"
 
     # Cap the log growth: the crawler is chatty and this VM's disk is also

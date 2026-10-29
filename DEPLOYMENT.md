@@ -11,7 +11,7 @@ from the environment by name, so:
 
 | Variable | Default | Effect when `false` |
 |---|---|---|
-| `CRAWLER_ENABLED` | `true` | the crawl worker is never started; the API keeps serving |
+| `CRAWLER_ENABLED` | `false` | the crawl worker is never started; the API keeps serving |
 | `REVALIDATION_ENABLED` | `true` | the re-crawl loop is never started |
 
 Both are checked in `app/indexer/scheduler.py`, which simply does not create the
@@ -21,7 +21,7 @@ you can confirm it without guessing:
 
     effective crawl settings: enabled=False batch_size=... concurrency=...
 
-To pause only crawling but keep serving, set `CRAWLER_ENABLED=false` in `.env` and
+Crawling is off unless you ask for it. To turn it on, set `CRAWLER_ENABLED=true` in `.env` and
 `docker compose up -d` again.
 
 ## Deploy

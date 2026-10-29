@@ -126,7 +126,10 @@ class Settings(BaseSettings):
     # batch_size x crawl_max_body_bytes. Every value here is overridable from
     # the environment, so a smaller instance can be dialled back without a code
     # change.
-    crawler_enabled: bool = True
+    #: Off by default on purpose. A deployment should have to say yes to
+    #: crawling; defaulting to on means a fresh deploy starts fetching before
+    #: anyone has decided it should, which is the expensive way to find out.
+    crawler_enabled: bool = False
     #: Throughput is (batch_size / per-batch database floor), so this scales the
     #: crawl directly. It is also the memory ceiling: the fetcher holds every
     #: body in a batch before parsing, so peak ~= batch_size x max_body_bytes.
