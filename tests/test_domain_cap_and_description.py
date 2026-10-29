@@ -267,7 +267,7 @@ async def test_skipped_rows_are_never_rearmed(store, client, settings):
     await client.execute(
         "INSERT INTO crawl_queue (url, domain, status, processed_at) "
         "VALUES ('https://karnataka.gov.in/x', 'karnataka.gov.in', 'skipped', "
-        "datetime('now', '-30 days'))"
+        "now() - interval '30 days')"
     )
 
     rearmed = await store.rearm_processed(limit=50, cooldown_seconds=0)

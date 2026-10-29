@@ -27,7 +27,7 @@ async def _queue(client, url: str, domain: str = "karnataka.gov.in") -> int:
         "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, 'pending')",
         (url, domain),
     )
-    queued = await client.execute("SELECT rowid FROM crawl_queue WHERE url = ?", (url,))
+    queued = await client.execute("SELECT id FROM crawl_queue WHERE url = ?", (url,))
     return int(queued.scalar(0) or result.rows_affected)
 
 
@@ -82,7 +82,7 @@ async def test_a_repeated_url_is_skipped_and_reported_as_a_duplicate(store, clie
     first = await store.persist_batch([make_document(url=url, digest="digest-first")], [rowid])
 
     # The frontier re-arms a finished domain, so the same URL is offered again.
-    await client.execute("UPDATE crawl_queue SET status = 'pending' WHERE rowid = ?", (rowid,))
+    await client.execute("UPDATE crawl_queue SET status = 'pending' WHERE id = ?", (rowid,))
     second = await store.persist_batch(
         [make_document(url=url, digest="digest-second")], [rowid]
     )
@@ -120,7 +120,7 @@ async def test_identical_body_text_under_another_url_is_rejected(store, client):
 class _ExplodingClient:
     """Fails the batch at the page insert, after the transaction opened."""
 
-    def __init__(self, inner, marker: str = "INSERT OR IGNORE INTO pages") -> None:
+    def __init__(self, inner, marker: str = "INSERT INTO pages") -> None:
         self.inner = inner
         self.marker = marker
 
@@ -160,7 +160,7 @@ async def test_a_failed_queue_row_is_parked_rather_than_left_pending(store, clie
 
     assert failed == 1
     assert await _queue_status(client, url) == "failed"
-    retries = await client.execute("SELECT retry_count FROM crawl_queue WHERE rowid = ?", (rowid,))
+    retries = await client.execute("SELECT retry_count FROM crawl_queue WHERE id = ?", (rowid,))
     assert int(retries.scalar(0)) == 1
 
 

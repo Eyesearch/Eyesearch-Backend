@@ -361,7 +361,9 @@ async def test_a_failed_normalisation_rolls_back(client):
 # ---------------------------------------------------------------------------
 
 
-async def test_a_stale_fts_index_is_rebuilt(client):
+async def test_a_missing_search_vector_is_backfilled(client):
+    """PostgreSQL keeps search_vector in a trigger, so the failure mode is a row
+    that predates the trigger rather than a separate index that drifted."""
     from app.database import resync_fts
 
     await client.batch(
@@ -374,44 +376,48 @@ async def test_a_stale_fts_index_is_rebuilt(client):
             for i in range(3)
         ]
     )
-    # Wipe the index without touching the content table.
-    await client.execute("INSERT INTO page_fts(page_fts) VALUES('delete-all')")
-    before = await client.execute("SELECT COUNT(*) FROM page_fts_docsize")
+    # Simulate rows written before the trigger existed.
+    await client.execute("UPDATE pages SET search_vector = NULL")
+    before = await client.execute(
+        "SELECT COUNT(*) FROM pages WHERE search_vector IS NOT NULL"
+    )
     assert int(before.scalar(0)) == 0
 
     rebuilt = await resync_fts(client)
 
     assert rebuilt is True
-    after = await client.execute("SELECT COUNT(*) FROM page_fts_docsize")
+    after = await client.execute(
+        "SELECT COUNT(*) FROM pages WHERE search_vector IS NOT NULL"
+    )
     assert int(after.scalar(0)) == 3
 
 
-async def test_a_stale_index_breaks_updates_and_the_rebuild_fixes_it(client):
+async def test_a_missing_vector_makes_a_page_unfindable_until_backfilled(client):
     from app.database import resync_fts
-    from app.libsql_http import LibsqlError
 
     await client.execute(
         "INSERT INTO pages (site_id, url, title, description, body_text, digest) "
         "VALUES (NULL, 'https://a.gov.in/1', 'Karnataka', 'D', 'B', 'dg1')"
     )
-    await client.execute("INSERT INTO page_fts(page_fts) VALUES('delete-all')")
+    await client.execute("UPDATE pages SET search_vector = NULL")
 
-    # This is the failure that motivated the rebuild.
-    try:
-        await client.execute("UPDATE pages SET title = 'Changed' WHERE url = 'https://a.gov.in/1'")
-        raised = False
-    except LibsqlError:
-        raised = True
-    assert raised is True
+    # This is the failure the rebuild exists for: the row is there but invisible.
+    missing = await client.execute(
+        "SELECT COUNT(*) FROM pages "
+        "WHERE search_vector @@ to_tsquery('simple', 'karnataka')"
+    )
+    assert int(missing.scalar(0)) == 0
 
     await resync_fts(client)
 
-    await client.execute("UPDATE pages SET title = 'Changed' WHERE url = 'https://a.gov.in/1'")
-    found = await client.execute("SELECT COUNT(*) FROM page_fts WHERE page_fts MATCH 'changed'")
+    found = await client.execute(
+        "SELECT COUNT(*) FROM pages "
+        "WHERE search_vector @@ to_tsquery('simple', 'karnataka')"
+    )
     assert int(found.scalar(0)) == 1
 
 
-async def test_a_synced_index_is_left_alone(client):
+async def test_a_synced_database_needs_no_backfill(client):
     from app.database import resync_fts
 
     await client.execute(
@@ -422,7 +428,7 @@ async def test_a_synced_index_is_left_alone(client):
     assert await resync_fts(client) is False
 
 
-async def test_an_empty_database_needs_no_rebuild(client):
+async def test_an_empty_database_needs_no_backfill(client):
     from app.database import resync_fts
 
     assert await resync_fts(client) is False

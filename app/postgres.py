@@ -28,7 +28,19 @@ from app.libsql_http import DatabaseUnavailable, LibsqlError, ResultSet, Stateme
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["PostgresClient", "to_pg_placeholders"]
+__all__ = ["PostgresClient", "is_transaction_control", "to_pg_placeholders"]
+
+
+#: Transaction control the store issues for SQLite. PostgreSQL rejects
+#: `BEGIN IMMEDIATE`, and this client already wraps a batch in a transaction, so
+#: these are dropped rather than forwarded.
+_TRANSACTION_CONTROL = frozenset(
+    {"BEGIN", "BEGIN IMMEDIATE", "BEGIN TRANSACTION", "COMMIT", "END", "ROLLBACK"}
+)
+
+
+def is_transaction_control(sql: str) -> bool:
+    return " ".join(sql.strip().split()).rstrip(";").upper() in _TRANSACTION_CONTROL
 
 
 def to_pg_placeholders(sql: str) -> str:
@@ -101,6 +113,10 @@ class PostgresClient:
                 # One transaction for the whole batch, as the SQLite client did.
                 async with connection.transaction():
                     for sql, args in statements:
+                        if is_transaction_control(sql):
+                            # The surrounding transaction already provides it.
+                            results.append(ResultSet())
+                            continue
                         results.append(await self._run(connection, sql, args))
         except Exception as error:
             raise self._translate(error) from error

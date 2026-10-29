@@ -404,6 +404,8 @@ class TursoHttpClient:
 class LocalSqliteClient:
     """The same interface over the standard library, for local runs and tests."""
 
+    dialect = "sqlite"
+
     def __init__(self, path: str = ":memory:") -> None:
         self.path = path
         self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
