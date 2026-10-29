@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,18 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
+
     # --- Database -----------------------------------------------------------
+    #: Preferred connection string, read from DATABASE_URL.
+    #:   postgresql://user:pass@host:5432/db  -> PostgreSQL (PostgresClient)
+    #:   libsql://db-org.turso.io            -> Turso (TursoHttpClient)
+    #:   file:./local.db                     -> local SQLite (development only)
+    #: The Turso fields below are still honoured as a fallback so an existing
+    #: deployment keeps booting while it is migrated.
+    database_dsn: str = Field(
+        default="",
+        validation_alias=AliasChoices("DATABASE_URL", "DATABASE_DSN"),
+    )
     turso_db_url: str = ""
     turso_database_url: str = ""
     turso_auth_token: str = ""
@@ -167,8 +179,22 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """The configured database URL, whichever alias the deployment used."""
-        return (self.turso_db_url or self.turso_database_url or "").strip()
+        """The configured database URL, whichever alias the deployment used.
+
+        `DATABASE_URL` wins, then the Turso fields, so moving to PostgreSQL is a
+        change of one environment variable rather than a code change.
+        """
+        return (
+            self.database_dsn
+            or self.turso_db_url
+            or self.turso_database_url
+            or ""
+        ).strip()
+
+    @property
+    def is_postgres(self) -> bool:
+        url = self.database_url.lower()
+        return url.startswith("postgresql://") or url.startswith("postgres://")
 
     @property
     def is_production(self) -> bool:

@@ -102,11 +102,11 @@ async def test_the_batch_is_stable_across_calls(store, client):
 async def test_rearm_can_be_limited_to_named_domains(store, client):
     await client.execute(
         "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
-        "('https://www.thehindu.com/a', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+        "('https://www.thehindu.com/a', 'thehindu.com', 'processed', now() - interval '7 hours')"
     )
     await client.execute(
         "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
-        "('https://randomshop.com/a', 'randomshop.com', 'processed', datetime('now','-7 hours'))"
+        "('https://randomshop.com/a', 'randomshop.com', 'processed', now() - interval '7 hours')"
     )
 
     rearmed = await store.rearm_processed(limit=10, cooldown_seconds=0, domains=["thehindu.com"])
@@ -129,7 +129,7 @@ async def test_refill_pulls_authoritative_domains_back_in(store, client, setting
     await _queue(client, [("https://randomshop.com/a", "randomshop.com")])
     await client.execute(
         "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
-        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', now() - interval '7 hours')"
     )
     frontier = FrontierAgent(store, settings)
 
@@ -143,7 +143,7 @@ async def test_refill_leaves_a_healthy_queue_alone(store, client, settings):
     await _queue(client, [("https://karnataka.gov.in/a", "karnataka.gov.in")])
     await client.execute(
         "INSERT INTO crawl_queue (url, domain, status, processed_at) VALUES "
-        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', datetime('now','-7 hours'))"
+        "('https://www.thehindu.com/news/', 'thehindu.com', 'processed', now() - interval '7 hours')"
     )
     frontier = FrontierAgent(store, settings)
 
@@ -342,10 +342,10 @@ async def test_pruning_removes_only_old_terminal_rows(client):
     await store.enqueue_urls(
         [(f"https://a.gov.in/{i}", "a.gov.in") for i in range(4)]
     )
-    await client.execute("UPDATE crawl_queue SET status = 'skipped' WHERE rowid <= 2")
-    await client.execute("UPDATE crawl_queue SET status = 'failed' WHERE rowid = 3")
+    await client.execute("UPDATE crawl_queue SET status = 'skipped' WHERE id <= 2")
+    await client.execute("UPDATE crawl_queue SET status = 'failed' WHERE id = 3")
     await client.execute(
-        "UPDATE crawl_queue SET processed_at = datetime('now', '-90 days') WHERE rowid <= 3"
+        "UPDATE crawl_queue SET processed_at = now() - interval '90 days' WHERE id <= 3"
     )
 
     pruned = await store.prune_queue(retain_days=30, limit=100)
@@ -362,7 +362,7 @@ async def test_pruning_keeps_recent_terminal_rows(client):
     store = IndexStore(client, Settings(environment="test"))
     await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
     await client.execute("UPDATE crawl_queue SET status = 'skipped'")
-    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now')")
+    await client.execute("UPDATE crawl_queue SET processed_at = now()")
 
     assert await store.prune_queue(retain_days=30, limit=100) == 0
 
@@ -375,7 +375,7 @@ async def test_pruning_is_bounded_by_the_limit(client):
         [(f"https://a.gov.in/{i}", "a.gov.in") for i in range(20)]
     )
     await client.execute("UPDATE crawl_queue SET status = 'skipped'")
-    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now', '-90 days')")
+    await client.execute("UPDATE crawl_queue SET processed_at = now() - interval '90 days'")
 
     assert await store.prune_queue(retain_days=30, limit=5) == 5
     remaining = await client.execute("SELECT COUNT(*) FROM crawl_queue")
@@ -388,6 +388,6 @@ async def test_pruning_can_be_disabled(client):
     store = IndexStore(client, Settings(environment="test"))
     await store.enqueue_urls([("https://a.gov.in/1", "a.gov.in")])
     await client.execute("UPDATE crawl_queue SET status = 'skipped'")
-    await client.execute("UPDATE crawl_queue SET processed_at = datetime('now', '-900 days')")
+    await client.execute("UPDATE crawl_queue SET processed_at = now() - interval '900 days'")
 
     assert await store.prune_queue(retain_days=0, limit=100) == 0

@@ -200,7 +200,7 @@ async def test_a_fetched_page_queues_its_own_links(store, client):
         assert outcome.discovered >= 2
 
         pending = await client.execute(
-            "SELECT url, status FROM crawl_queue WHERE status = 'pending' ORDER BY rowid"
+            "SELECT url, status FROM crawl_queue WHERE status = 'pending' ORDER BY id"
         )
         queued = {str(row[0]) for row in pending.rows}
 
@@ -241,8 +241,10 @@ async def _mark_all_seeds_crawled(client, *, hours_ago: int) -> None:
     for seed in SEED_URLS:
         domain = seed.split("//", 1)[1].split("/", 1)[0].replace("www.", "")
         await client.execute(
-            "INSERT OR REPLACE INTO crawl_queue (url, domain, status, processed_at) "
-            f"VALUES (?, ?, 'processed', datetime('now', '-{hours_ago} hours'))",
+            "INSERT INTO crawl_queue (url, domain, status, processed_at) "
+            f"VALUES (?, ?, 'processed', now() - interval '{hours_ago} hours') "
+            "ON CONFLICT (url) DO UPDATE SET status = excluded.status, "
+            "processed_at = excluded.processed_at",
             (seed, domain),
         )
 
@@ -282,15 +284,21 @@ async def test_refill_does_not_rearm_before_the_cooldown(store, client, settings
 async def test_rearm_takes_the_stalest_rows_first(store, client, settings):
     await _mark_all_seeds_crawled(client, hours_ago=7)
     await client.execute(
-        "UPDATE crawl_queue SET processed_at = datetime('now', '-30 hours') WHERE url = ?",
+        "UPDATE crawl_queue SET processed_at = now() - interval '30 hours' WHERE url = ?",
         (SEED_URLS[0],),
     )
+    # Re-arm exactly one row, so "which came first" is observable rather than a
+    # tie between every re-armed row, all of which end up with a NULL timestamp.
+    settings = settings.model_copy(update={"rearm_batch_size": 1})
     frontier = FrontierAgent(store, settings)
 
     await frontier.refill(minimum=1)
 
     first = await client.execute(
-        "SELECT url FROM crawl_queue WHERE status = 'pending' ORDER BY processed_at IS NULL DESC LIMIT 1"
+        # The stalest rearmed row: PostgreSQL orders booleans the other way
+        # round from SQLite's 0/1, so say it explicitly.
+        "SELECT url FROM crawl_queue WHERE status = 'pending' "
+        "ORDER BY processed_at ASC NULLS LAST LIMIT 1"
     )
     assert str(first.scalar("")) == SEED_URLS[0]
 
@@ -300,11 +308,11 @@ async def test_a_crawled_url_is_stamped_with_its_processed_time(store, client):
         "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, 'pending')",
         (SEED, "karnataka.gov.in"),
     )
-    rowid = int((await client.execute("SELECT rowid FROM crawl_queue WHERE url = ?", (SEED,))).scalar(0))
+    rowid = int((await client.execute("SELECT id FROM crawl_queue WHERE url = ?", (SEED,))).scalar(0))
 
     await store.persist_batch([], [rowid])
 
-    stamped = await client.execute("SELECT processed_at FROM crawl_queue WHERE rowid = ?", (rowid,))
+    stamped = await client.execute("SELECT processed_at FROM crawl_queue WHERE id = ?", (rowid,))
     assert stamped.scalar(None) is not None
 
 

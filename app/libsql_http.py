@@ -404,6 +404,8 @@ class TursoHttpClient:
 class LocalSqliteClient:
     """The same interface over the standard library, for local runs and tests."""
 
+    dialect = "sqlite"
+
     def __init__(self, path: str = ":memory:") -> None:
         self.path = path
         self._connection = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
@@ -454,6 +456,14 @@ def build_client(settings: Settings | None = None) -> LibsqlClient:
     settings = settings or get_settings()
     url = settings.database_url
 
+    if settings.is_postgres:
+        # Imported here: the PostgreSQL driver is an optional dependency, and a
+        # Turso or SQLite deployment should not need psycopg installed.
+        from app.postgres import PostgresClient
+
+        logger.info("Connected to PostgreSQL: %s", _redact_dsn(url))
+        return PostgresClient(url)
+
     if not url or url.startswith("file:"):
         if settings.is_production and not settings.allow_local_db:
             raise DatabaseUnavailable(
@@ -481,6 +491,18 @@ def build_client(settings: Settings | None = None) -> LibsqlClient:
         connect_timeout=settings.turso_connect_timeout_seconds,
         read_timeout=settings.turso_read_timeout_seconds,
     )
+
+
+def _redact_dsn(url: str) -> str:
+    """A DSN safe to log: the password removed, everything else kept."""
+    if "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    if "@" not in rest:
+        return url
+    credentials, host = rest.rsplit("@", 1)
+    user = credentials.split(":", 1)[0]
+    return f"{scheme}://{user}:***@{host}"
 
 
 def statements_from_rows(rows: Iterable[Sequence[Any]]) -> list[Statement]:

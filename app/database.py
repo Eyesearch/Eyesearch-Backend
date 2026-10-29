@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from app.libsql_http import LibsqlClient, LibsqlError, ResultSet
+from app.schema_postgres import POSTGRES_SCHEMA_STATEMENTS
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +147,23 @@ class LegacySchemaError(RuntimeError):
     """The database holds a pre-rebuild schema and dropping it was not allowed."""
 
 
+def _dialect(client: LibsqlClient) -> str:
+    """Which SQL dialect this client speaks."""
+    return getattr(client, "dialect", "sqlite")
+
+
 async def _table_columns(client: LibsqlClient, table: str) -> set[str]:
     """The column names of a table, or an empty set when it does not exist."""
+    if _dialect(client) == "postgres":
+        try:
+            result = await client.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = ?",
+                (table,),
+            )
+        except LibsqlError:
+            return set()
+        return {str(row[0]) for row in result.rows}
     try:
         result = await client.execute(f"PRAGMA table_info({table})")
     except LibsqlError:
@@ -247,6 +263,21 @@ async def resync_fts(client: LibsqlClient) -> bool:
     indexed documents. If the shadow table is unavailable, the check is skipped
     rather than guessed at.
     """
+    if _dialect(client) == "postgres":
+        # The trigger keeps search_vector in step on every write, so there is no
+        # separate index to drift. Touching the title column re-fires it for any
+        # row that predates the trigger.
+        try:
+            # Re-firing the trigger for rows that predate it. `rows_affected`
+            # tells the caller whether anything actually needed doing.
+            result = await client.execute(
+                "UPDATE pages SET title = title WHERE search_vector IS NULL"
+            )
+        except LibsqlError as error:
+            logger.debug("could not backfill search_vector: %s", error)
+            return False
+        return int(result.rows_affected or 0) > 0
+
     try:
         pages = await client.execute("SELECT COUNT(*) FROM pages")
         indexed = await client.execute("SELECT COUNT(*) FROM page_fts_docsize")
@@ -390,9 +421,13 @@ async def initialize_database(
     if migrate:
         await migrate_legacy_schema(client, allow_drop=allow_legacy_drop)
 
-    await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
-    await ensure_columns(client)
-    await client.batch([(sql, ()) for sql in POST_COLUMN_STATEMENTS])
+    if _dialect(client) == "postgres":
+        await client.batch([(sql, ()) for sql in POSTGRES_SCHEMA_STATEMENTS])
+        await ensure_columns(client)
+    else:
+        await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
+        await ensure_columns(client)
+        await client.batch([(sql, ()) for sql in POST_COLUMN_STATEMENTS])
     # Before anything updates `pages`: a stale index makes every update fail.
     await resync_fts(client)
     await normalize_legacy_subdomains(client)

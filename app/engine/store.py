@@ -21,6 +21,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
+from app.database import _dialect
+from app.schema_postgres import SEARCH_CONFIG
 from app.engine.config import Settings, get_settings
 from app.libsql_http import LibsqlClient, LibsqlError
 
@@ -193,6 +195,25 @@ def build_match_query(query: str, *, prefix: bool = False) -> str:
     return " AND ".join(f'"{token}"' for token in tokens)
 
 
+def build_tsquery(query: str, *, prefix: bool = False) -> str:
+    """Turn a user query into a PostgreSQL `to_tsquery` expression.
+
+    Tokens are reduced to word characters first: tsquery treats `&`, `|`, `!`,
+    `(`, `)`, `:` and `*` as syntax, and a stray one is a syntax error rather
+    than a search for that character.
+    """
+    tokens = []
+    for token in fts_tokens(query):
+        cleaned = "".join(ch for ch in token if ch.isalnum() or ch == "_")
+        if cleaned:
+            tokens.append(cleaned)
+    if not tokens:
+        return ""
+    if prefix:
+        return " | ".join(f"{token}:*" for token in tokens)
+    return " & ".join(tokens)
+
+
 def passage_around_match(text: str, tokens: Sequence[str], window: int = SNIPPET_CHAR_CAP) -> str:
     """The window of `text` around the first query term it contains.
 
@@ -331,11 +352,15 @@ class IndexStore:
         for document in documents:
             statements.append(
                 (
-                    "INSERT OR IGNORE INTO pages "
+                    "INSERT INTO pages "
                     "(site_id, url, title, description, body_text, quality_score, digest, "
                     "category, language, indexed_at) "
                     "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, "
-                    "?, ?, CURRENT_TIMESTAMP)",
+                    "?, ?, CURRENT_TIMESTAMP) "
+                    # SQLite's INSERT OR IGNORE ignored any conflict; bare
+                    # ON CONFLICT DO NOTHING keeps that behaviour for both the
+                    # url and the digest unique index.
+                    "ON CONFLICT DO NOTHING",
                     document.as_row(),
                 )
             )
@@ -344,7 +369,7 @@ class IndexStore:
             statements.append(
                 (
                     "UPDATE crawl_queue SET status = 'processed', "
-                    "processed_at = CURRENT_TIMESTAMP WHERE rowid = ?",
+                    "processed_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (rowid,),
                 )
             )
@@ -394,7 +419,7 @@ class IndexStore:
 
         Bounded by `limit` so one call can never be a huge delete. `created_at`
         and `processed_at` are written by CURRENT_TIMESTAMP, so they compare
-        directly against `datetime('now', ...)` as strings.
+        directly against `now() + interval`, since callers pass a signed offset.
 
         Pruned URLs may be discovered and crawled again later; that is the
         intended trade for keeping the queue from growing without limit.
@@ -402,10 +427,10 @@ class IndexStore:
         if retain_days <= 0 or limit <= 0:
             return 0
         result = await self._client.execute(
-            "DELETE FROM crawl_queue WHERE rowid IN ("
-            "  SELECT rowid FROM crawl_queue"
+            "DELETE FROM crawl_queue WHERE id IN ("
+            "  SELECT id FROM crawl_queue"
             "  WHERE status IN ('skipped', 'failed')"
-            "    AND COALESCE(processed_at, created_at) < datetime('now', ?)"
+            "    AND COALESCE(processed_at, created_at) < now() + ?::interval"
             "  LIMIT ?)",
             (f"-{int(retain_days)} days", int(limit)),
         )
@@ -476,7 +501,7 @@ class IndexStore:
             return 0
         results = await self._client.batch(
             [
-                ("UPDATE crawl_queue SET status = 'skipped' WHERE rowid = ?", (rowid,))
+                ("UPDATE crawl_queue SET status = 'skipped' WHERE id = ?", (rowid,))
                 for rowid in queue_ids
             ]
         )
@@ -498,13 +523,13 @@ class IndexStore:
         statements: list[tuple[str, Sequence[Any]]] = [
             (
                 "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1 "
-                "WHERE rowid = ?",
+                "WHERE id = ?",
                 (rowid,),
             )
             for rowid in failed_ids
         ]
         statements.extend(
-            ("UPDATE crawl_queue SET status = 'skipped' WHERE rowid = ?", (rowid,))
+            ("UPDATE crawl_queue SET status = 'skipped' WHERE id = ?", (rowid,))
             for rowid in skipped_ids
         )
         if not statements:
@@ -522,7 +547,7 @@ class IndexStore:
         statements: list[tuple[str, Sequence[Any]]] = [
             (
                 "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1, "
-                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE rowid = ?",
+                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE id = ?",
                 (reason or "permanent_failure", rowid),
             )
             for rowid in queue_ids
@@ -546,7 +571,7 @@ class IndexStore:
         losing the whole batch's discoveries. Chunking costs one extra request
         per fifty URLs against the rate limiter, which is far cheaper.
 
-        Safe to split: these are INSERT OR IGNORE, so a retry or a partial run
+        Safe to split: these are ON CONFLICT DO NOTHING, so a retry or a partial run
         cannot duplicate a row.
         """
         pairs = list(urls)
@@ -562,8 +587,8 @@ class IndexStore:
             results = await self._client.batch(
                 [
                     (
-                        "INSERT OR IGNORE INTO crawl_queue (url, domain, status) "
-                        "VALUES (?, ?, 'pending')",
+                        "INSERT INTO crawl_queue (url, domain, status) "
+                        "VALUES (?, ?, 'pending') ON CONFLICT (url) DO NOTHING",
                         (url, domain),
                     )
                     for url, domain in chunk
@@ -602,10 +627,10 @@ class IndexStore:
 
         result = await self._client.execute(
             "UPDATE crawl_queue SET status = 'pending', processed_at = NULL "
-            "WHERE rowid IN ("
-            "  SELECT rowid FROM crawl_queue"
+            "WHERE id IN ("
+            "  SELECT id FROM crawl_queue"
             "  WHERE status = 'processed'"
-            "    AND (processed_at IS NULL OR processed_at <= datetime('now', ?))"
+            "    AND (processed_at IS NULL OR processed_at <= now() + ?::interval)"
             "    AND domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id"
             "      GROUP BY s.domain HAVING COUNT(*) >= ?"
@@ -632,9 +657,9 @@ class IndexStore:
         """
         result = await self._client.execute(
             "UPDATE crawl_queue SET status = 'pending', processed_at = NULL, last_error = NULL "
-            "WHERE rowid IN ("
-            " SELECT rowid FROM crawl_queue WHERE status = 'failed' AND retry_count <= ? "
-            " AND processed_at IS NOT NULL AND processed_at <= datetime('now', ?) "
+            "WHERE id IN ("
+            " SELECT id FROM crawl_queue WHERE status = 'failed' AND retry_count <= ? "
+            " AND processed_at IS NOT NULL AND processed_at <= now() + ?::interval "
             " AND (last_error = 'timeout' OR last_error LIKE 'http_error:%' "
             " OR last_error LIKE 'http_status:5%') "
             " AND domain NOT IN ("
@@ -655,7 +680,7 @@ class IndexStore:
         results = await self._client.batch([
             (
                 "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1, "
-                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE rowid = ?",
+                "processed_at = CURRENT_TIMESTAMP, last_error = ? WHERE id = ?",
                 (reason, rowid),
             )
             for rowid in queue_ids
@@ -695,7 +720,7 @@ class IndexStore:
     async def pending_batch(self, limit: int = 10) -> list[QueuedUrl]:
         """The next `limit` pending URLs, interleaved across domains.
 
-        A plain `ORDER BY rowid` hands the whole batch to whichever domain was
+        A plain `ORDER BY id` hands the whole batch to whichever domain was
         queued first: one portal with 40 pending URLs takes all ten slots and
         every other domain waits behind it. Numbering the rows per domain and
         ordering by that number gives round-robin — one URL from each domain,
@@ -715,8 +740,8 @@ class IndexStore:
         cap = self._settings.max_pages_per_domain
         result = await self._client.execute(
             "SELECT id, url, domain, retry_count FROM ("
-            "  SELECT cq.rowid AS id, cq.url, cq.domain, cq.retry_count,"
-            "         ROW_NUMBER() OVER (PARTITION BY cq.domain ORDER BY cq.rowid ASC) AS rn "
+            "  SELECT cq.id AS id, cq.url, cq.domain, cq.retry_count,"
+            "         ROW_NUMBER() OVER (PARTITION BY cq.domain ORDER BY cq.id ASC) AS rn "
             "  FROM crawl_queue cq WHERE cq.status = 'pending'"
             "    AND cq.domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
@@ -771,7 +796,6 @@ class IndexStore:
         if not match:
             return []
 
-        weights = ", ".join(str(weight) for weight in BM25_WEIGHTS)
 
         filters = ""
         extra: list[Any] = []
@@ -782,14 +806,16 @@ class IndexStore:
             filters += " AND p.language = ?"
             extra.append(language)
 
-        # Title boost. Bound parameters appear in SQL order, so the title
-        # terms (in the SELECT) are bound before the MATCH term (in the WHERE).
+        # Title boost. Bound parameters appear in SQL order, so the rank query
+        # (in the SELECT) is bound before the match query (in the WHERE).
         tokens = fts_tokens(query)
         title_tokens = tokens[:MAX_TITLE_TOKENS]
         if title_tokens:
-            title_terms = " OR ".join("instr(lower(p.title), ?) > 0" for _ in title_tokens)
+            title_terms = " OR ".join(
+                "strpos(lower(coalesce(p.title, '')), ?) > 0" for _ in title_tokens
+            )
         else:
-            title_terms = "0"
+            title_terms = "false"
 
         # Authority is read from `sites.domain`, the registrable domain the page
         # was actually indexed under — not from `p.url LIKE '%.gov.in/%'`, which
@@ -799,20 +825,35 @@ class IndexStore:
             f"s.domain LIKE '%{suffix}'" for suffix in AUTHORITY_SUFFIXES
         )
 
+        # ts_rank is higher-is-better; bm25 was negative and lower-is-better.
+        # Negating it here keeps the Python scoring, the boosts and the ORDER BY
+        # exactly as they were, so none of the ranking maths had to change.
+        rank_query = build_tsquery(query)
+        match_query = build_tsquery(query, prefix=True) or rank_query
+        if not rank_query:
+            return []
+
+        # Wrapped in a subquery: PostgreSQL exposes an output alias in ORDER BY
+        # only as a bare reference, not inside an expression, and the ranking
+        # here is `alias - boost * flag`.
         sql = (
+            "SELECT * FROM ("
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
-            f"bm25(page_fts, {weights}) AS lexical_score, "
+            f"(-ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?))) "
+            "AS lexical_score, "
             f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
             f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit "
-            "FROM page_fts JOIN pages p ON p.page_id = page_fts.rowid "
+            "FROM pages p "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
-            f"WHERE page_fts MATCH ?{filters} "
+            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
+            ") ranked "
             "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit) ASC "
             "LIMIT ? OFFSET ?"
         )
         args = (
+            rank_query,
             *title_tokens,
-            match,
+            match_query,
             *extra,
             TITLE_MATCH_BOOST,
             AUTHORITY_DOMAIN_BOOST,
@@ -829,14 +870,15 @@ class IndexStore:
 
         # A strict AND is right for precision and wrong for a half-remembered
         # query. Fall back to OR rather than answering "nothing found".
-        loose = build_match_query(query, prefix=True)
-        if loose and loose != match:
+        loose = build_tsquery(query, prefix=True)
+        if loose and loose != match_query:
             # Same SQL, same bind order: the title terms, the MATCH term, the
             # filters, then both boosts. Leaving a boost out here is a bind-count
             # mismatch, and it only shows up on queries the strict AND misses.
             result = await self._client.execute(
                 sql,
                 (
+                    rank_query,
                     *title_tokens,
                     loose,
                     *extra,
@@ -891,13 +933,16 @@ class IndexStore:
 
     async def suggest(self, query: str, limit: int = 6) -> list[str]:
         """Title completions for the search bar."""
-        match = build_match_query(query, prefix=True)
+        match = build_tsquery(query, prefix=True)
         if not match:
             return []
         result = await self._client.execute(
-            "SELECT p.title FROM page_fts JOIN pages p ON p.page_id = page_fts.rowid "
-            "WHERE page_fts MATCH ? AND p.title <> '' ORDER BY rank LIMIT ?",
-            (match, limit),
+            "SELECT p.title FROM pages p "
+            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?) "
+            "AND p.title <> '' "
+            f"ORDER BY ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?)) DESC "
+            "LIMIT ?",
+            (match, match, limit),
         )
         seen: set[str] = set()
         titles: list[str] = []
@@ -913,7 +958,13 @@ class IndexStore:
             [
                 ("SELECT COUNT(*) FROM sites", ()),
                 ("SELECT COUNT(*) FROM pages", ()),
-                ("SELECT COUNT(*) FROM page_fts", ()),
+                (
+                    "SELECT COUNT(*) FROM pages "
+                    "WHERE search_vector IS NOT NULL AND search_vector <> ''::tsvector"
+                    if _dialect(self._client) == "postgres"
+                    else "SELECT COUNT(*) FROM page_fts",
+                    (),
+                ),
                 ("SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'", ()),
             ]
         )
@@ -928,7 +979,7 @@ class IndexStore:
 
     async def stale_pages(self, limit: int = 5, older_than_seconds: int = 7 * 24 * 3600) -> list[str]:
         result = await self._client.execute(
-            "SELECT url FROM pages WHERE indexed_at <= datetime('now', ?) "
+            "SELECT url FROM pages WHERE indexed_at <= now() + ?::interval "
             "ORDER BY indexed_at ASC LIMIT ?",
             (f"-{int(older_than_seconds)} seconds", limit),
         )
