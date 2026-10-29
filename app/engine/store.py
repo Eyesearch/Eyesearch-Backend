@@ -134,6 +134,9 @@ class PersistOutcome:
     duplicates: int = 0
     committed: bool = False
     reason: str = ""
+    #: The URLs this batch wrote. The crawl loop passes them to the search cache
+    #: so cached answers mentioning them are dropped rather than served stale.
+    urls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -525,6 +528,7 @@ class IndexStore:
             queue_closed=closed,
             duplicates=max(0, len(documents) - written),
             committed=True,
+            urls=[document.url for document in documents if document.url],
         )
         logger.info(
             "DB COMMIT SUCCESS: %d pages written, %d duplicates skipped, %d queue rows closed "

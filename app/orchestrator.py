@@ -533,6 +533,18 @@ class Orchestrator:
 
                 outcome = await self.run_batch()
 
+                # A batch has just changed what the index holds, so any cached
+                # answer mentioning one of those pages is now stale. Expiring
+                # only the affected entries keeps every other query warm.
+                service = getattr(self, "search_service", None)
+                if service is not None and outcome is not None:
+                    touched = getattr(outcome, "urls", None) or []
+                    if touched:
+                        try:
+                            service.invalidate(touched)
+                        except Exception:  # noqa: BLE001 - a stale cache is not fatal
+                            logger.debug("cache invalidation failed", exc_info=True)
+
                 # Recover the frontier on EVERY pass, including successful
                 # batches. Previously the non-empty fast path continued before
                 # refill/retry ran, so recovery silently depended on the queue

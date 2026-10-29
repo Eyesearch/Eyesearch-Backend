@@ -101,6 +101,30 @@ class SearchCache:
             while len(self._entries) > self._max:
                 self._entries.popitem(last=False)
 
+    def invalidate_urls(self, urls) -> int:
+        """Drop cached results that mention any of these URLs.
+
+        A page that has just been re-indexed is showing stale text to anyone
+        who searches for it within the TTL. Expiring the whole cache on every
+        write would throw away every other query's answer too, so only the
+        entries that actually contain one of the changed pages are dropped.
+
+        Returns how many entries went.
+        """
+        wanted = {str(url) for url in urls if url}
+        if not wanted:
+            return 0
+
+        dropped = 0
+        with self._lock:
+            for key in list(self._entries):
+                _, payload = self._entries[key]
+                results = payload.get("results") or []
+                if any(str(item.get("url") or "") in wanted for item in results):
+                    del self._entries[key]
+                    dropped += 1
+        return dropped
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
@@ -465,6 +489,14 @@ class SearchService:
         }
         self.cache.set(key, payload)
         return payload
+
+    def invalidate(self, urls) -> int:
+        """Forget cached answers that contain these URLs.
+
+        Called after a batch is written, so a page that has just been
+        re-indexed stops being served from the cache in its old form.
+        """
+        return self.cache.invalidate_urls(urls)
 
     async def suggest(self, query: str, limit: int = 6) -> list[Any]:
         """The OpenSearch suggestions shape: `[query, [completions]]`.
