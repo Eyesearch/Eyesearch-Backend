@@ -6,5 +6,9 @@ pydantic==2.14.1
 pydantic-settings==2.16.1
 python-dotenv==1.2.4
 beautifulsoup4==4.15.0
+# PostgreSQL driver and connection pool. The [binary] extra ships a prebuilt
+# libpq, so the Render image does not need a build toolchain.
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
 pytest==9.1.1
 pytest-asyncio==1.4.1
