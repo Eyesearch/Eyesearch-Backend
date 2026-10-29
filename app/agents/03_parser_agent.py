@@ -12,9 +12,16 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from urllib.parse import unquote, urlsplit
 
 from app.engine.urls import safe_urljoin
+
+from app.agents import load_agent
+
+_brand = load_agent("10_brand_canonical_agent")
+ACTION_TITLE_CHAR_CAP = _brand.ACTION_TITLE_CHAR_CAP
+BrandCanonicalAgent = _brand.BrandCanonicalAgent
+action_title_from = _brand.action_title_from
+clean_url_for = _brand.clean_url_for
 
 from bs4 import BeautifulSoup
 
@@ -27,7 +34,6 @@ BODY_CHAR_CAP = 1000
 #: so the title carries the whole subject rather than four words of it.
 BRAND_CHAR_CAP = 80
 CLEAN_URL_CHAR_CAP = 160
-ACTION_TITLE_CHAR_CAP = 120
 TITLE_CHAR_CAP = 200
 DESCRIPTION_CHAR_CAP = 400
 
@@ -148,174 +154,6 @@ def build_description(title: str, meta_description: str, body_text: str) -> str:
     if title and snippet:
         return f"{title} — {snippet}"[:DESCRIPTION_CHAR_CAP]
     return (snippet or meta or collapse(title))[:DESCRIPTION_CHAR_CAP]
-
-
-# ---------------------------------------------------------------------------
-# Card-oriented extraction: brand, breadcrumb, action title
-# ---------------------------------------------------------------------------
-
-#: Separators that sites stuff keywords into a <title> with. Each one splits
-#: "Karnataka Health Department | Notifications | Apply Online | Official Site"
-#: into parts, of which only the first is usually the page's actual subject.
-TITLE_SEPARATORS = ("|", " - ", " – ", " — ", " :: ", " · ", " • ", " » ")
-
-#: Words that say nothing about what the page does.
-EMPTY_TITLE_WORDS = frozenset(
-    {"home", "homepage", "welcome", "index", "untitled", "official site",
-     "official website", "click here", "page", "website"}
-)
-
-#: Path segments that carry no meaning for a reader.
-NOISE_SEGMENTS = frozenset(
-    {"index", "index.html", "index.php", "index.aspx", "default", "default.aspx",
-     "home", "main", "en", "english", "www", "pages", "page"}
-)
-
-
-def domain_root(url: str) -> str:
-    """The registrable name without `www.` or a public suffix tail."""
-    try:
-        host = (urlsplit(url).hostname or "").lower()
-    except ValueError:
-        return ""
-    if host.startswith("www."):
-        host = host[4:]
-    parts = [part for part in host.split(".") if part]
-    if len(parts) >= 3 and parts[-2] in {"gov", "nic", "ac", "co", "org", "net", "edu", "res"}:
-        # karnataka.gov.in -> karnataka
-        return parts[-3]
-    return parts[0] if parts else ""
-
-
-def brand_from_domain(url: str) -> str:
-    """A readable fallback brand: 'thehindu.com' -> 'The Hindu' is not derivable,
-    but 'karnataka.gov.in' -> 'Karnataka' is, and that is better than nothing."""
-    root = domain_root(url)
-    if not root:
-        return ""
-    label = root.replace("-", " ").replace("_", " ").strip()
-    if not label:
-        return ""
-    if len(label) <= 4:
-        return label.upper()
-    return " ".join(word.capitalize() for word in label.split())
-
-
-def clean_url_for(url: str, max_segments: int = 3) -> str:
-    """A Google-style breadcrumb: 'karnataka.gov.in › health › notifications'."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
-        return ""
-    host = (parts.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    if not host:
-        return ""
-
-    segments: list[str] = []
-    for raw in parts.path.split("/"):
-        if not raw:
-            continue
-        try:
-            text = unquote(raw)
-        except Exception:
-            text = raw
-        text = re.sub(r"\.(html?|php|aspx?|jsp|txt)$", "", text, flags=re.I)
-        text = text.replace("-", " ").replace("_", " ").strip()
-        text = collapse(text)
-        if not text or text.lower() in NOISE_SEGMENTS:
-            continue
-        if len(text) > 40:
-            text = text[:39].rstrip() + "…"
-        segments.append(text)
-        if len(segments) >= max_segments:
-            break
-
-    return " › ".join([host, *segments]) if segments else host
-
-
-def _split_title(title: str) -> list[str]:
-    """Split a stuffed title into its parts."""
-    parts = [title]
-    for separator in TITLE_SEPARATORS:
-        parts = [piece for part in parts for piece in part.split(separator)]
-    return [collapse(piece).strip(" .,:;·•»-") for piece in parts if collapse(piece)]
-
-
-def _title_key(value: str) -> str:
-    """A comparable form of a name: lower case, letters and digits only.
-
-    "Amazon.in", "Amazon in" and "amazon.in" all collapse to "amazonin", so a
-    brand is recognised however the page punctuates it.
-    """
-    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
-
-
-def _is_brand_part(part: str, brand: str, root: str) -> bool:
-    key = _title_key(part)
-    if not key:
-        return True
-    for name in (brand, root):
-        other = _title_key(name)
-        if other and key == other:
-            return True
-    return False
-
-
-def slug_title(url: str) -> str:
-    """A readable title from the last meaningful path segment."""
-    try:
-        path = urlsplit(url).path
-    except ValueError:
-        return ""
-    for raw in reversed([segment for segment in path.split("/") if segment]):
-        text = unquote(raw)
-        text = re.sub(r"\.(html?|php|aspx?|jsp|txt)$", "", text, flags=re.I)
-        text = collapse(text.replace("-", " ").replace("_", " "))
-        text = text.strip(" .,:;-")
-        if text and text.lower() not in NOISE_SEGMENTS:
-            return text[:ACTION_TITLE_CHAR_CAP]
-    return ""
-
-
-def action_title_from(
-    title: str,
-    h1: str = "",
-    brand: str = "",
-    og_title: str = "",
-    url: str = "",
-) -> str:
-    """The clean subject of the page, with the brand stripped out.
-
-    The card already prints the brand on its own line, so repeating it in the
-    title is noise. Candidates are tried in order — og:title, then the H1, then
-    the <title> — and each is split on the separators sites stuff keywords with.
-    Parts that are just the site's name are dropped, and what remains is the
-    subject. A page with nothing usable falls back to its URL slug.
-    """
-    root = domain_root(url) if url else ""
-    heading = collapse(h1 or "")
-    candidates = [
-        collapse(og_title or ""),
-        heading if len(heading) > 5 else "",
-        collapse(title or ""),
-    ]
-
-    for candidate in candidates:
-        if not candidate or candidate.lower() in EMPTY_TITLE_WORDS:
-            continue
-        parts = [part for part in _split_title(candidate)]
-        kept = [part for part in parts if not _is_brand_part(part, brand, root)]
-        if not kept:
-            continue
-        # The first surviving part is the subject; anything after it was the
-        # brand or keyword filler.
-        chosen = kept[0].strip(" .,:;-")
-        if len(chosen) > 1:
-            return chosen[:ACTION_TITLE_CHAR_CAP]
-
-    return slug_title(url)[:ACTION_TITLE_CHAR_CAP]
 
 
 def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
@@ -528,40 +366,9 @@ class ParserAgent:
 
     @staticmethod
     def _brand_name(soup: BeautifulSoup, url: str) -> str:
-        """The site's own name: og:site_name, then JSON-LD, then the domain.
+        """Delegated to the brand agent, which owns this resolution order."""
+        return BrandCanonicalAgent().brand(soup, url)
 
-        og:site_name is what the publisher calls itself, so it beats anything
-        derived from the host. JSON-LD carries the same idea for sites that
-        never set the Open Graph tag.
-        """
-        meta = soup.find("meta", attrs={"property": "og:site_name"})
-        if meta and meta.get("content"):
-            name = collapse(meta["content"])
-            if name:
-                return name
-
-        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-            raw = script.string or script.get_text() or ""
-            if not raw.strip():
-                continue
-            try:
-                data = json.loads(raw)
-            except (ValueError, TypeError):
-                continue
-            for node in data if isinstance(data, list) else [data]:
-                if not isinstance(node, dict):
-                    continue
-                publisher = node.get("publisher") or node.get("sourceOrganization")
-                if isinstance(publisher, dict) and publisher.get("name"):
-                    name = collapse(str(publisher["name"]))
-                    if name:
-                        return name
-                if node.get("@type") in ("Organization", "WebSite") and node.get("name"):
-                    name = collapse(str(node["name"]))
-                    if name:
-                        return name
-
-        return brand_from_domain(url)
 
     @staticmethod
     def _description(soup: BeautifulSoup) -> str:

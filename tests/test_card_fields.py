@@ -16,9 +16,12 @@ from app.services.search_service import to_result
 
 parser_module = load_agent("03_parser_agent")
 ParserAgent = parser_module.ParserAgent
-action_title_from = parser_module.action_title_from
-brand_from_domain = parser_module.brand_from_domain
-clean_url_for = parser_module.clean_url_for
+
+# These live in the brand agent now; the parser re-exports the two it uses.
+brand_module = load_agent("10_brand_canonical_agent")
+action_title_from = brand_module.action_title_from
+brand_from_domain = brand_module.brand_from_domain
+clean_url_for = brand_module.clean_url_for
 
 
 PAGE = """<html><head>
@@ -89,11 +92,16 @@ def test_the_action_title_strips_dash_stuffing():
     assert action_title_from("Income Tax Return Filing - File Online - Department") == "Income Tax Return Filing"
 
 
-def test_the_action_title_is_capped_at_120_characters():
-    long_title = "Apply for a new passport " * 12
-    resolved = action_title_from(long_title)
-    assert len(resolved) <= 120
-    assert resolved.startswith("Apply for a new passport")
+def test_the_action_title_is_capped_at_five_words_and_sixty_characters():
+    resolved = action_title_from("Apply for a new passport online today right now")
+    assert resolved == "Apply for a new passport"
+
+    long_words = "Supercalifragilisticexpialidocious" * 2
+    assert len(action_title_from(long_words)) <= 60
+
+
+def test_a_short_title_is_not_padded_out():
+    assert action_title_from("District Health Notifications") == "District Health Notifications"
 
 
 def test_the_action_title_prefers_og_title_over_the_h1_and_title():

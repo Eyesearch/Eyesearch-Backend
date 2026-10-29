@@ -185,14 +185,14 @@ class Settings(BaseSettings):
     #: against a 300,000-page storage budget.
     max_pages_per_domain: int = 25
 
-    #: Total body text, in characters, that one domain may hold across all of its
-    #: indexed pages. Each page gets `budget // pages_of_that_domain`, so the
-    #: allowance shrinks as a site contributes more pages.
-    #:
-    #: Be aware of the arithmetic at the 25-page cap: 1,000 / 25 is 40
-    #: characters per page, about six words. That is below the length of a
-    #: snippet, so search would have almost nothing to match on or show. The
-    #: default is the requested figure; raise it per deployment if that bites.
+    #: Strict per-page body ceiling, in characters, whatever the domain's page
+    #: count. 40 is the 1,000-character domain limit divided by the 25-page
+    #: ceiling: ultra-compact storage, and 40 characters is roughly six words, so
+    #: a card snippet shows a phrase rather than a sentence.
+    page_body_char_ceiling: int = 40
+    #: Total body text one domain may hold across all its pages. With a 40-char
+    #: page ceiling and a 25-page cap this cannot be reached; it is the backstop
+    #: if either of those is raised.
     domain_body_budget_chars: int = 1000
 
     search_default_limit: int = 10

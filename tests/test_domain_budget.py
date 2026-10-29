@@ -1,8 +1,9 @@
-"""The shared per-domain body budget.
+"""The strict per-page body ceiling and the domain total.
 
-One domain may hold `domain_body_budget_chars` of body text across all of its
-pages, divided evenly between them. Adding a page shrinks everyone's allowance,
-including pages that were already stored.
+Every page is stored with at most `page_body_char_ceiling` characters of body
+text — 40 by default, which is the 1,000-character domain limit divided by the
+25-page ceiling. The cap is flat: a domain with one page gets the same 40
+characters as one with twenty-five.
 """
 
 from __future__ import annotations
@@ -15,12 +16,13 @@ from app.engine.store import IndexStore, PageDocument
 BODY = "The department publishes district health notifications for every office. " * 20
 
 
-def settings(budget: int) -> Settings:
+def settings(ceiling: int = 40, budget: int = 1000) -> Settings:
     return Settings(
         environment="test",
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
+        page_body_char_ceiling=ceiling,
         domain_body_budget_chars=budget,
     )
 
@@ -42,55 +44,31 @@ async def body_lengths(client) -> list[int]:
 
 
 @pytest.mark.asyncio
-async def test_a_lone_page_gets_the_whole_budget(client):
-    store = IndexStore(client, settings(1000))
+async def test_every_page_is_capped_at_forty_characters(client):
+    store = IndexStore(client, settings())
     await store.persist_batch([page("https://a.gov.in/1", "a.gov.in", "b1")])
 
-    assert len(BODY) > 1000, "the fixture must be longer than the budget"
-    assert await body_lengths(client) == [1000]
+    assert len(BODY) > 40, "the fixture must be longer than the ceiling"
+    assert await body_lengths(client) == [40]
 
 
 @pytest.mark.asyncio
-async def test_the_budget_is_divided_between_the_pages(client):
-    store = IndexStore(client, settings(1000))
-    await store.persist_batch(
-        [page(f"https://a.gov.in/{i}", "a.gov.in", f"b{i}") for i in range(4)]
-    )
-
-    lengths = await body_lengths(client)
-    assert lengths == [250, 250, 250, 250]
-    assert sum(lengths) <= 1000
-
-
-@pytest.mark.asyncio
-async def test_adding_a_page_trims_the_ones_already_stored(client):
-    """The budget is per domain, so a new page costs every existing page."""
-    store = IndexStore(client, settings(1000))
+async def test_the_cap_does_not_shrink_as_a_domain_grows(client):
+    """Flat, not divided: page four keeps the same 40 as page one."""
+    store = IndexStore(client, settings())
     await store.persist_batch([page("https://a.gov.in/1", "a.gov.in", "b1")])
-    assert await body_lengths(client) == [1000]
+    assert await body_lengths(client) == [40]
 
-    await store.persist_batch([page("https://a.gov.in/2", "a.gov.in", "b2")])
-    assert await body_lengths(client) == [500, 500]
-
-
-@pytest.mark.asyncio
-async def test_a_second_domain_has_its_own_budget(client):
-    store = IndexStore(client, settings(1000))
     await store.persist_batch(
-        [
-            page("https://a.gov.in/1", "a.gov.in", "b1"),
-            page("https://b.example/1", "b.example", "b2"),
-        ]
+        [page(f"https://a.gov.in/{i}", "a.gov.in", f"b{i}") for i in (2, 3, 4)]
     )
-
-    # One page each, so each domain spends its own 1,000.
-    assert await body_lengths(client) == [1000, 1000]
+    assert await body_lengths(client) == [40, 40, 40, 40]
 
 
 @pytest.mark.asyncio
-async def test_the_allowance_never_reaches_zero(client):
-    """40 characters at the 25-page cap, never a negative or zero slice."""
-    store = IndexStore(client, settings(1000))
+async def test_a_domain_of_twenty_five_pages_stays_within_the_total(client):
+    """40 x 25 is exactly the 1,000-character domain limit."""
+    store = IndexStore(client, settings())
     await store.persist_batch(
         [page(f"https://a.gov.in/{i}", "a.gov.in", f"b{i}") for i in range(25)]
     )
@@ -102,8 +80,46 @@ async def test_the_allowance_never_reaches_zero(client):
 
 
 @pytest.mark.asyncio
-async def test_a_budget_of_zero_disables_the_cap(client):
-    store = IndexStore(client, settings(0))
+async def test_a_second_domain_is_capped_the_same_way(client):
+    store = IndexStore(client, settings())
+    await store.persist_batch(
+        [
+            page("https://a.gov.in/1", "a.gov.in", "b1"),
+            page("https://b.example/1", "b.example", "b2"),
+        ]
+    )
+
+    assert await body_lengths(client) == [40, 40]
+
+
+@pytest.mark.asyncio
+async def test_a_shorter_body_is_left_alone(client):
+    store = IndexStore(client, settings())
+    short = PageDocument(
+        url="https://a.gov.in/short",
+        domain="a.gov.in",
+        title="Short",
+        description="d",
+        body_text="A short note.",
+        digest="b9",
+    )
+    await store.persist_batch([short])
+
+    assert await body_lengths(client) == [len("A short note.")]
+
+
+@pytest.mark.asyncio
+async def test_a_ceiling_of_zero_disables_the_cap(client):
+    store = IndexStore(client, settings(ceiling=0, budget=0))
     await store.persist_batch([page("https://a.gov.in/1", "a.gov.in", "b1")])
 
     assert await body_lengths(client) == [len(BODY)]
+
+
+def test_the_production_default_is_forty_characters():
+    """The tests above set the ceiling explicitly; this pins the real default."""
+    from app.engine.config import Settings as RealSettings
+
+    default = RealSettings(_env_file=None)
+    assert default.page_body_char_ceiling == 40
+    assert default.domain_body_budget_chars == 1000

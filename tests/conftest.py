@@ -25,12 +25,21 @@ from app.postgres import PostgresClient
 
 @pytest.fixture
 def settings() -> Settings:
+    """Settings for tests that are not about storage policy.
+
+    The per-page body ceiling is off here on purpose. It is a real production
+    policy — 40 characters — but a test writing a paragraph to check snippet or
+    ranking behaviour would then be testing a 40-character prefix instead of the
+    thing it names. The ceiling has its own tests, in test_domain_budget.py,
+    which set it explicitly.
+    """
     return Settings(
         environment="test",
         crawler_enabled=False,
         revalidation_enabled=False,
         crawl_batch_size=10,
         libsql_min_interval_seconds=0.0,
+        page_body_char_ceiling=0,
     )
 
 
@@ -58,8 +67,10 @@ async def client():
 
 
 @pytest_asyncio.fixture
-async def store(client) -> IndexStore:
-    return IndexStore(client)
+async def store(client, settings) -> IndexStore:
+    # The shared settings, so the store under test is not quietly using
+    # production defaults the rest of the fixtures have turned off.
+    return IndexStore(client, settings)
 
 
 @pytest_asyncio.fixture
