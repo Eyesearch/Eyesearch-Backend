@@ -351,6 +351,7 @@ class Orchestrator:
                 description=parsed.description,
                 body_text=parsed.body_text,
                 schema_types=list(parsed.schema_types),
+                sitelinks=list(parsed.sitelinks),
                 brand_name=parsed.brand_name,
                 clean_url=parsed.clean_url,
                 action_title=parsed.action_title,

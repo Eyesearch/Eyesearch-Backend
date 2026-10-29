@@ -191,6 +191,8 @@ class ParsedPage:
     action_title: str = ""
     #: Schema.org @type values from the page's JSON-LD, lower-cased.
     schema_types: list[str] = field(default_factory=list)
+    #: Action links found on the page: [{"intent","label","url"}].
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -217,6 +219,7 @@ class ParserAgent:
         # <script>, which the strip below removes before anything else sees it.
         brand_name = self._brand_name(soup, url)
         schema_types = self._schema_types(soup)
+        sitelinks = self._sitelinks(soup, url)
 
         for tag in soup.find_all(STRIP_TAGS):
             tag.decompose()
@@ -245,6 +248,7 @@ class ParserAgent:
             body_text=body_text,
             links=links,
             schema_types=schema_types,
+            sitelinks=sitelinks,
             brand_name=brand_name[:BRAND_CHAR_CAP],
             clean_url=clean_url[:CLEAN_URL_CHAR_CAP],
             action_title=(action_title or title)[:ACTION_TITLE_CHAR_CAP],
@@ -344,6 +348,16 @@ class ParserAgent:
                 continue
 
         return list(dict.fromkeys(found))
+
+    @staticmethod
+    def _sitelinks(soup: BeautifulSoup, url: str) -> list[dict[str, str]]:
+        """The action links on the page — Apply Online, Contact Us, Login."""
+        from app.indexer.sitelinks import extract_sitelinks
+
+        try:
+            return [link.as_dict() for link in extract_sitelinks(soup, url)]
+        except Exception:  # noqa: BLE001 - a sitelink is never worth a failed parse
+            return []
 
     @staticmethod
     def _og_title(soup: BeautifulSoup) -> str:

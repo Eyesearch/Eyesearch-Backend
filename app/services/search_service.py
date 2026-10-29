@@ -186,6 +186,10 @@ class SearchResult:
     #: The path as words a person would use, e.g. ["Health", "Notifications"].
     #: A card can show this instead of a truncated URL.
     breadcrumbs: list[str] = field(default_factory=list)
+    #: Action links found on the page, e.g. [{"intent": "apply", "label":
+    #: "Apply Online", "url": "..."}]. Always present, empty when there are none,
+    #: so a client can read it without a null check.
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -203,6 +207,7 @@ class SearchResult:
             "clean_url": self.clean_url,
             "category": self.category,
             "breadcrumbs": list(self.breadcrumbs),
+            "sitelinks": list(self.sitelinks),
         }
 
 
@@ -377,6 +382,7 @@ def to_result(hit: SearchHit) -> SearchResult:
         # row whose category_id was never set.
         category=(hit.category_code or category_code(hit.category)),
         breadcrumbs=_breadcrumbs(hit.url or ""),
+        sitelinks=list(hit.sitelinks or []),
     )
 
 

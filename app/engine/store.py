@@ -16,6 +16,7 @@ number the database confirmed, not a number the caller hoped for.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import unicodedata
 import re
@@ -83,11 +84,15 @@ class PageDocument:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    #: Action links found on the page: [{"intent","label","url"}]. Empty for a
+    #: page with none, which is the common case.
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
     #: Schema.org types from the page, used for classification only. Not a
     #: column: it describes the page, it is not part of the index.
     schema_types: list[str] = field(default_factory=list)
     category: str = ""
     category_code: str = ""
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
 
     def as_row(self) -> tuple[Any, ...]:
         """The twelve bound values the page insert expects, in SQL order.
@@ -110,6 +115,7 @@ class PageDocument:
             self.brand_name,
             self.clean_url,
             self.action_title,
+            json.dumps(self.sitelinks or []),
         )
 
 
@@ -154,11 +160,15 @@ class SearchHit:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    #: Action links found on the page: [{"intent","label","url"}]. Empty for a
+    #: page with none, which is the common case.
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
     #: Schema.org types from the page, used for classification only. Not a
     #: column: it describes the page, it is not part of the index.
     schema_types: list[str] = field(default_factory=list)
     category: str = ""
     category_code: str = ""
+    sitelinks: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def snippet(self) -> str:
@@ -356,6 +366,29 @@ def highlight_terms(text: str, tokens: Sequence[str]) -> str:
     return "".join(parts)
 
 
+def _sitelinks_from(value: Any) -> list[dict[str, str]]:
+    """The stored sitelinks, or an empty list.
+
+    psycopg hands JSONB back already parsed; a text column hands back a string.
+    Both are accepted so the row mapper does not depend on the driver.
+    """
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [
+        {"intent": str(item.get("intent", "")), "label": str(item.get("label", "")),
+         "url": str(item.get("url", ""))}
+        for item in value
+        if isinstance(item, dict) and item.get("url")
+    ]
+
+
 def _is_timeout(error: Exception) -> bool:
     """Whether a database error is a statement timeout rather than a real fault."""
     text = str(error).lower()
@@ -446,9 +479,10 @@ class IndexStore:
                 (
                     "INSERT INTO pages "
                     "(site_id, url, title, description, body_text, quality_score, digest, "
-                    "category, language, brand_name, clean_url, action_title, indexed_at) "
+                    "category, language, brand_name, clean_url, action_title, sitelinks, "
+                    "indexed_at) "
                     "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, "
-                    "?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "?, ?, ?, ?, ?, CAST(? AS JSONB), CURRENT_TIMESTAMP) "
                     # SQLite's INSERT OR IGNORE ignored any conflict; bare
                     # ON CONFLICT DO NOTHING keeps that behaviour for both the
                     # url and the digest unique index.
@@ -985,7 +1019,7 @@ class IndexStore:
             "CASE WHEN p.language = ? THEN 1 ELSE 0 END AS lang_hit, "
             # Appended last on purpose: the row mapper reads by position, and
             # inserting them earlier would shift every index after it.
-            "p.category, c.code AS category_code "
+            "p.category, c.code AS category_code, p.sitelinks "
             "FROM pages p "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
             "LEFT JOIN categories c ON c.id = p.category_id "
@@ -1058,7 +1092,11 @@ class IndexStore:
     def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
         # Column order, from the SELECT in `search`: 0 page_id, 1 url, 2 title,
         # 3 description, 4 body_text, 5 brand_name, 6 clean_url, 7 action_title,
-        # 8 lexical_score, 9 title_hit, 10 auth_hit, 11 category, 12 category_code.
+        # 8 lexical_score, 9 title_hit, 10 auth_hit, 11 lang_hit, 12 category,
+        # 13 category_code, 14 sitelinks. The language boost was inserted before
+        # the category columns and every index after it moved by one — the
+        # category was reading the boost flag and the code was reading the
+        # category name, which happened to render correctly and hid it.
         title_hit = int(row[9] or 0)
         auth_hit = int(row[10] or 0)
         boosted = (
@@ -1079,8 +1117,9 @@ class IndexStore:
             brand_name=str(row[5] or ""),
             clean_url=str(row[6] or ""),
             action_title=str(row[7] or ""),
-            category=str(row[11] or ""),
-            category_code=str(row[12] or ""),
+            category=str(row[12] or ""),
+            category_code=str(row[13] or ""),
+            sitelinks=_sitelinks_from(row[14] if len(row) > 14 else None),
         )
 
     @staticmethod

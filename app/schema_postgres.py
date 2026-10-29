@@ -118,6 +118,9 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # ADD COLUMN IF NOT EXISTS so an existing database gets the column and the
     # constraint on startup, not just a fresh one.
     "ALTER TABLE pages ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id)",
+    # The action links found on the page, as [{"intent","label","url"}].
+    # Stored because they come from the HTML, which search no longer has.
+    "ALTER TABLE pages ADD COLUMN IF NOT EXISTS sitelinks JSONB DEFAULT '[]'::jsonb",
     # Keep category_id derived from the text column, so a page written by any
     # path — crawler, revalidation, a manual insert — is linked without the
     # caller having to remember. This is what stops the two drifting apart.
