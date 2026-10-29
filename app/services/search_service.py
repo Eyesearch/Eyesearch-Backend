@@ -36,6 +36,7 @@ from app.agents import load_agent
 logger = logging.getLogger(__name__)
 
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
+brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
 
 SOURCE_LABEL = "eyesearch_index"
 
@@ -343,7 +344,10 @@ def to_result(hit: SearchHit) -> SearchResult:
         kind=kind_of(hit.url),
         thumbnail_url=youtube_thumbnail(hit.url),
         score=hit.score,
-        brand_name=hit.brand_name or "",
+        # Never empty: a card with a blank line where the publisher goes reads
+        # as broken. Rows indexed before brand extraction ran have nothing
+        # stored, so the domain is used as the last resort here too.
+        brand_name=(hit.brand_name or brand_from_domain(hit.url or "") or ""),
         clean_url=hit.clean_url or "",
         # The join already knows the code; the Python map is the fallback for a
         # row whose category_id was never set.

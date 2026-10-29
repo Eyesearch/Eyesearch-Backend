@@ -80,6 +80,28 @@ def domain_root(url: str) -> str:
     return parts[0] if parts else ""
 
 
+def _host_label(url: str) -> str:
+    """The bare host, for when even the domain root yields nothing."""
+    try:
+        return (urlsplit(url).hostname or "").lstrip("www.") or ""
+    except ValueError:
+        return ""
+
+
+def _humanise_label(value: str) -> str:
+    """A run-together handle into words: "indiatoday" -> "Indiatoday".
+
+    Splitting a run-together handle into words needs a dictionary, which goes
+    stale. Capitalising it at least stops the card showing a lower-case slug.
+    """
+    cleaned = value.replace("-", " ").replace("_", " ").strip()
+    if not cleaned:
+        return ""
+    if " " in cleaned:
+        return " ".join(word.capitalize() for word in cleaned.split())
+    return cleaned[:1].upper() + cleaned[1:]
+
+
 def brand_from_domain(url: str) -> str:
     """A readable fallback brand: 'karnataka.gov.in' -> 'Karnataka'."""
     root = domain_root(url)
@@ -224,25 +246,89 @@ class BrandCanonicalAgent:
     """Brand and title resolution for one page."""
 
     def brand(self, soup: BeautifulSoup, url: str) -> str:
-        """The site's own name: og:site_name, then JSON-LD, then the domain."""
+        """The site's own name, in five steps, and never empty.
+
+        Each step is weaker evidence than the one before it: the publisher's own
+        Open Graph tag, then its structured data, then its Twitter handle, then
+        what it puts after the separator in its <title>, then the domain. The
+        last two are guesses, but a guess that reads "India Today" beats a card
+        with a blank line where the publisher should be.
+        """
+        name = self._brand_from_meta(soup)
+        if name:
+            return name
+
+        name = self._brand_from_json_ld(soup)
+        if name:
+            return name
+
+        name = self._brand_from_twitter(soup)
+        if name:
+            return name
+
+        name = self._brand_from_title_tail(soup)
+        if name:
+            return name
+
+        return brand_from_domain(url) or _host_label(url)
+
+    @staticmethod
+    def _brand_from_meta(soup: BeautifulSoup) -> str:
         meta = soup.find("meta", attrs={"property": "og:site_name"})
         if meta and meta.get("content"):
-            name = _collapse(meta["content"])
-            if name:
-                return name
+            return _collapse(meta["content"])
+        return ""
 
+    def _brand_from_json_ld(self, soup: BeautifulSoup) -> str:
         for node in self._json_ld(soup):
             publisher = node.get("publisher") or node.get("sourceOrganization")
             if isinstance(publisher, dict) and publisher.get("name"):
                 name = _collapse(str(publisher["name"]))
                 if name:
                     return name
-            if node.get("@type") in ("Organization", "WebSite") and node.get("name"):
+            if node.get("@type") in ("Organization", "WebSite", "NewsMediaOrganization") and node.get(
+                "name"
+            ):
                 name = _collapse(str(node["name"]))
                 if name:
                     return name
+        return ""
 
-        return brand_from_domain(url)
+    @staticmethod
+    def _brand_from_twitter(soup: BeautifulSoup) -> str:
+        """`twitter:site` is a handle — "@thehindu" — not a name.
+
+        It is used as a name only when it reads like one: a handle of several
+        joined words is split and title-cased, and a single lowercase word is
+        left alone because "thehindu" is not a better brand than the domain.
+        """
+        meta = soup.find("meta", attrs={"name": "twitter:site"})
+        if not (meta and meta.get("content")):
+            return ""
+        handle = _collapse(meta["content"]).lstrip("@")
+        if not handle:
+            return ""
+        return _humanise_label(handle)
+
+    @staticmethod
+    def _brand_from_title_tail(soup: BeautifulSoup) -> str:
+        """The publisher a site puts after the separator in its <title>.
+
+        "District Health Notifications | Karnataka Health Department" ends with
+        the publisher. Only a *trailing* part is taken, and only when the title
+        actually has a separator — otherwise the whole title is the subject, not
+        the brand.
+        """
+        title = soup.find("title")
+        text = _collapse(title.get_text() if title else "")
+        if not text:
+            return ""
+        for separator in ("|", " - ", " – ", " — ", " :: "):
+            if separator in text:
+                tail = text.rsplit(separator, 1)[-1].strip()
+                if 2 < len(tail) <= 40:
+                    return tail
+        return ""
 
     def clean_title(self, title: str, brand: str = "", url: str = "") -> str:
         """The action title for a raw <title>."""

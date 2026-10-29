@@ -204,7 +204,9 @@ async def test_a_row_without_an_action_title_falls_back_to_its_title(client):
     assert hits
     result = to_result(hits[0]).as_dict()
     assert result["title"] == "Old page title"
-    assert result["brand_name"] == ""
+    # A row stored before brand extraction still gets a brand: the domain is the
+    # last resort, because a blank line on a card reads as broken.
+    assert result["brand_name"] == "Legacy"
     assert result["clean_url"] == ""
 
 

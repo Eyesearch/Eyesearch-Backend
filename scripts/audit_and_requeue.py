@@ -75,6 +75,8 @@ class AuditReport:
     purged_thin: int = 0
     purged_boilerplate: int = 0
     purged_over_cap: int = 0
+    brands_missing: int = 0
+    brands_backfilled: int = 0
     vectors_rebuilt: int = 0
     reindexed: bool = False
     active_pages: int = 0
@@ -89,6 +91,8 @@ class AuditReport:
             "purged_thin": self.purged_thin,
             "purged_boilerplate": self.purged_boilerplate,
             "purged_over_cap": self.purged_over_cap,
+            "brands_missing": self.brands_missing,
+            "brands_backfilled": self.brands_backfilled,
             "vectors_rebuilt": self.vectors_rebuilt,
             "reindexed": self.reindexed,
             "active_pages": self.active_pages,
@@ -107,6 +111,8 @@ class AuditReport:
             f"  purged — under {THIN_WORD_COUNT} words                : {self.purged_thin}",
             f"  purged — boilerplate only               : {self.purged_boilerplate}",
             f"  purged — over the per-domain cap        : {self.purged_over_cap}",
+            f"  pages with no brand name                : {self.brands_missing}",
+            f"  brands backfilled from the domain       : {self.brands_backfilled}",
             f"  search vectors rebuilt                  : {self.vectors_rebuilt}",
             f"  GIN index rebuilt                       : {'yes' if self.reindexed else 'no'}",
             f"  active pages remaining                  : {self.active_pages}",
@@ -216,6 +222,27 @@ async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
                 ")",
                 (cap,),
             )
+
+        # -- 3b. fill in missing brand names ---------------------------
+        missing = await client.execute(
+            "SELECT p.page_id, p.url FROM pages p "
+            "WHERE p.brand_name IS NULL OR trim(p.brand_name) = ''"
+        )
+        brand_rows = [tuple(row) for row in missing.rows]
+        report.brands_missing = len(brand_rows)
+
+        if not dry_run and brand_rows:
+            from app.agents import load_agent
+
+            brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
+            for page_id, url in brand_rows:
+                name = brand_from_domain(str(url or ""))
+                if not name:
+                    continue
+                await client.execute(
+                    "UPDATE pages SET brand_name = ? WHERE page_id = ?", (name, page_id)
+                )
+                report.brands_backfilled += 1
 
         # -- 4. rebuild the vectors, then the index ---------------------
         pending = await client.execute("SELECT count(*) FROM pages")
