@@ -497,6 +497,35 @@ def build_client(settings: Settings | None = None) -> LibsqlClient:
     )
 
 
+def build_search_client(settings: Settings | None = None) -> LibsqlClient:
+    """A client for the read path, with its own connection pool.
+
+    The crawler and the API shared one pool, so a burst of writes could hold
+    every connection and leave a search waiting for one — which the user sees as
+    "the search providers are not responding". A separate pool with a short
+    acquire timeout makes search fail fast and honestly instead.
+
+    SQLite has no pool, so the same client is returned and the caller must not
+    close it twice.
+    """
+    settings = settings or get_settings()
+    if not settings.is_postgres:
+        return build_client(settings)
+
+    from app.postgres import PostgresClient
+
+    url = settings.database_url
+    logger.info("Connected to PostgreSQL (search pool): %s", _redact_dsn(url))
+    return PostgresClient(
+        url,
+        min_size=settings.search_pool_min_size,
+        max_size=settings.search_pool_max_size,
+        statement_timeout_ms=settings.search_statement_timeout_ms,
+        acquire_timeout_seconds=settings.search_acquire_timeout_seconds,
+        isolation="read committed",
+    )
+
+
 def _redact_dsn(url: str) -> str:
     """A DSN safe to log: the password removed, everything else kept."""
     if "://" not in url:

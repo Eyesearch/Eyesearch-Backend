@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     #: A search must answer or fail, never hang behind the crawler's writes.
     db_statement_timeout_ms: int = 4000
     db_acquire_timeout_seconds: float = 2.0
+
+    # --- search isolation ---------------------------------------------------
+    #: Search gets its own connection pool, so a crawler burst cannot take every
+    #: connection and starve the API. These bound that pool, not the crawler's.
+    search_pool_min_size: int = 1
+    search_pool_max_size: int = 5
+    #: Tighter than the crawler's 4s: a person is waiting on this one.
+    search_statement_timeout_ms: int = 3000
+    search_acquire_timeout_seconds: float = 1.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
     # Drop a pre-rebuild schema on startup. Without this a warm database keeps

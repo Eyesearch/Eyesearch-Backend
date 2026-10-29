@@ -36,7 +36,12 @@ from app.database import initialize_database, verify_writable
 from app.engine.config import Settings, describe_database_target, get_settings
 from app.engine.store import IndexStore
 from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
-from app.libsql_http import LibsqlClient, LibsqlError, build_client
+from app.libsql_http import (
+    LibsqlClient,
+    LibsqlError,
+    build_client,
+    build_search_client,
+)
 from app.orchestrator import Orchestrator
 from app.services.search_service import SearchService
 
@@ -149,11 +154,17 @@ async def lifespan(app: FastAPI):
     except Exception as error:  # a broken database must not stop the app booting
         logger.exception("database bootstrap failed; serving degraded: %s", error)
 
+    # The read path gets its own pool, so a crawl burst cannot starve search.
+    # On SQLite there is no pool and this is the same object, hence the
+    # identity check at shutdown.
+    search_client = build_search_client(settings)
+
     orchestrator = Orchestrator(client, settings)
     app.state.settings = settings
     app.state.client = client
+    app.state.search_client = search_client
     app.state.orchestrator = orchestrator
-    app.state.service = SearchService(orchestrator.store, settings)
+    app.state.service = SearchService(IndexStore(search_client, settings), settings)
     app.state.workers = WorkerHandles()
 
     # Workers are scheduled from a bootstrap task, not inline, so the port is
@@ -168,6 +179,8 @@ async def lifespan(app: FastAPI):
         await stop_workers(app.state.workers)
         await orchestrator.close()
         await client.close()
+        if search_client is not client:
+            await search_client.close()
         logger.info("shutdown complete")
 
 

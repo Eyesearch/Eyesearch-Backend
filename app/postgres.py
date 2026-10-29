@@ -63,6 +63,7 @@ class PostgresClient:
         max_size: int = 10,
         statement_timeout_ms: int = 4000,
         acquire_timeout_seconds: float = 2.0,
+        isolation: str = "",
     ) -> None:
         if not dsn:
             raise ValueError("a PostgreSQL DSN is required")
@@ -77,6 +78,10 @@ class PostgresClient:
         #: How long to wait for a pooled connection before giving up. Without
         #: this, a saturated pool blocks indefinitely.
         self.acquire_timeout_seconds = max(0.1, float(acquire_timeout_seconds))
+        #: Set on the search pool. Read committed is PostgreSQL's default, so
+        #: this documents the intent rather than changing behaviour: readers
+        #: never block behind the crawler's inserts.
+        self.isolation = isolation.strip().lower()
         self._pool: Any = None
         self._lock = asyncio.Lock()
 
@@ -97,7 +102,15 @@ class PostgresClient:
             open=False,
             kwargs={"autocommit": False},
         )
-        await pool.open(wait=True, timeout=20)
+        try:
+            await pool.open(wait=True, timeout=20)
+        except Exception as error:
+            # A bad DSN or a rejected option surfaces as an opaque PoolTimeout.
+            # Say what actually went wrong; the pool has already logged it.
+            await pool.close()
+            raise DatabaseUnavailable(
+                f"could not open the PostgreSQL pool: {error}"
+            ) from error
         return pool
 
     async def _ensure_pool(self) -> Any:
@@ -128,6 +141,16 @@ class PostgresClient:
             async with pool.connection(timeout=self.acquire_timeout_seconds) as connection:
                 # One transaction for the whole batch, as the SQLite client did.
                 async with connection.transaction():
+                    if self.isolation:
+                        # Set in SQL rather than through libpq's `options`,
+                        # which splits on spaces and cannot carry a value like
+                        # "read committed". SET LOCAL scopes it to this
+                        # transaction, and it must run before anything else.
+                        await self._run(
+                            connection,
+                            f"SET LOCAL transaction_isolation = '{self.isolation}'",
+                            (),
+                        )
                     if self.statement_timeout_ms:
                         # SET LOCAL is scoped to this transaction, so a slow
                         # query cannot poison the connection for the next caller.
