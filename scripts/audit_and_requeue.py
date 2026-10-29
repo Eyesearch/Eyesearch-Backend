@@ -75,6 +75,7 @@ class AuditReport:
     purged_thin: int = 0
     purged_boilerplate: int = 0
     purged_over_cap: int = 0
+    defects: dict[str, object] = field(default_factory=dict)
     brands_missing: int = 0
     brands_backfilled: int = 0
     vectors_rebuilt: int = 0
@@ -91,6 +92,7 @@ class AuditReport:
             "purged_thin": self.purged_thin,
             "purged_boilerplate": self.purged_boilerplate,
             "purged_over_cap": self.purged_over_cap,
+            "defects": self.defects,
             "brands_missing": self.brands_missing,
             "brands_backfilled": self.brands_backfilled,
             "vectors_rebuilt": self.vectors_rebuilt,
@@ -117,6 +119,14 @@ class AuditReport:
             f"  GIN index rebuilt                       : {'yes' if self.reindexed else 'no'}",
             f"  active pages remaining                  : {self.active_pages}",
         ]
+        if self.defects:
+            by_owner = self.defects.get("by_owner") or {}
+            if by_owner:
+                lines.append("")
+                lines.append("  contract breaches, by owning agent")
+                for owner, count in by_owner.items():
+                    lines.append(f"    {owner:28} : {count}")
+                lines.append(f"    {'re-queued at priority 0':28} : {self.defects.get('requeued', 0)}")
         for query, ms in self.latency_ms.items():
             lines.append(f"  latency {query!r:30} : {ms:.0f} ms")
         if self.dry_run:
@@ -223,7 +233,28 @@ async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
                 (cap,),
             )
 
-        # -- 3b. fill in missing brand names ---------------------------
+        # -- 3b. contract breaches, attributed to the step that owns them --
+        # Scanned before the brand backfill so the telemetry records what was
+        # actually wrong. A missing brand is cheaper to repair in place than to
+        # re-crawl, so those are fixed below rather than queued.
+        from app.indexer.defect_audit import DefectAuditor
+
+        from app.indexer.defect_audit import DefectReport
+
+        auditor = DefectAuditor(client, settings)
+        defects = await auditor.scan()
+
+        # The report keeps every breach, so the telemetry says what was actually
+        # wrong. Only the ones a refetch would fix are queued: a missing brand is
+        # repaired in place below, and re-crawling for it would be a waste.
+        report.defects = defects.as_dict()
+        reindexable = [d for d in defects.defects if d.kind != "empty_brand"]
+        if not dry_run and reindexable:
+            subset = DefectReport(scanned=defects.scanned, defects=reindexable)
+            await auditor.heal(subset)
+            report.defects["requeued"] = subset.requeued
+
+        # -- 3c. fill in missing brand names ---------------------------
         missing = await client.execute(
             "SELECT p.page_id, p.url FROM pages p "
             "WHERE p.brand_name IS NULL OR trim(p.brand_name) = ''"
