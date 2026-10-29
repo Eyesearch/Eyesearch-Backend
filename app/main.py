@@ -42,13 +42,35 @@ from app.libsql_http import (
     build_client,
     build_search_client,
 )
+from app.indexer.rate_limit import TokenBucketLimiter
 from app.orchestrator import Orchestrator
-from app.services.search_service import SearchService
+from app.services.search_service import SearchService, sanitise_query
 
 logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "eyesearch"
 SERVICE_TITLE = "EyeSearch Backend"
+
+#: Paths a stranger may call, and therefore the ones that need a limit. Health
+#: and the OpenSearch description are deliberately absent: a monitor polling
+#: /health must not be throttled, and a browser fetching the description is not
+#: doing anything a limit would protect.
+RATE_LIMITED_PREFIXES = ("/v1/",)
+
+#: 60 requests a minute per client, as a bucket that refills evenly.
+_RATE_LIMITER = TokenBucketLimiter(capacity=60, window_seconds=60.0)
+
+
+def client_ip(request: Request) -> str:
+    """The caller's address, behind a proxy when there is one.
+
+    nginx sets X-Forwarded-For; without reading it every request would appear to
+    come from the proxy and one limit would cover everybody.
+    """
+    forwarded = request.headers.get("x-forwarded-for") or ""
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +232,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    """Hold each client to 60 requests a minute on the public read paths."""
+    path = request.url.path
+    if any(path.startswith(prefix) for prefix in RATE_LIMITED_PREFIXES):
+        decision = _RATE_LIMITER.check(client_ip(request))
+        if not decision.allowed:
+            retry_after = max(1, int(round(decision.retry_after_seconds)))
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "rate_limited",
+                        "message": "Too many requests. Try again shortly.",
+                        "retryable": True,
+                    }
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings_at_import.cors_origin_list,
@@ -238,7 +282,10 @@ def get_service(request: Request) -> SearchService:
 
 
 def require_query(raw: str) -> str:
-    query = " ".join((raw or "").split())
+    # Strip control characters, NUL bytes and markup before anything else sees
+    # the query: it is echoed back in the response and in the OpenSearch
+    # template, and a query is never legitimately full of tags.
+    query = sanitise_query(" ".join((raw or "").split()))
     if not query:
         raise AppError("bad_request", "A non-empty q parameter is required.", 400, False)
     if len(query) > 400:
@@ -533,6 +580,56 @@ def base_url_for(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-proto")
     scheme = forwarded.split(",")[0].strip() if forwarded else request.url.scheme
     return f"{scheme}://{request.headers.get('host', request.url.netloc)}"
+
+
+@app.get("/v1/ai/search")
+async def ai_search(
+    request: Request,
+    q: str = Query(default="", description="the query"),
+    limit: int = Query(default=5, ge=1, le=20),
+    format: str = Query(default="json", description="json or markdown"),
+) -> Response:
+    """Search results shaped for an LLM or a RAG pipeline.
+
+    Every field is one a model can use without further parsing: who published
+    the page, where it sits, what it is about, and a 40-character snippet that
+    costs almost nothing in tokens. Markdown is offered because that is what most
+    agents feed into a prompt.
+    """
+    query = require_query(q)
+    service: SearchService = request.app.state.service
+
+    payload = await service.search(query, limit=limit)
+    results = payload.get("results", [])
+
+    dense = [
+        {
+            "title": item.get("title") or "",
+            "brand": item.get("brand_name") or "",
+            "clean_url": item.get("clean_url") or "",
+            "category": item.get("category") or "WEB",
+            "snippet": (item.get("snippet") or "")[:40],
+            "url": item.get("url") or "",
+        }
+        for item in results
+    ]
+
+    if format == "markdown":
+        lines = [f"# {query}", ""]
+        for index, item in enumerate(dense, 1):
+            source = item["brand"] or item["clean_url"] or item["url"]
+            lines.append(f"{index}. **{item['title']}** — {source} [{item['category']}]")
+            if item["snippet"]:
+                lines.append(f"   {item['snippet']}")
+            lines.append(f"   {item['url']}")
+        return Response(
+            content="\n".join(lines),
+            media_type="text/markdown; charset=utf-8",
+        )
+
+    return JSONResponse(
+        content={"query": query, "count": len(dense), "results": dense}
+    )
 
 
 @app.get("/opensearch.xml")

@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     #: the index must stop short of it, so the cap is stated in MB and derived
     #: into a page count using `estimated_kb_per_page`.
     max_storage_mb: float = 4608.0
+    #: Fraction of the ceiling at which the worker stops taking new URLs and
+    #: switches to refreshing what it already holds. Below 1.0 on purpose: a
+    #: crawl batch in flight can add pages between two checks.
+    storage_watchdog_threshold: float = 0.95
+    #: How often to ask PostgreSQL how big it is. The size moves in megabytes,
+    #: and pg_database_size is not free.
+    storage_watchdog_interval_seconds: float = 60.0
     estimated_kb_per_page: float = 12.0
 
     #: Explicit page cap. 0 means "derive it from max_storage_mb"; set a

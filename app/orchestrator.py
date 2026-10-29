@@ -205,6 +205,10 @@ class Orchestrator:
         self._pending_sitemap_domains: set[str] = set()
         self._sitemap_harvest_task: asyncio.Task[None] | None = None
 
+    #: Set by the storage watchdog when the database reaches its ceiling. While
+    #: it is set the crawl loop takes no new work; revalidation keeps running.
+    freshness_only: bool = False
+
     # -- accessors ---------------------------------------------------------
 
     @property
@@ -508,6 +512,13 @@ class Orchestrator:
             # it used to escape this loop and end the worker for good — which
             # is indistinguishable from a crawl that has simply stopped.
             try:
+                # Freshness-only: the database is at its ceiling, so stop taking
+                # new URLs and let the revalidation worker spend the effort on
+                # the pages already held. The watchdog sets this.
+                if self.freshness_only:
+                    await asyncio.sleep(self._settings.crawl_empty_backoff_seconds)
+                    continue
+
                 outcome = await self.run_batch()
 
                 # Recover the frontier on EVERY pass, including successful

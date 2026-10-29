@@ -173,6 +173,35 @@ class SearchResult:
         }
 
 
+#: Control characters, excluding tab/newline which collapse() handles.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+#: A script block, and then any tag that survived it.
+_SCRIPT_BLOCK = re.compile(r"<\s*script.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
+_ANY_TAG = re.compile(r"<[^>]{0,200}>")
+
+#: A search query is a phrase, not a document.
+MAX_QUERY_CHARS = 256
+
+
+def sanitise_query(text: str, limit: int = MAX_QUERY_CHARS) -> str:
+    """Strip what has no business in a search query.
+
+    Control characters and NUL bytes are removed because they break tokenisers
+    and log parsers; script blocks and tags because the query is echoed back in
+    the response and in the OpenSearch template, and echoing markup is how a
+    reflected-XSS hole opens. Angle brackets are removed last, so nothing that
+    looks like markup survives in any form.
+    """
+    value = str(text or "")
+    value = _SCRIPT_BLOCK.sub(" ", value)
+    value = _ANY_TAG.sub(" ", value)
+    value = _CONTROL_CHARS.sub("", value)
+    value = value.replace("\x00", "")
+    value = value.replace("<", "").replace(">", "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value[:limit]
+
+
 def youtube_thumbnail(url: str) -> str | None:
     """The deterministic thumbnail for a YouTube video URL, or `None`.
 

@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.engine.config import Settings, get_settings
+from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,21 @@ def start_workers(
         )
         logger.info("crawl worker started")
 
+    # The watchdog runs whenever the crawler does: it is the thing that tells
+    # the crawler to stop taking new URLs before the disk is full.
+    if settings.crawler_enabled:
+        handles.add(
+            "watchdog",
+            asyncio.create_task(
+                _supervise(
+                    "watchdog",
+                    lambda: _watch_storage(orchestrator, settings),
+                    handles,
+                )
+            ),
+        )
+        logger.info("storage watchdog started")
+
     if settings.revalidation_enabled:
         handles.add(
             "revalidation",
@@ -115,6 +131,32 @@ def start_workers(
         logger.info("revalidation worker started")
 
     return handles
+
+
+async def _watch_storage(orchestrator: Orchestrator, settings: Settings) -> None:
+    """Flip the crawler into freshness-only mode as the database fills.
+
+    Checks periodically rather than on every batch: the size only moves in
+    megabytes, and `pg_database_size` is not free.
+    """
+    watchdog = StorageWatchdog(orchestrator.store.client, settings)
+    interval = max(5.0, float(settings.storage_watchdog_interval_seconds))
+
+    while True:
+        state = await watchdog.state()
+        if state is not None:
+            if state.over_ceiling and not orchestrator.freshness_only:
+                orchestrator.freshness_only = True
+                logger.warning(
+                    "storage watchdog: %.1f%% of the %.1f GB ceiling; "
+                    "crawler switched to freshness-only",
+                    state.fraction * 100,
+                    settings.max_storage_mb / 1024,
+                )
+            elif not state.over_ceiling and orchestrator.freshness_only:
+                orchestrator.freshness_only = False
+                logger.info("storage watchdog: back under the ceiling; crawling resumes")
+        await asyncio.sleep(interval)
 
 
 async def stop_workers(handles: WorkerHandles | None) -> None:
