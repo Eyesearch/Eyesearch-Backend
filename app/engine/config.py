@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     maintenance_interval_seconds: float = 600.0
     #: Where the daily seed and category snapshot is written.
     snapshot_dir: str = "snapshots"
+
+    #: Federated fallback: when a query returns nothing locally, ask public open
+    #: endpoints for an answer. Off by default, because it puts an outbound
+    #: network dependency inside the request path and sends the user's query to
+    #: a third party. Turn it on deliberately, having read the endpoints' terms.
+    federation_enabled: bool = False
+    #: The whole federated path must finish inside this, or be dropped.
+    federation_budget_seconds: float = 0.5
     estimated_kb_per_page: float = 12.0
 
     #: Explicit page cap. 0 means "derive it from max_storage_mb"; set a

@@ -444,7 +444,26 @@ class SearchService:
         return payload
 
     async def suggest(self, query: str, limit: int = 6) -> list[Any]:
-        """The OpenSearch suggestions shape: `[query, [completions]]`."""
+        """The OpenSearch suggestions shape: `[query, [completions]]`.
+
+        Answered from the in-memory trie when one has been built. Suggest is the
+        most frequent request the system serves — it fires on every keystroke —
+        and answering it from PostgreSQL meant a round trip per character typed.
+        The trie is one pointer per character and touches no database.
+
+        The database path stays as the fallback: the trie is built by the
+        maintenance loop and is absent until that first pass has run, and a
+        suggestion is a convenience that must never turn into an error.
+        """
+        trie = getattr(self, "trie", None)
+        if trie is not None:
+            try:
+                completions = trie.suggest(query, limit)
+                if completions:
+                    return [query, completions]
+            except Exception as error:  # noqa: BLE001 - fall through to the database
+                logger.debug("trie suggest failed for %r: %s", query, error)
+
         try:
             titles = await self._store.suggest(query, limit=limit)
         except Exception as error:  # suggestions are a convenience, never an error

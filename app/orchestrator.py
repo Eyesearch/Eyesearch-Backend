@@ -213,6 +213,12 @@ class Orchestrator:
     #: that is alive but stuck can be told apart from one that is working.
     king = None
 
+    #: The autosuggest trie, once the maintenance loop has built it.
+    autosuggest = None
+    #: The federated fleet, wired by the scheduler when federation is enabled.
+    federated = None
+    marshal = None
+
     # -- accessors ---------------------------------------------------------
 
     @property

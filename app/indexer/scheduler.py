@@ -25,6 +25,9 @@ MemoryJanitorAgent = load_agent("29_memory_janitor_agent").MemoryJanitorAgent
 ChroniclerReporterAgent = load_agent("30_chronicler_reporter_agent").ChroniclerReporterAgent
 TrieAutosuggestAgent = load_agent("39_autosuggest_trie_agent").TrieAutosuggestAgent
 DisasterSnapshotAgent = load_agent("38_disaster_snapshot_agent").DisasterSnapshotAgent
+SupremeMarshalAgent = load_agent("50_supreme_marshal_agent").SupremeMarshalAgent
+FederatedHorizonAgent = load_agent("41_federated_horizon_agent").FederatedHorizonAgent
+FreeKnowledgeCourierAgent = load_agent("42_free_knowledge_courier").FreeKnowledgeCourierAgent
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +151,18 @@ def start_workers(
         )
         logger.info("revalidation worker started")
 
+    # The Marshal governs outbound work whether or not federation is on: it is
+    # the thing that decides whether any outbound call may happen at all.
+    orchestrator.marshal = SupremeMarshalAgent()
+
+    if settings.federation_enabled:
+        orchestrator.federated = FederatedHorizonAgent(
+            knowledge=FreeKnowledgeCourierAgent(),
+            settings=settings,
+            budget=settings.federation_budget_seconds,
+        )
+        logger.info("federated fallback enabled")
+
     if settings.maintenance_enabled:
         handles.add(
             "maintenance",
@@ -207,6 +222,9 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                     )
                     added = autosuggest.rebuild([(str(r[0]), int(r[1])) for r in words.rows])
                     orchestrator.autosuggest = autosuggest
+                    service = getattr(orchestrator, "search_service", None)
+                    if service is not None:
+                        service.trie = autosuggest
                     autosuggest_built = True
                     logger.info("autosuggest trie built with %d words", added)
                 except Exception:

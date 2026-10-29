@@ -186,7 +186,12 @@ async def lifespan(app: FastAPI):
     app.state.client = client
     app.state.search_client = search_client
     app.state.orchestrator = orchestrator
-    app.state.service = SearchService(IndexStore(search_client, settings), settings)
+
+    service = SearchService(IndexStore(search_client, settings), settings)
+    app.state.service = service
+    # The maintenance loop builds the trie and hangs it here, so suggest() can
+    # find it without the service importing the scheduler.
+    orchestrator.search_service = service
     app.state.workers = WorkerHandles()
 
     # Workers are scheduled from a bootstrap task, not inline, so the port is
