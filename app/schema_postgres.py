@@ -159,6 +159,11 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     # lets PostgreSQL walk the index instead of sorting the matches.
     "CREATE INDEX IF NOT EXISTS idx_pages_category_quality "
     "ON pages(category_id, quality_score DESC)",
+    # Lower is crawled sooner. Re-queued pages that were stored under the old
+    # 40-character rule carry 0 so they are refetched before fresh discovery.
+    "ALTER TABLE crawl_queue ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 1",
+    "CREATE INDEX IF NOT EXISTS idx_crawl_queue_priority "
+    "ON crawl_queue(priority, status)",
     "CREATE INDEX IF NOT EXISTS idx_pages_search ON pages USING GIN (search_vector)",
     "CREATE INDEX IF NOT EXISTS idx_pages_site ON pages(site_id)",
     # Partial unique index: the database itself enforces SHA-256 deduplication

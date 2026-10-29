@@ -868,7 +868,11 @@ class IndexStore:
         result = await self._client.execute(
             "SELECT id, url, domain, retry_count FROM ("
             "  SELECT cq.id AS id, cq.url, cq.domain, cq.retry_count,"
-            "         ROW_NUMBER() OVER (PARTITION BY cq.domain ORDER BY cq.id ASC) AS rn "
+            # Priority first, then age, inside each domain's turn: a re-queued
+            # page is fetched before new discovery from the same site, without
+            # letting one site take the whole batch.
+            "         ROW_NUMBER() OVER (PARTITION BY cq.domain "
+            "ORDER BY cq.priority ASC, cq.id ASC) AS rn "
             "  FROM crawl_queue cq WHERE cq.status = 'pending'"
             "    AND cq.domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "

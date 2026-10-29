@@ -69,13 +69,21 @@ class MemoryJanitorAgent:
         self.threshold_bytes = int(threshold_bytes)
         self.min_interval = float(min_interval)
         self._clock = clock
-        self._last_collect = 0.0
+        #: None means "never collected". Starting at 0.0 meant "collected at
+        #: boot", so the first collection was delayed by the machine's own
+        #: uptime: on a host up for days it happened at once, on a fresh pod it
+        #: waited five minutes. Whether the janitor works should not depend on
+        #: when the machine was last rebooted.
+        self._last_collect: float | None = None
         self.collections = 0
 
     def should_collect(self, rss: int) -> bool:
         return (
             rss >= self.threshold_bytes
-            and (self._clock() - self._last_collect) >= self.min_interval
+            and (
+                self._last_collect is None
+                or (self._clock() - self._last_collect) >= self.min_interval
+            )
         )
 
     async def sweep(self, client=None, *, force: bool = False) -> JanitorReport:
