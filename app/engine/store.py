@@ -395,6 +395,31 @@ class IndexStore:
                 )
             )
 
+        # The shared per-domain budget, applied in the same transaction as the
+        # inserts so the domain is never over budget between two commits. Each
+        # page gets budget // pages_of_that_domain, and pages already stored are
+        # trimmed too: adding a page shrinks everyone's allowance.
+        budget = int(self._settings.domain_body_budget_chars or 0)
+        if budget > 0:
+            for domain in {document.domain for document in documents if document.domain}:
+                statements.append(
+                    (
+                        # Explicit casts: without them the placeholder arrives
+                        # as an unknown type and PostgreSQL cannot pick an
+                        # integer division overload.
+                        # substr wants an int; the division promotes to bigint.
+                        "UPDATE pages SET body_text = substr(body_text, 1, "
+                        "CAST(GREATEST(1, CAST(? AS INTEGER) / GREATEST(1, "
+                        "(SELECT COUNT(*) FROM pages q WHERE q.site_id = pages.site_id))) "
+                        "AS INTEGER)) "
+                        "WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
+                        "AND length(body_text) > GREATEST(1, CAST(? AS INTEGER) / "
+                        "GREATEST(1, (SELECT COUNT(*) FROM pages q "
+                        "WHERE q.site_id = pages.site_id)))",
+                        (budget, domain, budget),
+                    )
+                )
+
         statements.append(("SELECT COUNT(*) FROM pages", ()))
         statements.append(("SELECT COUNT(*) FROM sites", ()))
         statements.append(("COMMIT", ()))
