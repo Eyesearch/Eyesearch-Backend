@@ -54,11 +54,15 @@ class Settings(BaseSettings):
     #: Search gets its own connection pool, so a crawler burst cannot take every
     #: connection and starve the API. These bound that pool, not the crawler's.
     search_pool_min_size: int = 1
-    search_pool_max_size: int = 5
-    #: Tighter than the crawler's 4s: a person is waiting on this one. 1.5s is
-    #: the ceiling — a search that cannot answer in that time is failing, and
-    #: holding the connection longer only starves the next request.
-    search_statement_timeout_ms: int = 1500
+    #: Raised from 5: with a burst of concurrent searches the pool was the
+    #: bottleneck, and a request waited for a connection before it ever
+    #: reached the query.
+    search_pool_max_size: int = 10
+    #: Tighter than the crawler's 4s: a person is waiting on this one. 1.5s was
+    #: the ceiling and it was too tight — a ranked full-text scan over a larger
+    #: index can legitimately take two seconds, and killing it produced the
+    #: "no response" the user saw rather than a slow answer.
+    search_statement_timeout_ms: int = 3000
     search_acquire_timeout_seconds: float = 1.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
@@ -212,14 +216,15 @@ class Settings(BaseSettings):
     max_pages_per_domain: int = 25
 
     #: Strict per-page body ceiling, in characters, whatever the domain's page
-    #: count. 40 is the 1,000-character domain limit divided by the 25-page
-    #: ceiling: ultra-compact storage, and 40 characters is roughly six words, so
-    #: a card snippet shows a phrase rather than a sentence.
-    page_body_char_ceiling: int = 40
-    #: Total body text one domain may hold across all its pages. With a 40-char
-    #: page ceiling and a 25-page cap this cannot be reached; it is the backstop
-    #: if either of those is raised.
-    domain_body_budget_chars: int = 1000
+    #: count. 200 is about two lines of card text: enough for a sentence a reader
+    #: can judge, and enough that the "More" toggle has something to expand.
+    #: It was 40, which is six words — a fragment, not a snippet.
+    page_body_char_ceiling: int = 200
+    #: Total body text one domain may hold across all its pages: the page
+    #: ceiling times the page cap, 200 x 25. It has to clear that, or it silently
+    #: undoes the ceiling — a 1,000-character budget clamped every page back to 40
+    #: and made the per-page setting a lie.
+    domain_body_budget_chars: int = 5000
 
     search_default_limit: int = 10
     search_max_limit: int = 50

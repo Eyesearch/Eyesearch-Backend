@@ -615,6 +615,19 @@ def base_url_for(request: Request) -> str:
     return f"{scheme}://{request.headers.get('host', request.url.netloc)}"
 
 
+def _snippet_ceiling(request: Request) -> int:
+    """The configured body ceiling, with a safe fallback.
+
+    Read from app state when the lifespan has run, and from the settings
+    otherwise — the endpoint must not fail because it was reached before boot
+    finished, or from a test that never started the lifespan.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        settings = get_settings()
+    return max(1, int(settings.page_body_char_ceiling))
+
+
 @app.get("/v1/ai/search")
 async def ai_search(
     request: Request,
@@ -641,7 +654,7 @@ async def ai_search(
             "brand": item.get("brand_name") or "",
             "clean_url": item.get("clean_url") or "",
             "category": item.get("category") or "WEB",
-            "snippet": (item.get("snippet") or "")[:40],
+            "snippet": (item.get("snippet") or "")[: _snippet_ceiling(request)],
             "url": item.get("url") or "",
         }
         for item in results

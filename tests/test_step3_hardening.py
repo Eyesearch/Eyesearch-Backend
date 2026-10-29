@@ -122,7 +122,10 @@ def test_the_ai_endpoint_returns_the_dense_shape(client):
     assert body["count"] == 1
     item = body["results"][0]
     assert set(item) == {"title", "brand", "clean_url", "category", "snippet", "url"}
-    assert len(item["snippet"]) <= 40
+    # Capped by the same ceiling the index uses, not a separate number.
+    from app.engine.config import get_settings
+
+    assert len(item["snippet"]) <= get_settings().page_body_char_ceiling
 
 
 def test_the_ai_endpoint_can_answer_in_markdown(client):

@@ -169,7 +169,8 @@ def test_an_external_card_is_forced_into_our_shape():
     )
 
     assert card.url == "https://karnataka.gov.in/x"
-    assert len(card.snippet) <= 40
+    # The ceiling the index uses, not a second number of its own.
+    assert len(card.snippet) <= 200
     assert "|" not in card.title
     assert card.brand == "Karnataka"
 

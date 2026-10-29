@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 _brand = load_agent("10_brand_canonical_agent")
 _enforcer = load_agent("11_rule_enforcer_agent")
 
-SNIPPET_CHARS = 40
+#: Read from the same setting the index uses, so a federated card is the same
+#: length as an indexed one. A second hardcoded number here is how the two
+#: drift apart.
+from app.engine.config import get_settings as _get_settings
+
+SNIPPET_CHARS = _get_settings().page_body_char_ceiling
 strip_tracking = _enforcer.strip_tracking
 action_title_from = _brand.action_title_from
 
