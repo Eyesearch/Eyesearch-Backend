@@ -296,7 +296,9 @@ def to_result(hit: SearchHit) -> SearchResult:
         score=hit.score,
         brand_name=hit.brand_name or "",
         clean_url=hit.clean_url or "",
-        category=category_code(hit.category),
+        # The join already knows the code; the Python map is the fallback for a
+        # row whose category_id was never set.
+        category=(hit.category_code or category_code(hit.category)),
     )
 
 

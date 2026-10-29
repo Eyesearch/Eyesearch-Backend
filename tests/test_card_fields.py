@@ -198,3 +198,46 @@ async def test_a_row_without_an_action_title_falls_back_to_its_title(client):
     assert result["title"] == "Old page title"
     assert result["brand_name"] == ""
     assert result["clean_url"] == ""
+
+
+# ---------------------------------------------------------------------------
+# The categories table
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_categories_table_is_seeded(client):
+    result = await client.execute("SELECT code, name FROM categories ORDER BY id")
+    rows = {code: name for code, name in result.rows}
+    assert rows["GOV"] == "government"
+    assert rows["WEB"] == "general_reference"
+    # Every category the classifier can emit must have a row, or a page would
+    # link to nothing.
+    assert {"GOV", "TECH", "NEWS", "JOBS", "FINANCE", "EDU", "HEALTH", "AGRI", "LEGAL", "WEB"} <= set(rows)
+
+
+@pytest.mark.asyncio
+async def test_a_written_page_is_linked_to_its_category(client):
+    await client.execute(
+        "INSERT INTO pages (url, title, body_text, digest, category) "
+        "VALUES ('https://karnataka.gov.in/a', 'Health', 'text', 'cat-1', 'government')"
+    )
+    joined = await client.execute(
+        "SELECT p.category, c.code FROM pages p "
+        "LEFT JOIN categories c ON c.id = p.category_id WHERE p.url = 'https://karnataka.gov.in/a'"
+    )
+    assert joined.rows == [["government", "GOV"]]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_category_still_links_to_web(client):
+    """A category the table has never heard of must not leave the row unlinked."""
+    await client.execute(
+        "INSERT INTO pages (url, title, body_text, digest, category) "
+        "VALUES ('https://x.example/a', 'T', 'text', 'cat-2', 'something_new')"
+    )
+    joined = await client.execute(
+        "SELECT c.code FROM pages p LEFT JOIN categories c ON c.id = p.category_id "
+        "WHERE p.url = 'https://x.example/a'"
+    )
+    assert joined.scalar(0) == "WEB"

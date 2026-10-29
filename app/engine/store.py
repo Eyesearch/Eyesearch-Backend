@@ -69,6 +69,7 @@ class PageDocument:
     clean_url: str = ""
     action_title: str = ""
     category: str = ""
+    category_code: str = ""
 
     def as_row(self) -> tuple[Any, ...]:
         """The twelve bound values the page insert expects, in SQL order.
@@ -133,6 +134,7 @@ class SearchHit:
     clean_url: str = ""
     action_title: str = ""
     category: str = ""
+    category_code: str = ""
 
     @property
     def snippet(self) -> str:
@@ -862,10 +864,11 @@ class IndexStore:
             f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
             f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit, "
             # Appended last on purpose: the row mapper reads by position, and
-            # inserting it earlier would shift every index after it.
-            "p.category "
+            # inserting them earlier would shift every index after it.
+            "p.category, c.code AS category_code "
             "FROM pages p "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
+            "LEFT JOIN categories c ON c.id = p.category_id "
             f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
             ") ranked "
             "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit) ASC "
@@ -917,7 +920,7 @@ class IndexStore:
     def _row_to_hit(row: Sequence[Any], tokens: Sequence[str] = ()) -> SearchHit:
         # Column order, from the SELECT in `search`: 0 page_id, 1 url, 2 title,
         # 3 description, 4 body_text, 5 brand_name, 6 clean_url, 7 action_title,
-        # 8 lexical_score, 9 title_hit, 10 auth_hit, 11 category.
+        # 8 lexical_score, 9 title_hit, 10 auth_hit, 11 category, 12 category_code.
         title_hit = int(row[9] or 0)
         auth_hit = int(row[10] or 0)
         boosted = (
@@ -939,6 +942,7 @@ class IndexStore:
             clean_url=str(row[6] or ""),
             action_title=str(row[7] or ""),
             category=str(row[11] or ""),
+            category_code=str(row[12] or ""),
         )
 
     @staticmethod
