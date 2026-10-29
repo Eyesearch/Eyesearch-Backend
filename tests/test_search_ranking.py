@@ -10,6 +10,8 @@ echoed back as the snippet.
 
 from __future__ import annotations
 
+import pytest
+
 import app.engine.store as store_module
 from app.engine.store import PageDocument, passage_around_match
 
@@ -228,3 +230,78 @@ async def test_a_query_the_strict_match_misses_still_answers(store):
     hits = await store.search("karnataka metro")
 
     assert hits
+
+
+# ---------------------------------------------------------------------------
+# Script and language
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query, tokens",
+    [
+        ("ಕರ್ನಾಟಕ ಆರೋಗ್ಯ", ["ಕರ್ನಾಟಕ", "ಆರೋಗ್ಯ"]),
+        ("कर्नाटक स्वास्थ्य", ["कर्नाटक", "स्वास्थ्य"]),
+        ("தமிழ்நாடு", ["தமிழ்நாடு"]),
+        ("karnataka health", ["karnataka", "health"]),
+    ],
+)
+def test_indic_words_keep_their_combining_marks(query, tokens):
+    """`isalnum()` drops every Indian vowel sign: "ಕರ್ನಾಟಕ" became "ಕರನಟಕ",
+    a word that matches nothing. The marks are part of the word."""
+    from app.engine.store import fts_tokens
+
+    assert fts_tokens(query) == tokens
+
+
+def test_a_kannada_query_builds_a_kannada_tsquery():
+    from app.engine.store import build_tsquery
+
+    assert build_tsquery("ಕರ್ನಾಟಕ ಆರೋಗ್ಯ") == "ಕರ್ನಾಟಕ & ಆರೋಗ್ಯ"
+
+
+def test_the_query_language_is_detected_from_its_script():
+    from app.engine.store import _query_language
+
+    assert _query_language("ಕರ್ನಾಟಕ ಆರೋಗ್ಯ") == "kn"
+    assert _query_language("कर्नाटक") == "hi"
+    assert _query_language("karnataka") == "en"
+
+
+@pytest.mark.asyncio
+async def test_a_kannada_query_finds_the_kannada_page(store):
+    from app.engine.store import PageDocument
+
+    await store.persist_batch(
+        [
+            PageDocument(
+                url="https://a.gov.in/kn",
+                domain="a.gov.in",
+                title="ಕರ್ನಾಟಕ ಆರೋಗ್ಯ ಇಲಾಖೆ",
+                description="ಜಿಲ್ಲಾ ಅಧಿಸೂಚನೆ",
+                body_text="ಕರ್ನಾಟಕ ಆರೋಗ್ಯ ಇಲಾಖೆ ಜಿಲ್ಲಾ ಅಧಿಸೂಚನೆ",
+                digest="lang-1",
+                language="kn",
+            ),
+            PageDocument(
+                url="https://b.gov.in/en",
+                domain="b.gov.in",
+                title="Karnataka Health Department",
+                description="district notification",
+                body_text="Karnataka health department district notification",
+                digest="lang-2",
+                language="en",
+            ),
+        ]
+    )
+
+    hits = await store.search("ಕರ್ನಾಟಕ ಆರೋಗ್ಯ")
+
+    assert [hit.url for hit in hits] == ["https://a.gov.in/kn"]
+
+
+def test_a_timeout_is_told_apart_from_a_real_fault():
+    from app.engine.store import _is_timeout
+
+    assert _is_timeout(Exception("canceling statement due to statement timeout")) is True
+    assert _is_timeout(Exception("relation \"pages\" does not exist")) is False

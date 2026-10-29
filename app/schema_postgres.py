@@ -100,7 +100,10 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
         NEW.search_vector :=
             setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
             setweight(to_tsvector('simple', coalesce(NEW.description, '')), 'B') ||
-            setweight(to_tsvector('simple', coalesce(NEW.body_text, '')), 'C');
+            -- Body carries the lowest weight (D) on purpose: a page that
+            -- repeats a keyword through its footer and navigation should not
+            -- outrank one that has it in the title. A=1.0 against D=0.1.
+            setweight(to_tsvector('simple', coalesce(NEW.body_text, '')), 'D');
         RETURN NEW;
     END
     $$ LANGUAGE plpgsql

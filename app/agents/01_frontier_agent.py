@@ -302,6 +302,14 @@ class FrontierItem:
 
 #: Public suffixes that carry an extra label: the registrable domain is the
 #: last three labels, so `optica.iiita.ac.in` is `iiita.ac.in`. Derived from
+#: Suffixes reserved for government, academia and the military. Narrower than
+#: `PRIORITY_SUFFIXES`, which treats the whole `.in` space as worth crawling:
+#: everything Indian is worth crawling, but only these are the first band.
+RESERVED_SUFFIXES: tuple[str, ...] = (
+    ".gov.in", ".nic.in", ".ac.in", ".edu.in", ".res.in", ".mil.in",
+    ".gov", ".nic", ".ac", ".mil", ".gob", ".gouv",
+)
+
 #: `PRIORITY_SUFFIXES` so the two can never drift apart.
 TWO_PART_SUFFIXES: tuple[str, ...] = tuple(
     suffix for suffix in PRIORITY_SUFFIXES if suffix.count(".") == 2
@@ -638,12 +646,24 @@ async def discover_sitemap_urls(
 def priority_of(url: str) -> int:
     """Lower sorts first.
 
-    0 is reserved for Indian civic domains (.gov.in, .nic.in, .ac.in, .res.in
-    and the rest of the public suffixes). The curated commercial and consumer
-    portals sit at 1 alongside everything else: allowed, but never ahead of
-    government, academic or national infrastructure in the queue.
+    Three bands rather than two:
+
+    * 0 — Indian civic domains (.gov.in, .nic.in, .ac.in, .res.in and the rest
+      of the public suffixes), and other reserved government suffixes.
+    * 1 — the Indian web more broadly: .in, .co.in, .org.in, and academic or
+      news domains on them.
+    * 2 — everything else.
+
+    The point of the middle band is that a crawl spends its first hours on
+    Indian infrastructure instead of whatever foreign commercial site happened
+    to be linked first. The bands come from the TLD, so no site is named.
     """
-    return 0 if is_civic(domain_of(url)) else 1
+    host = domain_of(url)
+    if any(host.endswith(suffix) for suffix in RESERVED_SUFFIXES):
+        return 0
+    if host.endswith(".in"):
+        return 1
+    return 2
 
 
 class FrontierAgent:

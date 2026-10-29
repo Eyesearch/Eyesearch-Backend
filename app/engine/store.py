@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import html
 import logging
+import unicodedata
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
@@ -26,13 +27,27 @@ from app.schema_postgres import SEARCH_CONFIG
 from app.engine.config import Settings, get_settings
 from app.libsql_http import LibsqlClient, LibsqlError
 
+from app.agents import load_agent
+
 logger = logging.getLogger(__name__)
+
+LanguageAgent = load_agent("08_language_agent").LanguageAgent
 
 # Columns the FTS index carries, in bm25 weight order.
 BM25_WEIGHTS = (10.0, 5.0, 1.0)
 
 #: How much a title match is worth on top of bm25. bm25 is negative and
 #: lower-is-better, so this is subtracted from the score to promote the row.
+#: How much a page in the query's own language outranks one in another. Enough
+#: to reorder otherwise-equal matches, not enough to lift a weak match over a
+#: strong one.
+#: How many index matches the fallback will look at. Bounded on purpose: this
+#: path exists because the full ranking could not finish in time, and an
+#: unbounded one would take just as long.
+FAST_CANDIDATE_LIMIT = 500
+
+LANGUAGE_MATCH_BOOST = 0.35
+
 TITLE_MATCH_BOOST = 1.0
 
 #: Institutional Indian suffixes that earn a ranking boost.
@@ -199,11 +214,28 @@ def fts_tokens(query: str) -> list[str]:
     """
     tokens: list[str] = []
     for raw in (query or "").lower().split():
-        cleaned = "".join(ch for ch in raw if ch.isalnum() or ch in "_/.")
+        cleaned = "".join(ch for ch in raw if _is_word_char(ch))
         cleaned = cleaned.strip("_/.")
         if cleaned:
             tokens.append(cleaned)
     return tokens
+
+
+def _is_word_char(ch: str) -> bool:
+    """Whether a character belongs in a search term.
+
+    `str.isalnum()` is not enough: every Indian script writes its vowels as
+    combining marks, and those are not alphanumeric. Keeping only alnum turned
+    "ಕರ್ನಾಟಕ" into "ಕರನಟಕ" — the word with its vowels torn out — so a Kannada
+    query matched nothing at all. PostgreSQL's own tokeniser handles these
+    scripts correctly; the query builder was the thing mangling them.
+    """
+    if ch.isalnum():
+        return True
+    # Mn/Mc/Ms: non-spacing, spacing and enclosing combining marks.
+    if unicodedata.category(ch).startswith("M"):
+        return True
+    return ch in "_/."
 
 
 def build_match_query(query: str, *, prefix: bool = False) -> str:
@@ -225,7 +257,10 @@ def build_tsquery(query: str, *, prefix: bool = False) -> str:
     """
     tokens = []
     for token in fts_tokens(query):
-        cleaned = "".join(ch for ch in token if ch.isalnum() or ch == "_")
+        # Same rule as the tokeniser: a combining mark is part of the word in
+        # every Indian script, and dropping it turned "ಕರ್ನಾಟಕ" into
+        # "ಕರನಟಕ" — a term that matches nothing.
+        cleaned = "".join(ch for ch in token if _is_word_char(ch) and ch != ".")
         if cleaned:
             tokens.append(cleaned)
     if not tokens:
@@ -316,6 +351,26 @@ def highlight_terms(text: str, tokens: Sequence[str]) -> str:
         cursor = match.end()
     parts.append(html.escape(text[cursor:], quote=False))
     return "".join(parts)
+
+
+def _is_timeout(error: Exception) -> bool:
+    """Whether a database error is a statement timeout rather than a real fault."""
+    text = str(error).lower()
+    return "statement timeout" in text or "canceling statement" in text or "cancelling statement" in text
+
+
+def _query_language(query: str) -> str:
+    """The language a query is written in, from its script.
+
+    A Kannada query should find Kannada pages first. Detection is by Unicode
+    block, so it works for every Indian script without a table of languages and
+    without a word of domain knowledge — English, and any other Latin-script
+    query, comes back as "en".
+    """
+    try:
+        return LanguageAgent().detect(query or "")
+    except Exception:  # noqa: BLE001 - a ranking boost is not worth an error
+        return "en"
 
 
 def normalise_score(raw: float) -> float:
@@ -916,6 +971,10 @@ class IndexStore:
             "AS lexical_score, "
             f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
             f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit, "
+            # Language alignment: a Kannada query should surface Kannada pages.
+            # The code is detected from the query's own script, so nothing is
+            # hardcoded per language beyond the ISO mapping.
+            "CASE WHEN p.language = ? THEN 1 ELSE 0 END AS lang_hit, "
             # Appended last on purpose: the row mapper reads by position, and
             # inserting them earlier would shift every index after it.
             "p.category, c.code AS category_code "
@@ -924,21 +983,37 @@ class IndexStore:
             "LEFT JOIN categories c ON c.id = p.category_id "
             f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
             ") ranked "
-            "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit) ASC "
+            "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit "
+            "- ? * lang_hit) ASC "
             "LIMIT ? OFFSET ?"
         )
+        query_language = _query_language(query)
+
         args = (
             rank_query,
             *title_tokens,
+            query_language,
             match_query,
             *extra,
             TITLE_MATCH_BOOST,
             AUTHORITY_DOMAIN_BOOST,
+            LANGUAGE_MATCH_BOOST,
             limit,
             offset,
         )
 
-        result = await self._client.execute(sql, args)
+        try:
+            result = await self._client.execute(sql, args)
+        except LibsqlError as error:
+            # The ranked query ran past the statement timeout. Ranking every
+            # match is the expensive part, so drop it: take a bounded set of
+            # index matches and score those. A slower, cheaper answer beats the
+            # "search timed out" the user was seeing.
+            if not _is_timeout(error):
+                raise
+            logger.warning("ranked search timed out; falling back to index-only: %s", error)
+            return await self._fast_search(match_query, filters, extra, limit, offset, tokens)
+
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
 
         if hits:
@@ -957,10 +1032,12 @@ class IndexStore:
                 (
                     rank_query,
                     *title_tokens,
+                    query_language,
                     loose,
                     *extra,
                     TITLE_MATCH_BOOST,
                     AUTHORITY_DOMAIN_BOOST,
+                    LANGUAGE_MATCH_BOOST,
                     limit,
                     offset,
                 ),

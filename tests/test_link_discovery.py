@@ -353,18 +353,29 @@ def test_a_domain_outside_the_allowed_tlds_stays_out():
 
 
 def test_civic_domains_outrank_commercial_portals():
-    """Priority 0 is reserved for Indian civic and public-suffix domains."""
-    # Civic: government, academic, national infrastructure.
+    """Three bands: reserved suffixes, the Indian web, then everything else."""
+    # Band 0: government, academic, national infrastructure.
     assert priority_of("https://karnataka.gov.in/") == 0
     assert priority_of("https://www.iisc.ac.in/") == 0
-    assert priority_of("https://somewhere.in/") == 0
     assert priority_of("https://bengaluruurban.nic.in/") == 0
 
-    # Allowed, but never ahead of civic sources.
-    assert priority_of("https://www.thehindu.com/") == 1
-    assert priority_of("https://flipkart.com/mobiles") == 1
-    assert priority_of("https://google.com/") == 1
-    assert priority_of("https://randomshop.com/") == 1
+    # Band 1: the Indian web — worth crawling, after the reserved suffixes.
+    assert priority_of("https://somewhere.in/") == 1
+    assert priority_of("https://news.co.in/") == 1
+
+    # Band 2: everything else, so an Indian commercial site still beats a
+    # foreign one rather than tying with it.
+    assert priority_of("https://shop.example/") == 2
+    assert priority_of("https://karnataka.gov.in/") < priority_of("https://somewhere.in/")
+    assert priority_of("https://somewhere.in/") < priority_of("https://shop.example/")
+
+    # Allowed, but behind the reserved suffixes and the Indian web. The first
+    # two are Indian publishers on .com, which is why they sit in band 2 with
+    # everything else: the band comes from the suffix, not from who owns it.
+    assert priority_of("https://www.thehindu.com/") == 2
+    assert priority_of("https://flipkart.com/mobiles") == 2
+    assert priority_of("https://google.com/") == 2
+    assert priority_of("https://randomshop.com/") == 2
 
 
 def test_the_seeds_span_more_than_one_category():
