@@ -1141,7 +1141,30 @@ class IndexStore:
             hit.score = 1.0 if span <= 0 else round((worst - hit.raw_score) / span, 4)
 
     async def suggest(self, query: str, limit: int = 6) -> list[str]:
-        """Title completions for the search bar."""
+        """Prefix completions: the words the index actually contains.
+
+        This used to return whole page titles, which is a poor suggestion: a
+        title is a sentence, and a dropdown of sentences is not a completion. The
+        vocabulary is read from the search vectors themselves, so a suggestion is
+        always a term that will match.
+        """
+        prefix = " ".join((query or "").split())
+        if len(prefix) < 2:
+            return []
+
+        try:
+            result = await self._client.execute(
+                "SELECT word FROM ts_stat("
+                "  'SELECT search_vector FROM pages'"
+                ") WHERE word LIKE ? ORDER BY nentry DESC, word ASC LIMIT ?",
+                (f"{prefix.lower()}%", limit),
+            )
+            words = [str(row[0]) for row in result.rows if row[0]]
+            if words:
+                return words
+        except Exception as error:  # noqa: BLE001 - fall through to titles
+            logger.debug("ts_stat suggest failed for %r: %s", prefix, error)
+
         match = build_tsquery(query, prefix=True)
         if not match:
             return []

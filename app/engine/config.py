@@ -227,6 +227,9 @@ class Settings(BaseSettings):
     domain_body_budget_chars: int = 5000
 
     search_default_limit: int = 10
+    #: How many results one domain may contribute to a single page. A search
+    #: returning eight pages from one site is ranked but useless.
+    max_results_per_domain: int = 2
     search_max_limit: int = 50
     search_max_page: int = 20
 
