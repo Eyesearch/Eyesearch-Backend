@@ -14,9 +14,13 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 
+from app.agents import load_agent
 from app.engine.config import Settings, get_settings
 from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
+
+KingOrchestratorAgent = load_agent("14_king_orchestrator_agent").KingOrchestratorAgent
+RegentAgent = load_agent("21_regent_agent").RegentAgent
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,8 @@ class WorkerHandles:
     tasks: dict[str, asyncio.Task] = field(default_factory=dict)
     restarts: dict[str, int] = field(default_factory=dict)
     last_error: dict[str, str] = field(default_factory=dict)
+    king: object | None = None
+    regent: object | None = None
 
     def add(self, name: str, task: asyncio.Task) -> None:
         self.tasks[name] = task
@@ -97,12 +103,20 @@ def start_workers(
     settings = settings or get_settings()
     handles = WorkerHandles()
 
+    # The supervisor and its standby. They only start when there is something to
+    # supervise: with the crawler and revalidation both off, a watchdog watching
+    # nothing is just another task to leak.
+    if settings.crawler_enabled or settings.revalidation_enabled:
+        king = KingOrchestratorAgent()
+        regent = RegentAgent(king)
+        orchestrator.king = king
+        handles.king = king
+        handles.regent = regent
+
     if settings.crawler_enabled:
         handles.add(
             "crawler",
-            asyncio.create_task(
-                _supervise("crawler", orchestrator.run_forever, handles)
-            ),
+            _start(orchestrator, "crawler", orchestrator.run_forever, handles),
         )
         logger.info("crawl worker started")
 
@@ -124,13 +138,29 @@ def start_workers(
     if settings.revalidation_enabled:
         handles.add(
             "revalidation",
-            asyncio.create_task(
-                _supervise("revalidation", orchestrator.revalidation.run_forever, handles)
+            _start(
+                orchestrator, "revalidation", orchestrator.revalidation.run_forever, handles
             ),
         )
         logger.info("revalidation worker started")
 
+    if handles.regent is not None:
+        handles.add("regent", asyncio.create_task(handles.regent.stand_by_forever()))
+
     return handles
+
+
+def _start(orchestrator: Orchestrator, name: str, factory, handles: "WorkerHandles"):
+    """Start a worker, supervised by the King when there is one.
+
+    The King restarts a worker that is alive but silent; `_supervise` restarts
+    one that raised. Both are needed, and only one of them may own the task, so
+    the King takes it when present.
+    """
+    king = getattr(orchestrator, "king", None)
+    if king is not None:
+        return king.register(name, factory)
+    return asyncio.create_task(_supervise(name, factory, handles))
 
 
 async def _watch_storage(orchestrator: Orchestrator, settings: Settings) -> None:
@@ -173,6 +203,9 @@ async def stop_workers(handles: WorkerHandles | None) -> None:
             pass
         except Exception as error:  # already logged by the guard
             logger.debug("worker %s raised while stopping: %s", name, error)
+    # The King's registry holds its own tasks, which are not in `handles.tasks`.
+    if handles.king is not None:
+        await handles.king.stop()
     logger.info("all workers stopped")
 
 

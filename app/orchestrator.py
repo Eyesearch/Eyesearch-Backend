@@ -209,6 +209,10 @@ class Orchestrator:
     #: it is set the crawl loop takes no new work; revalidation keeps running.
     freshness_only: bool = False
 
+    #: The supervisor, when one is running. The loops beat into it so a loop
+    #: that is alive but stuck can be told apart from one that is working.
+    king = None
+
     # -- accessors ---------------------------------------------------------
 
     @property
@@ -507,6 +511,8 @@ class Orchestrator:
         batches_since_prune = 0
 
         while True:
+            if self.king is not None:
+                self.king.beat("crawler")
             # The whole iteration is guarded, not just the batch. `refill()`
             # does network and database work of its own, and an exception from
             # it used to escape this loop and end the worker for good — which
