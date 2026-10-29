@@ -373,11 +373,14 @@ def test_the_seeds_span_more_than_one_category():
 
     categories = {classifier.classify(seed).category for seed in SEED_URLS}
 
-    # A bare root URL carries little signal, so seeds alone cannot span all
-    # ten categories — the pages discovered beneath them do that.
+    # A bare root URL carries little signal — no title, no body, often no path —
+    # so seeds alone cannot span every category; the pages discovered beneath
+    # them do that. The seeds used to produce a legal one because the classifier
+    # matched the word "indiankanoon" in the URL, which was a site's name in a
+    # rule and has been removed: a domain-name token classifies that one site and
+    # nothing else.
     assert len(categories) >= 4
     assert "government" in categories
-    assert "legal_judiciary" in categories
 
 
 def test_a_whitelisted_portal_is_not_capped_out_by_its_suffix():

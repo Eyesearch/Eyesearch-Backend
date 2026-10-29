@@ -351,6 +351,8 @@ class ParsedPage:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    #: Schema.org @type values from the page's JSON-LD, lower-cased.
+    schema_types: list[str] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
@@ -373,9 +375,10 @@ class ParserAgent:
             logger.debug("parse failed for %s: %s", url, error)
             return ParsedPage(url=url, ok=False, reason="unparseable")
 
-        # Read the brand first: JSON-LD lives in a <script>, which the strip
-        # below removes before anything else can see it.
+        # Read the brand and the schema types first: JSON-LD lives in a
+        # <script>, which the strip below removes before anything else sees it.
         brand_name = self._brand_name(soup, url)
+        schema_types = self._schema_types(soup)
 
         for tag in soup.find_all(STRIP_TAGS):
             tag.decompose()
@@ -403,6 +406,7 @@ class ParserAgent:
             description=description[:DESCRIPTION_CHAR_CAP],
             body_text=body_text,
             links=links,
+            schema_types=schema_types,
             brand_name=brand_name[:BRAND_CHAR_CAP],
             clean_url=clean_url[:CLEAN_URL_CHAR_CAP],
             action_title=(action_title or title)[:ACTION_TITLE_CHAR_CAP],
@@ -466,6 +470,42 @@ class ParserAgent:
         if heading:
             return collapse(heading.get_text(" "))
         return ""
+
+    @staticmethod
+    def _schema_types(soup: BeautifulSoup) -> list[str]:
+        """Every Schema.org @type on the page, lower-cased and de-duplicated.
+
+        The classifier treats these as the publisher stating what the page is,
+        which is stronger evidence than anything the copy implies.
+        """
+        found: list[str] = []
+
+        def collect(node):
+            if isinstance(node, list):
+                for item in node:
+                    collect(item)
+                return
+            if not isinstance(node, dict):
+                return
+            value = node.get("@type")
+            if isinstance(value, str):
+                found.append(value.strip().lower())
+            elif isinstance(value, list):
+                found.extend(str(item).strip().lower() for item in value)
+            graph = node.get("@graph")
+            if isinstance(graph, list):
+                collect(graph)
+
+        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+            raw = script.string or script.get_text() or ""
+            if not raw.strip():
+                continue
+            try:
+                collect(json.loads(raw))
+            except (ValueError, TypeError):
+                continue
+
+        return list(dict.fromkeys(found))
 
     @staticmethod
     def _og_title(soup: BeautifulSoup) -> str:

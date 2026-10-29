@@ -68,6 +68,9 @@ class PageDocument:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    #: Schema.org types from the page, used for classification only. Not a
+    #: column: it describes the page, it is not part of the index.
+    schema_types: list[str] = field(default_factory=list)
     category: str = ""
     category_code: str = ""
 
@@ -133,6 +136,9 @@ class SearchHit:
     brand_name: str = ""
     clean_url: str = ""
     action_title: str = ""
+    #: Schema.org types from the page, used for classification only. Not a
+    #: column: it describes the page, it is not part of the index.
+    schema_types: list[str] = field(default_factory=list)
     category: str = ""
     category_code: str = ""
 

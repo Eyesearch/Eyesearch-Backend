@@ -51,6 +51,7 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
         ('NEWS', 'news_media'),
         ('JOBS', 'jobs_careers'),
         ('FINANCE', 'business_finance'),
+        ('PAY', 'payments'),
         ('EDU', 'education_exams'),
         ('HEALTH', 'health_medical'),
         ('AGRI', 'agriculture_rural'),

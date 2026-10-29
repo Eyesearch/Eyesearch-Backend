@@ -50,15 +50,17 @@ def _page(url: str, title: str, body: str, category: str, language: str = "en") 
 # ---------------------------------------------------------------------------
 
 
-def test_the_ten_categories_are_exactly_the_specified_ones():
+def test_the_twelve_categories_are_exactly_the_specified_ones():
     assert CATEGORIES == (
         "government",
-        "education_exams",
-        "news_media",
-        "jobs_careers",
         "legal_judiciary",
         "business_finance",
+        "payments",
+        "commerce",
         "tech_developer",
+        "news_media",
+        "jobs_careers",
+        "education_exams",
         "health_medical",
         "agriculture_rural",
         "general_reference",

@@ -336,6 +336,7 @@ class Orchestrator:
                 title=parsed.title,
                 description=parsed.description,
                 body_text=parsed.body_text,
+                schema_types=list(parsed.schema_types),
                 brand_name=parsed.brand_name,
                 clean_url=parsed.clean_url,
                 action_title=parsed.action_title,
@@ -357,6 +358,7 @@ class Orchestrator:
                 title=document.title,
                 description=document.description,
                 body_text=document.body_text,
+                schema_types=document.schema_types,
             ).category
             document.language = self._language.detect(
                 f"{document.title} {document.body_text}"

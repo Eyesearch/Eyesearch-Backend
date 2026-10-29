@@ -18,7 +18,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlunparse
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunparse
 
 from app.engine.config import Settings, get_settings
 from app.engine.urls import safe_port, safe_urljoin, safe_urlparse
@@ -208,8 +208,26 @@ TRACKING_PARAMS: frozenset[str] = frozenset(
         "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
         "gclid", "fbclid", "mc_cid", "mc_eid", "ref", "referrer", "source",
         "campaign", "spm", "share", "fbclid", "igshid", "s_kwcid",
+        # Session and click identifiers: the same page, a different string.
+        "sid", "session", "sessionid", "phpsessid", "jsessionid", "aspsessionid",
+        "msclkid", "yclid", "dclid", "twclid", "_ga", "_gl", "_hsenc", "_hsmi",
     }
 )
+
+#: Paths that lead to a form, not to content.
+AUTH_PATH_SEGMENTS: frozenset[str] = frozenset(
+    {"login", "signin", "sign-in", "logout", "register", "signup", "sign-up",
+     "subscribe", "password", "reset-password", "forgot-password"}
+)
+
+#: A path carrying year/month/day is a calendar. One is a date; three in a row
+#: is an infinite archive that will happily generate a page per day for ever.
+_DATE_SEGMENT = re.compile(r"^(19|20)\d{2}$")
+_MONTH_SEGMENT = re.compile(r"^(0?[1-9]|1[0-2])$")
+_DAY_SEGMENT = re.compile(r"^(0?[1-9]|[12]\d|3[01])$")
+
+#: Page numbers past this are generated, not navigated to.
+MAX_PAGINATION = 50
 
 #: How deep below a host root the crawler follows links. Indian portals nest
 #: real content several levels down (`/en/departments/health/services`), so a
@@ -296,6 +314,21 @@ def _is_ip_address(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _query_pairs(url: str) -> list[tuple[str, str]]:
+    """`(key, value)` for each query parameter, tolerating a broken URL."""
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for chunk in query.split("&"):
+        if not chunk:
+            continue
+        key, _, value = chunk.partition("=")
+        pairs.append((unquote(key), unquote(value)))
+    return pairs
 
 
 def domain_of(url: str) -> str:
@@ -406,6 +439,25 @@ def is_crawlable(url: str) -> bool:
 
     # A single unbroken key longer than a URL segment is a session id.
     if any(len(segment) > 80 for segment in segments):
+        return False
+
+    # /2026/10/28/ and its siblings: an archive with a page per day.
+    for index in range(len(segments) - 2):
+        if (
+            _DATE_SEGMENT.match(segments[index])
+            and _MONTH_SEGMENT.match(segments[index + 1])
+            and _DAY_SEGMENT.match(segments[index + 2])
+        ):
+            return False
+
+    # ?page=999 is a generated page, not a navigated one.
+    for key, value in _query_pairs(url):
+        if key.lower() in ("page", "p", "paged", "start", "offset") and value.isdigit():
+            if int(value) > MAX_PAGINATION:
+                return False
+
+    # A form, not a page.
+    if any(segment in AUTH_PATH_SEGMENTS for segment in segments):
         return False
 
     # A repeated segment (`/books/books/books`) is a recursion trap.

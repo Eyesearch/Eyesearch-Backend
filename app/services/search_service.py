@@ -115,6 +115,8 @@ CATEGORY_CODES: dict[str, str] = {
     "jobs_careers": "JOBS",
     "legal_judiciary": "LEGAL",
     "business_finance": "FINANCE",
+    "payments": "PAY",
+    "commerce": "COMMERCE",
     "tech_developer": "TECH",
     "health_medical": "HEALTH",
     "agriculture_rural": "AGRI",
