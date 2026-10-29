@@ -20,7 +20,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -31,7 +31,11 @@ from app.engine.store import IndexStore, SearchHit, fts_tokens, highlight_terms
 CATEGORIES = load_agent("07_classifier_agent").CATEGORIES
 SUPPORTED_LANGUAGES = load_agent("08_language_agent").SUPPORTED_LANGUAGES
 
+from app.agents import load_agent
+
 logger = logging.getLogger(__name__)
+
+BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
 
 SOURCE_LABEL = "eyesearch_index"
 
@@ -154,6 +158,9 @@ class SearchResult:
     clean_url: str = ""
     #: Short upper-case category code, e.g. GOV or TECH.
     category: str = FALLBACK_CATEGORY_CODE
+    #: The path as words a person would use, e.g. ["Health", "Notifications"].
+    #: A card can show this instead of a truncated URL.
+    breadcrumbs: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +177,7 @@ class SearchResult:
             "brand_name": self.brand_name,
             "clean_url": self.clean_url,
             "category": self.category,
+            "breadcrumbs": list(self.breadcrumbs),
         }
 
 
@@ -200,6 +208,16 @@ def sanitise_query(text: str, limit: int = MAX_QUERY_CHARS) -> str:
     value = value.replace("<", "").replace(">", "")
     value = re.sub(r"\s+", " ", value).strip()
     return value[:limit]
+
+
+def _breadcrumbs(url: str) -> list[str]:
+    """The path as readable words, for a card to show above the title."""
+    if not url:
+        return []
+    try:
+        return BreadcrumbBuilderAgent().build(url).as_list()
+    except Exception:  # noqa: BLE001 - a breadcrumb is never worth an error
+        return []
 
 
 def youtube_thumbnail(url: str) -> str | None:
@@ -330,6 +348,7 @@ def to_result(hit: SearchHit) -> SearchResult:
         # The join already knows the code; the Python map is the fallback for a
         # row whose category_id was never set.
         category=(hit.category_code or category_code(hit.category)),
+        breadcrumbs=_breadcrumbs(hit.url or ""),
     )
 
 

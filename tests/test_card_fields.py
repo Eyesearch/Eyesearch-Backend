@@ -249,3 +249,38 @@ async def test_an_unknown_category_still_links_to_web(client):
         "WHERE p.url = 'https://x.example/a'"
     )
     assert joined.scalar(0) == "WEB"
+
+
+# ---------------------------------------------------------------------------
+# Breadcrumbs on the wire
+# ---------------------------------------------------------------------------
+
+
+def test_a_result_carries_its_path_as_words():
+    from app.services.search_service import _breadcrumbs
+
+    assert _breadcrumbs("https://karnataka.gov.in/dept/health/notifications") == [
+        "Dept",
+        "Health",
+        "Notifications",
+    ]
+
+
+def test_a_root_url_has_no_breadcrumbs():
+    from app.services.search_service import _breadcrumbs
+
+    assert _breadcrumbs("https://a.com/") == []
+
+
+def test_the_payload_includes_the_breadcrumbs():
+    from app.services.search_service import SearchResult
+
+    payload = SearchResult(
+        id="1",
+        title="T",
+        url="https://karnataka.gov.in/dept/tax",
+        snippet="s",
+        breadcrumbs=["Dept", "Tax"],
+    ).as_dict()
+
+    assert payload["breadcrumbs"] == ["Dept", "Tax"]

@@ -197,18 +197,46 @@ async def lifespan(app: FastAPI):
     # Workers are scheduled from a bootstrap task, not inline, so the port is
     # bound and /health answers before the first crawl begins.
     bootstrap = asyncio.create_task(_start_workers_when_serving(app, orchestrator, settings))
+    # Warm the autosuggest trie now rather than waiting for the first maintenance
+    # pass. Suggest is answered from the trie, and until it exists every keystroke
+    # falls back to a database round trip — which is the cost the trie exists to
+    # remove. Scheduled, not awaited: boot must not wait on it.
+    warmup = asyncio.create_task(_warm_autosuggest(service, orchestrator))
     app.state.bootstrap = bootstrap
 
     try:
         yield
     finally:
         bootstrap.cancel()
+        warmup.cancel()
         await stop_workers(app.state.workers)
         await orchestrator.close()
         await client.close()
         if search_client is not client:
             await search_client.close()
         logger.info("shutdown complete")
+
+
+async def _warm_autosuggest(service: "SearchService", orchestrator: Orchestrator) -> None:
+    """Build the trie from the index as soon as the database answers.
+
+    Runs once, in the background. A failure leaves the service on its database
+    fallback, which is correct and not worth failing boot over.
+    """
+    from app.agents import load_agent
+
+    trie_agent = load_agent("39_autosuggest_trie_agent").TrieAutosuggestAgent()
+    try:
+        words = await service._store.client.execute(
+            "SELECT word, nentry FROM ts_stat('SELECT search_vector FROM pages') "
+            "ORDER BY nentry DESC LIMIT 20000"
+        )
+        added = trie_agent.rebuild([(str(row[0]), int(row[1])) for row in words.rows])
+        service.trie = trie_agent
+        orchestrator.autosuggest = trie_agent
+        logger.info("autosuggest trie warmed at boot with %d words", added)
+    except Exception as error:  # noqa: BLE001 - the fallback is the database
+        logger.info("autosuggest trie not warmed (%s); suggest falls back to the database", error)
 
 
 async def _start_workers_when_serving(
