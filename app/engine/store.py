@@ -332,6 +332,19 @@ def normalise_score(raw: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+#: Cut a stored body at a word boundary, never mid-word. `substr(text, 1, n)`
+#: cut "Karnataka is in southern India" to "Karnataka is in southern India, ne"
+#: and the card showed the "ne" — dangling fragments read as corruption. This
+#: mirrors `truncate_body` in the parser, and a test pins the two together.
+SQL_TRIM_TO_WORD = (
+    "CASE WHEN length(body_text) <= CAST(? AS INTEGER) THEN body_text "
+    "WHEN length(regexp_replace(left(body_text, CAST(? AS INTEGER)), "
+    "'\\s+\\S*$', '')) > 0 "
+    "THEN rtrim(regexp_replace(left(body_text, CAST(? AS INTEGER)), "
+    "'\\s+\\S*$', '')) "
+    "ELSE left(body_text, CAST(? AS INTEGER)) END"
+)
+
 class IndexStore:
     """All index reads and writes, over one injected database client."""
 
@@ -403,11 +416,10 @@ class IndexStore:
             for domain in {document.domain for document in documents if document.domain}:
                 statements.append(
                     (
-                        "UPDATE pages SET body_text = substr(body_text, 1, "
-                        "CAST(? AS INTEGER)) "
+                        f"UPDATE pages SET body_text = {SQL_TRIM_TO_WORD} "
                         "WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
                         "AND length(body_text) > CAST(? AS INTEGER)",
-                        (ceiling, domain, ceiling),
+                        (ceiling, ceiling, ceiling, ceiling, domain, ceiling),
                     )
                 )
 
