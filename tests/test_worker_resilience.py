@@ -103,8 +103,12 @@ async def test_worker_status_reports_liveness(store, client):
     )
     handles = start_workers(orchestrator, _settings(crawler_enabled=False))
     try:
-        assert handles.status() == {}
-        assert handles.running() == []
+        # No crawl and no revalidation worker. The maintenance loop does start:
+        # it watches the process rather than the crawl, and reporting memory is
+        # not crawling. What matters here is that nothing is fetching.
+        assert set(handles.status()) == {"maintenance"}
+        assert "crawler" not in handles.running()
+        assert "revalidation" not in handles.running()
     finally:
         await stop_workers(handles)
         await orchestrator.close()

@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     #: How often to ask PostgreSQL how big it is. The size moves in megabytes,
     #: and pg_database_size is not free.
     storage_watchdog_interval_seconds: float = 60.0
+    #: The janitor and the daily report run regardless of the crawler: they
+    #: watch the process, not the crawl. Off only if you want a silent server.
+    maintenance_enabled: bool = True
+    maintenance_interval_seconds: float = 600.0
     estimated_kb_per_page: float = 12.0
 
     #: Explicit page cap. 0 means "derive it from max_storage_mb"; set a

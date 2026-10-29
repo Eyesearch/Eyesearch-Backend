@@ -21,6 +21,8 @@ from app.orchestrator import Orchestrator
 
 KingOrchestratorAgent = load_agent("14_king_orchestrator_agent").KingOrchestratorAgent
 RegentAgent = load_agent("21_regent_agent").RegentAgent
+MemoryJanitorAgent = load_agent("29_memory_janitor_agent").MemoryJanitorAgent
+ChroniclerReporterAgent = load_agent("30_chronicler_reporter_agent").ChroniclerReporterAgent
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,13 @@ def start_workers(
         )
         logger.info("revalidation worker started")
 
+    if settings.maintenance_enabled:
+        handles.add(
+            "maintenance",
+            asyncio.create_task(_maintain(orchestrator, settings, handles)),
+        )
+        logger.info("maintenance worker started")
+
     if handles.regent is not None:
         handles.add("regent", asyncio.create_task(handles.regent.stand_by_forever()))
 
@@ -161,6 +170,36 @@ def _start(orchestrator: Orchestrator, name: str, factory, handles: "WorkerHandl
     if king is not None:
         return king.register(name, factory)
     return asyncio.create_task(_supervise(name, factory, handles))
+
+
+async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "WorkerHandles") -> None:
+    """Housekeeping that watches the process rather than the crawl.
+
+    The janitor reports the footprint and collects only when it is worth it; the
+    chronicler writes a report once a day. Both are cheap, and both are useful
+    whether or not anything is being crawled.
+    """
+    janitor = MemoryJanitorAgent()
+    chronicler = ChroniclerReporterAgent(orchestrator.store.client, settings, orchestrator)
+    interval = max(30.0, float(settings.maintenance_interval_seconds))
+    since_report = 0.0
+
+    while True:
+        try:
+            report = await janitor.sweep(orchestrator.store.client)
+            if report.collected:
+                logger.info("memory janitor: %s", report.as_dict())
+
+            since_report += interval
+            if since_report >= 24 * 3600:
+                since_report = 0.0
+                daily = await chronicler.build()
+                logger.info("daily report:\n%s", daily.as_markdown())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("maintenance pass failed")
+        await asyncio.sleep(interval)
 
 
 async def _watch_storage(orchestrator: Orchestrator, settings: Settings) -> None:
