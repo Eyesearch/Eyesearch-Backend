@@ -94,6 +94,8 @@ class Settings(BaseSettings):
     #: watch the process, not the crawl. Off only if you want a silent server.
     maintenance_enabled: bool = True
     maintenance_interval_seconds: float = 600.0
+    #: Where the daily seed and category snapshot is written.
+    snapshot_dir: str = "snapshots"
     estimated_kb_per_page: float = 12.0
 
     #: Explicit page cap. 0 means "derive it from max_storage_mb"; set a

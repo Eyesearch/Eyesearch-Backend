@@ -23,6 +23,8 @@ KingOrchestratorAgent = load_agent("14_king_orchestrator_agent").KingOrchestrato
 RegentAgent = load_agent("21_regent_agent").RegentAgent
 MemoryJanitorAgent = load_agent("29_memory_janitor_agent").MemoryJanitorAgent
 ChroniclerReporterAgent = load_agent("30_chronicler_reporter_agent").ChroniclerReporterAgent
+TrieAutosuggestAgent = load_agent("39_autosuggest_trie_agent").TrieAutosuggestAgent
+DisasterSnapshotAgent = load_agent("38_disaster_snapshot_agent").DisasterSnapshotAgent
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +183,12 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
     """
     janitor = MemoryJanitorAgent()
     chronicler = ChroniclerReporterAgent(orchestrator.store.client, settings, orchestrator)
+    autosuggest = TrieAutosuggestAgent()
+    snapshots = DisasterSnapshotAgent(orchestrator.store.client, settings)
     interval = max(30.0, float(settings.maintenance_interval_seconds))
     since_report = 0.0
+    since_snapshot = 0.0
+    autosuggest_built = False
 
     while True:
         try:
@@ -190,11 +196,35 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
             if report.collected:
                 logger.info("memory janitor: %s", report.as_dict())
 
+            if not autosuggest_built:
+                # Built once from the index, then kept: the trie answers
+                # keystrokes, and rebuilding it on every pass would spend more
+                # time than it saves.
+                try:
+                    words = await orchestrator.store.client.execute(
+                        "SELECT word, nentry FROM ts_stat("
+                        "'SELECT search_vector FROM pages') ORDER BY nentry DESC LIMIT 20000"
+                    )
+                    added = autosuggest.rebuild([(str(r[0]), int(r[1])) for r in words.rows])
+                    orchestrator.autosuggest = autosuggest
+                    autosuggest_built = True
+                    logger.info("autosuggest trie built with %d words", added)
+                except Exception:
+                    logger.debug("autosuggest rebuild deferred", exc_info=True)
+
             since_report += interval
             if since_report >= 24 * 3600:
                 since_report = 0.0
                 daily = await chronicler.build()
                 logger.info("daily report:\n%s", daily.as_markdown())
+
+            since_snapshot += interval
+            if since_snapshot >= 24 * 3600:
+                since_snapshot = 0.0
+                snapshot = await snapshots.write(
+                    f"{settings.snapshot_dir}/eyesearch-snapshot.json.gz"
+                )
+                logger.info("snapshot written: %s", snapshot.as_dict())
         except asyncio.CancelledError:
             raise
         except Exception:
