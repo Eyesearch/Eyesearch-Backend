@@ -462,7 +462,11 @@ def build_client(settings: Settings | None = None) -> LibsqlClient:
         from app.postgres import PostgresClient
 
         logger.info("Connected to PostgreSQL: %s", _redact_dsn(url))
-        return PostgresClient(url)
+        return PostgresClient(
+            url,
+            statement_timeout_ms=settings.db_statement_timeout_ms,
+            acquire_timeout_seconds=settings.db_acquire_timeout_seconds,
+        )
 
     if not url or url.startswith("file:"):
         if settings.is_production and not settings.allow_local_db:

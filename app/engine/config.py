@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     turso_db_url: str = ""
     turso_database_url: str = ""
     turso_auth_token: str = ""
+    #: A search must answer or fail, never hang behind the crawler's writes.
+    db_statement_timeout_ms: int = 4000
+    db_acquire_timeout_seconds: float = 2.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
     # Drop a pre-rebuild schema on startup. Without this a warm database keeps

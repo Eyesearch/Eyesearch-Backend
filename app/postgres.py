@@ -55,12 +55,28 @@ class PostgresClient:
 
     dialect = "postgres"
 
-    def __init__(self, dsn: str, *, min_size: int = 1, max_size: int = 10) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        min_size: int = 1,
+        max_size: int = 10,
+        statement_timeout_ms: int = 4000,
+        acquire_timeout_seconds: float = 2.0,
+    ) -> None:
         if not dsn:
             raise ValueError("a PostgreSQL DSN is required")
         self.dsn = dsn
         self._min_size = max(1, min_size)
         self._max_size = max(self._min_size, max_size)
+        #: A search must answer or fail; it must never sit behind the crawler's
+        #: writes until the client gives up. PostgreSQL aborts the statement at
+        #: this many milliseconds and the caller gets a clear error instead of a
+        #: hung request.
+        self.statement_timeout_ms = max(0, int(statement_timeout_ms))
+        #: How long to wait for a pooled connection before giving up. Without
+        #: this, a saturated pool blocks indefinitely.
+        self.acquire_timeout_seconds = max(0.1, float(acquire_timeout_seconds))
         self._pool: Any = None
         self._lock = asyncio.Lock()
 
@@ -109,9 +125,17 @@ class PostgresClient:
         pool = await self._ensure_pool()
         results: list[ResultSet] = []
         try:
-            async with pool.connection() as connection:
+            async with pool.connection(timeout=self.acquire_timeout_seconds) as connection:
                 # One transaction for the whole batch, as the SQLite client did.
                 async with connection.transaction():
+                    if self.statement_timeout_ms:
+                        # SET LOCAL is scoped to this transaction, so a slow
+                        # query cannot poison the connection for the next caller.
+                        await self._run(
+                            connection,
+                            f"SET LOCAL statement_timeout = {self.statement_timeout_ms}",
+                            (),
+                        )
                     for sql, args in statements:
                         if is_transaction_control(sql):
                             # The surrounding transaction already provides it.
@@ -147,6 +171,11 @@ class PostgresClient:
         except ImportError:  # pragma: no cover
             return DatabaseUnavailable(f"PostgreSQL request failed: {error}")
 
+        # A statement timeout cancels the query but leaves the connection
+        # healthy, so it must not be reported as a connection failure — the
+        # caller would retry a database that is answering perfectly well.
+        if isinstance(error, getattr(psycopg.errors, "QueryCanceled", ())):
+            return LibsqlError(f"postgres statement timed out: {error}")
         if isinstance(error, psycopg.OperationalError):
             return DatabaseUnavailable(f"PostgreSQL connection failed: {error}")
         if isinstance(error, psycopg.Error):
