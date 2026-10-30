@@ -137,3 +137,25 @@ def suggestion_params(prefix: str, limit: int) -> tuple[str, int]:
 def is_suggestable(prefix: str) -> bool:
     """Whether a prefix is long enough to complete."""
     return len(" ".join((prefix or "").split())) >= MIN_SUGGEST_PREFIX
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "39_autosuggest_trie_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("MIN_SUGGEST_PREFIX", globals().get("MIN_SUGGEST_PREFIX"), _contract_rules.at_least(1), "MIN_SUGGEST_PREFIX must satisfy at_least(1)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

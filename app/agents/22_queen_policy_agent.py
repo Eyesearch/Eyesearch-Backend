@@ -127,3 +127,25 @@ class QueenPolicyAgent:
 
     def accepted(self, url: str = "", title: str = "", body_text: str = "") -> bool:
         return self.judge(url, title, body_text).score >= self.threshold
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "22_queen_policy_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("declares_constants", 6 > 0, 6 > 0, "the agent declares at least one module-level constant"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

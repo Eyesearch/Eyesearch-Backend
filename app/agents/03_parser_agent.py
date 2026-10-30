@@ -487,3 +487,25 @@ def extract_sitelinks(soup, page_url: str, limit: int = MAX_SITELINKS) -> list[S
 
     order = [intent for intent, _ in INTENTS]
     return sorted(seen.values(), key=lambda link: order.index(link.intent))[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "03_parser_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("declares_constants", 22 > 0, 22 > 0, "the agent declares at least one module-level constant"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

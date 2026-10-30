@@ -342,3 +342,26 @@ class FetcherAgent:
 
 
 __all__ = ["BLOCKING_STATUSES", "BOUND_HEADERS", "FetchResult", "FetcherAgent"]
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "02_fetcher_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("FETCH_TIMEOUT_SECONDS", globals().get("FETCH_TIMEOUT_SECONDS"), _contract_rules.at_least(1), "FETCH_TIMEOUT_SECONDS must satisfy at_least(1)"),
+        _contract_rules.Rule("MAX_BODY_BYTES", globals().get("MAX_BODY_BYTES"), _contract_rules.at_least(1024), "MAX_BODY_BYTES must satisfy at_least(1024)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

@@ -39,6 +39,68 @@ def test_every_agent_imports_cleanly(path):
 
 
 # ---------------------------------------------------------------------------
+# The uniform contract every agent declares
+# ---------------------------------------------------------------------------
+
+
+def test_every_agent_declares_a_contract():
+    """Every one of the fifty states its rules as data, reports to the
+    supervisor, and can be audited."""
+    for path in agent_files():
+        module = load_agent(os.path.basename(path)[:-3])
+        assert hasattr(module, "CONTRACT"), f"{path} has no CONTRACT"
+        assert module.CONTRACT["reports_to"] == "14_king_orchestrator_agent"
+        assert module.CONTRACT["rules"], f"{path} declares no rules"
+
+
+def test_every_agent_audits_clean():
+    """The contract checks the agent's own constants, and none are in a state
+    that breaks their own rule."""
+    failures = {}
+    for path in agent_files():
+        module = load_agent(os.path.basename(path)[:-3])
+        report = module.audit_contract()
+        if not report.ok:
+            failures[report.agent] = [rule.name for rule in report.breaches]
+
+    assert failures == {}
+
+
+def test_every_agent_exposes_telemetry_to_the_supervisor():
+    for path in agent_files():
+        module = load_agent(os.path.basename(path)[:-3])
+        payload = module.telemetry()
+        assert payload["reports_to"] == "14_king_orchestrator_agent"
+        assert "breaches" in payload
+
+
+def test_the_contract_catches_a_broken_threshold():
+    """A contract that could only ever pass would be decoration."""
+    from app.agents import _contract as rules
+
+    broken = {
+        "agent": "99_test_agent",
+        "rules": [rules.Rule("min_words", 0, rules.at_least(1)(0), "must be at least 1")],
+    }
+    report = rules.make_audit_contract("99_test_agent", broken)()
+
+    assert report.ok is False
+    assert report.breaches[0].name == "min_words"
+
+
+def test_a_breach_is_recorded_for_the_supervisor():
+    from app.agents import _contract as rules
+
+    broken = {
+        "agent": "99_breach_agent",
+        "rules": [rules.Rule("cap", -1, rules.at_least(0)(-1), "must not be negative")],
+    }
+    rules.make_audit_contract("99_breach_agent", broken)()
+
+    assert rules.fleet_telemetry()["99_breach_agent"] == 1
+
+
+# ---------------------------------------------------------------------------
 # 49 — PII redaction
 # ---------------------------------------------------------------------------
 

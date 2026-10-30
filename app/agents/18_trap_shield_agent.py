@@ -88,3 +88,25 @@ class TrapShieldAgent:
                 report.blocked += 1
                 report.reasons[reason] = report.reasons.get(reason, 0) + 1
         return report
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "18_trap_shield_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("TRAP_PATH_SUBSTRINGS", globals().get("TRAP_PATH_SUBSTRINGS"), _contract_rules.has_items(1), "TRAP_PATH_SUBSTRINGS must satisfy has_items(1)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

@@ -105,3 +105,25 @@ class IndicKannadaAgent:
 
     def is_indic(self, text: str) -> bool:
         return bool(_KANNADA.search(text or "") or _DEVANAGARI.search(text or ""))
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "31_indic_kannada_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("SUFFIXES", globals().get("SUFFIXES"), _contract_rules.has_items(1), "SUFFIXES must satisfy has_items(1)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

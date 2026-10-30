@@ -188,3 +188,25 @@ class ResultClusterer:
 
     def cluster(self, hits, *, per_domain: int = 2, limit: int | None = None) -> list:
         return cluster_by_domain(hits, per_domain=per_domain, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "13_dedupe_compact_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("MAX_RESULTS_PER_HOST", globals().get("MAX_RESULTS_PER_HOST"), _contract_rules.at_least(1), "MAX_RESULTS_PER_HOST must satisfy at_least(1)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)

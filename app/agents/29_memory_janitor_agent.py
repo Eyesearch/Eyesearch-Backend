@@ -111,3 +111,25 @@ class MemoryJanitorAgent:
                 report.notes.append(f"pool check skipped: {error}")
 
         return report
+
+
+# ---------------------------------------------------------------------------
+# Contract
+#
+# This agent's rules as data. `audit_contract()` checks them against the live
+# values above and reports breaches to the supervisor (agent 14); it fails
+# when a constant is edited into a state that breaks its own rule.
+# ---------------------------------------------------------------------------
+
+from app.agents import _contract as _contract_rules
+
+CONTRACT = {
+    "agent": "29_memory_janitor_agent",
+    "reports_to": _contract_rules.SUPERVISOR,
+    "rules": [
+        _contract_rules.Rule("MIN_INTERVAL_SECONDS", globals().get("MIN_INTERVAL_SECONDS"), _contract_rules.at_least(1), "MIN_INTERVAL_SECONDS must satisfy at_least(1)"),
+    ],
+}
+
+audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
+telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)
