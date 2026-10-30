@@ -68,3 +68,59 @@ def test_the_parsing_steps_still_follow_the_curated_map():
     agent = module.BrandCanonicalAgent()
 
     assert agent.brand(soup, "https://somelocalshop.com/") == "Some Local Shop"
+
+
+# ---------------------------------------------------------------------------
+# The four-tier order and the guarantees around it
+# ---------------------------------------------------------------------------
+
+
+def test_the_page_own_name_leads_the_curated_list():
+    """A department knows its own name; the list only knows the host."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(
+        '<meta property="og:site_name" content="Karnataka Health Department">', "html.parser"
+    )
+    agent = module.BrandCanonicalAgent()
+
+    assert agent.brand(soup, "https://karnataka.gov.in/health") == "Karnataka Health Department"
+
+
+def test_a_too_short_page_name_does_not_win():
+    """og:site_name of "Hi" is noise, not a publisher."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup('<meta property="og:site_name" content="Hi">', "html.parser")
+    agent = module.BrandCanonicalAgent()
+
+    assert agent.brand(soup, "https://karnataka.gov.in/health") == "Government of Karnataka"
+
+
+def test_the_curated_list_answers_when_the_page_says_nothing():
+    from bs4 import BeautifulSoup
+
+    agent = module.BrandCanonicalAgent()
+
+    assert agent.brand(BeautifulSoup("", "html.parser"), "https://uidai.gov.in/") == "UIDAI Aadhaar"
+
+
+def test_a_brand_is_never_empty():
+    """A card with a blank line where the publisher should be looks broken."""
+    from bs4 import BeautifulSoup
+
+    agent = module.BrandCanonicalAgent()
+
+    assert agent.brand(BeautifulSoup("", "html.parser"), "https://a.example/") != ""
+
+
+def test_shouting_is_normalised():
+    assert trim_brand("KARNATAKA STATE POLICE") == "Karnataka State Police"
+
+
+def test_a_short_acronym_is_left_alone():
+    assert trim_brand("UIDAI") == "UIDAI"
+
+
+def test_a_cut_does_not_leave_a_hanging_separator():
+    assert trim_brand("Government of Karnataka -") == "Government of Karnataka"

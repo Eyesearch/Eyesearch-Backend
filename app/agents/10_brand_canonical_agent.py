@@ -265,17 +265,18 @@ CURATED_BRANDS: dict[str, str] = {
     "phonepe.com": "PhonePe",
     "zerodha.com": "Zerodha",
     "karnataka.gov.in": "Government of Karnataka",
-    "bangaloreone.gov.in": "Bangalore One Portal",
+    "bangaloreone.gov.in": "Bangalore One",
     "ksp.karnataka.gov.in": "Karnataka State Police",
-    "sevasindhu.karnataka.gov.in": "Seva Sindhu Karnataka",
+    "sevasindhu.karnataka.gov.in": "Seva Sindhu",
     "kpsc.kar.nic.in": "KPSC Karnataka",
     "india.gov.in": "National Portal of India",
-    "eci.gov.in": "Election Commission of India",
+    "uidai.gov.in": "UIDAI Aadhaar",
+    "eci.gov.in": "Election Commission",
     "sci.gov.in": "Supreme Court of India",
     "karnatakahi.gov.in": "Karnataka High Court",
     "ecourts.gov.in": "eCourts Services India",
     "indiankanoon.org": "Indian Kanoon",
-    "prajavani.net": "Prajavani News",
+    "prajavani.net": "Prajavani",
     "deccanherald.com": "Deccan Herald",
     "kannadaprabha.com": "Kannada Prabha",
     "thehindu.com": "The Hindu",
@@ -296,14 +297,27 @@ BRAND_FLUFF = re.compile(
 )
 
 
+#: What a cut can leave behind: "Government of Karnataka -" is not a name.
+DANGLING_BRAND_PUNCTUATION = re.compile(r"[\s\-_|:&,./;]+$")
+
+
 def trim_brand(text: str) -> str:
-    """Strip the fluff and cut to the limit at a word boundary."""
+    """Strip the fluff, normalise shouting, and cut at a word boundary."""
     cleaned = BRAND_FLUFF.sub("", (text or "").strip()).strip()
     cleaned = _collapse(cleaned)
-    if len(cleaned) <= MAX_BRAND_LENGTH:
-        return cleaned
-    cut = cleaned[:MAX_BRAND_LENGTH]
-    return cut.rsplit(" ", 1)[0] if " " in cut else cut
+
+    # A brand in capitals reads as shouting — but a short unspaced one is an
+    # acronym, and "Uidai" is worse than "UIDAI".
+    if cleaned.isupper() and len(cleaned) > 3 and (" " in cleaned or len(cleaned) > 6):
+        cleaned = cleaned.title()
+
+    if len(cleaned) > MAX_BRAND_LENGTH:
+        cut = cleaned[:MAX_BRAND_LENGTH]
+        cut = cut.rsplit(" ", 1)[0] if " " in cut else cut
+        cleaned = cut
+
+    # Punctuation left hanging by the cut.
+    return DANGLING_BRAND_PUNCTUATION.sub("", cleaned).strip()
 
 
 def curated_brand(url: str) -> str:
@@ -331,19 +345,17 @@ class BrandCanonicalAgent:
         last two are guesses, but a guess that reads "India Today" beats a card
         with a blank line where the publisher should be.
         """
-        # Curated first, with one exception: when the page names itself more
-        # specifically than the list does. "Government of Karnataka" is the
-        # right label for a department's front page, but a health department
-        # that calls itself "Karnataka Health Department" is telling us
-        # something the list cannot know.
-        curated = curated_brand(url)
+        # The page's own name leads. A department that calls itself
+        # "Karnataka Health Department" knows something the curated list cannot,
+        # and the list is a guess about a host while this is the publisher
+        # speaking. The curated map answers when the page says nothing.
         from_meta = trim_brand(self._brand_from_meta(soup))
-        if curated:
-            if from_meta and len(from_meta) > len(curated):
-                return from_meta
-            return trim_brand(curated)
-        if from_meta:
+        if len(from_meta) >= 3:
             return from_meta
+
+        curated = curated_brand(url)
+        if curated:
+            return trim_brand(curated)
 
         name = self._brand_from_json_ld(soup)
         if name:
@@ -357,7 +369,9 @@ class BrandCanonicalAgent:
         if name:
             return name
 
-        return brand_from_domain(url) or _host_label(url)
+        # A card with a blank line where the publisher should be looks broken,
+        # so the last resort is a name rather than nothing.
+        return trim_brand(brand_from_domain(url) or _host_label(url)) or "Web Service"
 
     @staticmethod
     def _brand_from_meta(soup: BeautifulSoup) -> str:
