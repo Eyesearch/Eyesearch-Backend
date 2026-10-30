@@ -523,7 +523,9 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
     # unremarkable sites linking to each other is precisely the random
     # third-party network this rule exists to stop. A verified source — a
     # government or academic portal, a bank — may still refer to one.
-    if priority_of(f"https://{source_host}") > PRIORITY_UTILITY:
+    # The *band*, not the queue priority: equal priority is about how soon a
+    # URL is crawled, not about whether an unknown site may expand the graph.
+    if classify_domain_priority(f"https://{source_host}") > PRIORITY_UTILITY:
         return False
     return allow_global and any(host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS)
 
@@ -771,9 +773,24 @@ def classify_domain_priority(domain: str, source_context: dict | None = None) ->
     return PRIORITY_ENTERPRISE
 
 
+#: The priority every legitimate domain is queued at. Government, news,
+#: finance, tech, education and commerce share it: a queue that favours one
+#: sector starves the rest, and a portal with 40 pending links then owns the
+#: batch. Ranking quality is the search engine's job, not the queue's.
+ENQUEUE_PRIORITY = 1
+
+
 def priority_of(url: str) -> int:
-    """The band for a URL, lower sorting first. 99 means do not crawl."""
-    return classify_domain_priority(url)
+    """The band for a URL, lower sorting first. 99 means do not crawl.
+
+    The band still decides *whether* a URL is crawlable — the discard band is
+    the anti-spam filter — but it no longer decides how soon. Every band that
+    survives is queued at `ENQUEUE_PRIORITY`.
+    """
+    band = classify_domain_priority(url)
+    if band == PRIORITY_DISCARD:
+        return PRIORITY_DISCARD
+    return ENQUEUE_PRIORITY
 
 
 class FrontierAgent:

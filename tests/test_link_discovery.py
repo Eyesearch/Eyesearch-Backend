@@ -28,6 +28,7 @@ filter_links = FrontierAgent.filter_links
 in_crawl_scope = frontier_module.in_crawl_scope
 is_authoritative = frontier_module.is_authoritative
 priority_of = frontier_module.priority_of
+classify_domain_priority = frontier_module.classify_domain_priority
 is_crawlable = frontier_module.is_crawlable
 normalise_url = frontier_module.normalise_url
 
@@ -352,30 +353,33 @@ def test_a_domain_outside_the_allowed_tlds_stays_out():
     assert in_crawl_scope("https://bit.ly/abc", "karnataka.gov.in") is False
 
 
-def test_civic_domains_outrank_commercial_portals():
-    """Three bands: reserved suffixes, the Indian web, then everything else."""
+def test_civic_domains_are_classified_but_not_prioritised():
+    """The band says what a site *is*; it no longer decides how soon it is
+    crawled. Government, news and commerce all queue at the same priority, so
+    one sector cannot own the frontier."""
     # Band 0: government, academic, national infrastructure.
-    assert priority_of("https://karnataka.gov.in/") == 0
-    assert priority_of("https://www.iisc.ac.in/") == 0
-    assert priority_of("https://bengaluruurban.nic.in/") == 0
+    assert classify_domain_priority("https://karnataka.gov.in/") == 0
+    assert classify_domain_priority("https://www.iisc.ac.in/") == 0
+    assert classify_domain_priority("https://bengaluruurban.nic.in/") == 0
 
     # The bands come from structure now, not from nationality: a plain Indian
     # commercial domain is an enterprise portal like any other.
-    assert priority_of("https://somewhere.in/") == 2
-    assert priority_of("https://news.co.in/") == 2
+    assert classify_domain_priority("https://somewhere.in/") == 2
+    assert classify_domain_priority("https://news.co.in/") == 2
 
-    # Band 2: everything else, so an Indian commercial site still beats a
-    # foreign one rather than tying with it.
-    assert priority_of("https://shop.example/") == 2
-    assert priority_of("https://karnataka.gov.in/") < priority_of("https://somewhere.in/")
+    assert classify_domain_priority("https://shop.example/") == 2
 
-    # Allowed, but behind the reserved suffixes and the Indian web. The first
-    # two are Indian publishers on .com, which is why they sit in band 2 with
-    # everything else: the band comes from the suffix, not from who owns it.
-    assert priority_of("https://www.thehindu.com/") == 2
-    assert priority_of("https://flipkart.com/mobiles") == 2
-    assert priority_of("https://google.com/") == 2
-    assert priority_of("https://randomshop.com/") == 2
+    # Equal queue priority, whatever the band: a government portal, an Indian
+    # commercial site and a foreign one all wait their turn together.
+    for url in (
+        "https://karnataka.gov.in/",
+        "https://somewhere.in/",
+        "https://www.thehindu.com/",
+        "https://flipkart.com/mobiles",
+        "https://google.com/",
+        "https://randomshop.com/",
+    ):
+        assert priority_of(url) == 1, url
 
 
 def test_the_seeds_span_more_than_one_category():
