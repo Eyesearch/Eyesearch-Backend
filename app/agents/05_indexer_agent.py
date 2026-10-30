@@ -8,6 +8,7 @@ the database has confirmed the commit.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 import logging
 from dataclasses import dataclass
@@ -68,10 +69,35 @@ BOILERPLATE_PATTERNS: tuple[str, ...] = (
 #: Punctuation left hanging when a string is cut mid-phrase.
 SNIPPET_DANGLING = re.compile(r"[\s\-_|:&,./;]+$")
 
+#: A sentence can end with a full stop, or with the danda that Indic scripts
+#: use instead of one.
+TERMINAL_MARKS: tuple[str, ...] = (". ", "! ", "? ", "। ")
+
+#: A breadcrumb trail is navigation, not prose.
+BREADCRUMB_CHAIN = re.compile(r"(?i)\bhome\s*>\s*[a-z0-9\s_-]+>")
+
+#: Preamble that sells rather than says.
+PROMO_FLUFF: tuple[re.Pattern, ...] = (
+    re.compile(r"(?i)^(welcome to\s+(the\s+)?(official\s+)?(website|portal)\s+(of\s+)?)"),
+    re.compile(r"(?i)^(india's\s+(no\.?\s*1|leading|most trusted)(\s+trusted)?\s+)"),
+    re.compile(r"(?i)^(best\s+platform\s+for\s+)"),
+    re.compile(r"(?i)^(world[- ]class\s+)"),
+)
+
 
 def is_boilerplate(text: str) -> bool:
     """Whether a string is one of the things every page says."""
+    if BREADCRUMB_CHAIN.search(text or ""):
+        return True
     return any(re.search(pattern, text or "") for pattern in BOILERPLATE_PATTERNS)
+
+
+def strip_promo(text: str) -> str:
+    """Remove the selling preamble a page puts before its actual sentence."""
+    cleaned = text or ""
+    for pattern in PROMO_FLUFF:
+        cleaned = pattern.sub("", cleaned).strip()
+    return cleaned.lstrip(" -:|•–")
 
 
 def format_ai_snippet(
@@ -87,6 +113,7 @@ def format_ai_snippet(
         cleaned = re.sub(r"&[a-z]+;|&#\d+;", " ", raw)
         cleaned = re.sub(r"[\r\n\t]+", " ", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = strip_promo(cleaned)
 
         if len(cleaned) < MIN_SNIPPET_LENGTH:
             continue
@@ -104,14 +131,22 @@ def _cap_snippet(text: str) -> str:
         return text
 
     window = text[:MAX_SNIPPET_LENGTH]
-    last_stop = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    last_stop = max(window.rfind(mark) for mark in TERMINAL_MARKS)
     if last_stop >= SENTENCE_WINDOW_START:
+        # A sentence that ends is a sentence that can be quoted as it stands.
         return window[: last_stop + 1].strip()
 
     cut = window[: MAX_SNIPPET_LENGTH - 3]
     if " " in cut:
         cut = cut.rsplit(" ", 1)[0]
-    return f"{SNIPPET_DANGLING.sub('', cut).strip()}..."
+    cut = SNIPPET_DANGLING.sub("", cut).strip()
+
+    # A cut can land between a consonant and its halant, leaving a virama that
+    # now modifies nothing. Back off until the string ends on a real character.
+    while cut and unicodedata.category(cut[-1]) == "Mn":
+        cut = cut[:-1].strip()
+
+    return f"{cut}..."
 
 
 class IndexerAgent:

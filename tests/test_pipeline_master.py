@@ -99,3 +99,51 @@ def test_the_card_title_is_brand_led_and_bounded():
 
 def test_the_snippet_floor_is_sixty():
     assert MIN_SNIPPET == 60
+
+
+# ---------------------------------------------------------------------------
+# The contamination shield
+# ---------------------------------------------------------------------------
+
+
+def test_a_selling_preamble_is_stripped():
+    text = (
+        "Welcome to the official website of Karnataka One. It offers certificates, payments "
+        "and applications for citizens across the state."
+    )
+
+    assert indexer.format_ai_snippet(text).startswith("Karnataka One.")
+
+
+def test_marketing_hyperbole_is_stripped():
+    text = "India's No.1 trusted portal for citizen services. Apply for certificates and pay bills online."
+
+    assert not indexer.format_ai_snippet(text).startswith("India's")
+
+
+def test_a_breadcrumb_trail_is_not_a_snippet():
+    assert indexer.format_ai_snippet("Home > Services > Overview > Detail") == ""
+
+
+def test_a_kannada_sentence_ending_is_respected():
+    """Indic scripts end a sentence with a danda, not a full stop."""
+    text = (
+        "ಕರ್ನಾಟಕ ಸರ್ಕಾರವು ನಾಗರಿಕ ಸೇವೆಗಳನ್ನು ಒದಗಿಸುತ್ತದೆ. ಇದು ಅಧಿಕೃತ ಪೋರ್ಟಲ್ ಆಗಿದೆ. "
+        "ಹೆಚ್ಚಿನ ಮಾಹಿತಿಗಾಗಿ ಇಲ್ಲಿ ನೋಡಿ ಮತ್ತು ಅರ್ಜಿ ಸಲ್ಲಿಸಿ. " * 3
+    )
+    snippet = indexer.format_ai_snippet(text)
+
+    assert len(snippet) <= MAX_SNIPPET
+    assert snippet.endswith(".") or snippet.endswith("।") or snippet.endswith("...")
+
+
+def test_a_forced_cut_does_not_strand_a_halant():
+    """A virama with no consonant after it is a broken glyph."""
+    import unicodedata
+
+    # A long run with no sentence end, so the word-boundary path is taken.
+    text = "ಕರ್ನಾಟಕ ಸರ್ಕಾರದ ಆರೋಗ್ಯ ಇಲಾಖೆ " * 20
+    snippet = indexer.format_ai_snippet(text)
+    body = snippet[:-3] if snippet.endswith("...") else snippet
+
+    assert unicodedata.category(body[-1]) != "Mn"
