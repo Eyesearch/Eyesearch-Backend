@@ -44,14 +44,16 @@ def test_twitter_site_is_the_third_choice():
 
 
 def test_the_title_tail_is_the_fourth_choice():
-    html = "<title>District Health Notifications | Karnataka Health Department</title>"
-    assert brand(html, "https://karnataka.gov.in/x") == "Karnataka Health Department"
+    """On a host the curated list does not know, the title tail is still the
+    fourth thing tried."""
+    html = "<title>District Health Notifications | District Health Department</title>"
+    assert brand(html, "https://healthdept.example.gov.in/x") == "District Health Department"
 
 
 def test_a_title_without_a_separator_is_not_mined_for_a_brand():
     """The whole title is the subject; there is no publisher tail to take."""
     html = "<title>District Health Notifications</title>"
-    assert brand(html, "https://karnataka.gov.in/x") == "Karnataka"
+    assert brand(html, "https://healthdept.example.gov.in/x") == "Example"
 
 
 def test_the_domain_is_the_last_resort():
