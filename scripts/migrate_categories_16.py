@@ -30,7 +30,41 @@ MERGES = {"PAY": "FIN"}
 
 
 async def migrate(client: PostgresClient, *, dry_run: bool) -> dict[str, int]:
+    """Apply the taxonomy change, or report what it would do.
+
+    The dry run counts rather than writes-then-rolls-back. Every `execute()` on
+    this client opens and commits its own transaction, so a ROLLBACK issued
+    afterwards is filtered out as transaction control and does nothing — which
+    would have made --dry-run apply the whole migration and say it had not.
+    """
     counts: dict[str, int] = {}
+
+    existing = await client.execute("SELECT code FROM categories")
+    present = {str(row[0]) for row in existing.rows}
+
+    missing = [code for code, _ in CATEGORY_SEED if code not in present]
+    counts["categories_missing"] = len(missing)
+
+    if dry_run:
+        for old, new_code in RENAMES.items():
+            rows = await client.execute(
+                "SELECT COUNT(*) FROM pages p JOIN categories c ON c.id = p.category_id "
+                "WHERE c.code = ?",
+                (old,),
+            )
+            counts[f"would_rename:{old}->{new_code}"] = (
+                1 if old in present and new_code not in present else 0
+            )
+            counts[f"pages_under:{old}"] = int(rows.scalar(0) or 0)
+
+        for old, new_code in MERGES.items():
+            rows = await client.execute(
+                "SELECT COUNT(*) FROM pages p JOIN categories c ON c.id = p.category_id "
+                "WHERE c.code = ?",
+                (old,),
+            )
+            counts[f"would_move:{old}->{new_code}"] = int(rows.scalar(0) or 0)
+        return counts
 
     for new_code, name in CATEGORY_SEED:
         result = await client.execute(
@@ -40,19 +74,19 @@ async def migrate(client: PostgresClient, *, dry_run: bool) -> dict[str, int]:
         )
         counts[f"seeded:{new_code}"] = result.rows_affected
 
-    for old, new in RENAMES.items():
+    for old, new_code in RENAMES.items():
         result = await client.execute(
-            "UPDATE categories SET code = ? WHERE code = ?", (new, old)
+            "UPDATE categories SET code = ? WHERE code = ?", (new_code, old)
         )
-        counts[f"renamed:{old}->{new}"] = result.rows_affected
+        counts[f"renamed:{old}->{new_code}"] = result.rows_affected
 
-    for old, new in MERGES.items():
+    for old, new_code in MERGES.items():
         moved = await client.execute(
             "UPDATE pages SET category_id = (SELECT id FROM categories WHERE code = ?) "
             "WHERE category_id = (SELECT id FROM categories WHERE code = ?)",
-            (new, old),
+            (new_code, old),
         )
-        counts[f"moved:{old}->{new}"] = moved.rows_affected
+        counts[f"moved:{old}->{new_code}"] = moved.rows_affected
         removed = await client.execute("DELETE FROM categories WHERE code = ?", (old,))
         counts[f"removed:{old}"] = removed.rows_affected
 
@@ -61,9 +95,6 @@ async def migrate(client: PostgresClient, *, dry_run: bool) -> dict[str, int]:
         "AND p.category_id NOT IN (SELECT id FROM categories)"
     )
     counts["orphaned_pages"] = int(stray.scalar(0) or 0)
-
-    if dry_run:
-        await client.execute("ROLLBACK")
 
     return counts
 
