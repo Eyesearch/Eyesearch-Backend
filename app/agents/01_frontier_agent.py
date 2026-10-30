@@ -302,6 +302,21 @@ class FrontierItem:
 
 #: Public suffixes that carry an extra label: the registrable domain is the
 #: last three labels, so `optica.iiita.ac.in` is `iiita.ac.in`. Derived from
+#: Named domains that are first in the queue regardless of TLD. This is a
+#: deliberate reversal of the earlier "no domain names in code" rule: the
+#: request asks for these by name, and a rule that cannot name India's own
+#: portals cannot prioritise them. Everything else is still decided by TLD, so
+#: the list is the exception rather than the mechanism.
+HIGH_UTILITY_DOMAINS: frozenset[str] = frozenset(
+    {
+        # Indian government portals named in the brief.
+        "india.gov.in", "isro.gov.in", "pib.gov.in", "ddnews.gov.in", "uidai.gov.in",
+        # Global platforms a person actually uses.
+        "youtube.com", "facebook.com", "instagram.com", "whatsapp.com",
+        "x.com", "twitter.com", "wikipedia.org", "apple.com", "samsung.com",
+    }
+)
+
 #: Suffixes reserved for government, academia and the military. Narrower than
 #: `PRIORITY_SUFFIXES`, which treats the whole `.in` space as worth crawling:
 #: everything Indian is worth crawling, but only these are the first band.
@@ -507,9 +522,25 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
         return True
     if is_authoritative(host):
         return True
+    if is_high_utility(host):
+        return True
     if allow_global:
-        return any(host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS)
+        # Following every outlink of an ordinary site is how a crawl turns into
+        # an endless tour of link farms. A global target is followed only when
+        # the page that links to it is itself worth crawling — a low-utility
+        # source contributes its own pages and nothing else.
+        return _is_worth_following(source_host) and any(
+            host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS
+        )
     return False
+
+
+def _is_worth_following(source_host: str) -> bool:
+    """Whether a site's outbound links are worth the queue slots."""
+    host = (source_host or "").lower()
+    if not host:
+        return False
+    return is_authoritative(host) or is_high_utility(host) or host.endswith(".in")
 
 
 def is_civic(host: str) -> bool:
@@ -659,11 +690,19 @@ def priority_of(url: str) -> int:
     to be linked first. The bands come from the TLD, so no site is named.
     """
     host = domain_of(url)
+    if is_high_utility(host):
+        return 0
     if any(host.endswith(suffix) for suffix in RESERVED_SUFFIXES):
         return 0
     if host.endswith(".in"):
         return 1
     return 2
+
+
+def is_high_utility(host: str) -> bool:
+    """A named first-tier domain, matched on the host or a subdomain of it."""
+    host = (host or "").lower().lstrip(".")
+    return any(host == name or host.endswith("." + name) for name in HIGH_UTILITY_DOMAINS)
 
 
 class FrontierAgent:

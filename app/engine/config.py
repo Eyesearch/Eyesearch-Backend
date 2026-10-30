@@ -155,8 +155,8 @@ class Settings(BaseSettings):
     #: Outbound links kept from one page before scope filtering. A page can
     #: carry thousands of hrefs; the batch holds every one of them at once.
     max_outbound_links_per_page: int = 100
-    crawl_batch_sleep_seconds: float = 0.005
-    crawl_empty_backoff_seconds: float = 1.0
+    crawl_batch_sleep_seconds: float = 10.0
+    crawl_empty_backoff_seconds: float = 20.0
     # A batch waits for its slowest member, so this bounds the whole batch, not
     # just one request. 4s fails fast on dead hosts; some Indian government
     # portals legitimately take longer, so raise it if the failure rate climbs.
@@ -168,7 +168,10 @@ class Settings(BaseSettings):
     turso_connect_timeout_seconds: float = 10.0
     turso_read_timeout_seconds: float = 20.0
     crawl_max_body_bytes: int = 512_000
-    crawl_concurrency: int = 60
+    #: Back to the stable baseline. Sixty concurrent fetches is what made the
+    #: search API starve and the target hosts throttle us; one at a time with a
+    #: real pause between batches is slower and does not fall over.
+    crawl_concurrency: int = 1
     #: How many discovered URLs go into one pipeline request. A batch of 120
     #: pages can discover hundreds of links; sending them as one request
     #: overruns the HTTP response window and fails with a ReadTimeout.

@@ -92,9 +92,9 @@ def test_the_action_title_strips_dash_stuffing():
     assert action_title_from("Income Tax Return Filing - File Online - Department") == "Income Tax Return Filing"
 
 
-def test_the_action_title_is_capped_at_five_words_and_sixty_characters():
+def test_the_action_title_is_capped_at_four_words_and_sixty_characters():
     resolved = action_title_from("Apply for a new passport online today right now")
-    assert resolved == "Apply for a new passport"
+    assert resolved == "Apply for a new"
 
     long_words = "Supercalifragilisticexpialidocious" * 2
     assert len(action_title_from(long_words)) <= 60

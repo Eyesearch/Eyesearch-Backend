@@ -140,3 +140,67 @@ CONTRACT = {
 
 audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
 telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)
+
+
+# ---------------------------------------------------------------------------
+# Identity verification
+#
+# A card shows three things that must agree: the domain it links to, the brand
+# above the title, and the title itself. When they disagree the result reads as
+# a scam even when it is not — a page on one site presented under another's
+# name. This gate is the last check before a row is written.
+# ---------------------------------------------------------------------------
+
+#: A title is a label, not a sentence. The brief allows one to four words.
+MIN_TITLE_WORDS = 1
+MAX_TITLE_WORDS = 4
+
+#: Brands that must not appear in another site's title. Bounded on purpose: this
+#: is the set of names a misleading page would borrow, not a dictionary.
+BORROWED_BRANDS: frozenset[str] = frozenset(
+    {"youtube", "facebook", "instagram", "whatsapp", "google", "apple", "samsung", "amazon"}
+)
+
+
+def _tokens(value: str) -> set[str]:
+    return {token for token in "".join(ch if ch.isalnum() else " " for ch in (value or "").lower()).split() if token}
+
+
+def brand_matches_domain(domain: str, brand: str) -> bool:
+    """Whether a brand plausibly belongs to a domain.
+
+    The test is overlap, not equality: "Karnataka Health" belongs to
+    karnataka.gov.in because they share a word, and "The Hindu" belongs to
+    thehindu.com for the same reason. A brand with nothing in common with its
+    domain is either a mistake or a page presenting itself as another site.
+    """
+    label = "".join(_tokens(domain.replace(".", " ")))
+    brand_tokens = _tokens(brand)
+    if not label or not brand_tokens:
+        return False
+    if _tokens(domain.replace(".", " ")) & brand_tokens:
+        return True
+    # A run-together domain carries the brand inside it: "thehindu" contains
+    # "hindu", and "karnatakapower" contains "karnataka". Short tokens are
+    # skipped because "the" appears in half the domains on the web.
+    return any(len(token) >= 3 and token in label for token in brand_tokens)
+
+
+def verify_identity(domain: str, brand: str, title: str) -> tuple[bool, str]:
+    """Whether domain, brand and title agree. Returns (ok, reason)."""
+    if not (brand or "").strip():
+        return False, "empty_brand"
+    if not brand_matches_domain(domain, brand):
+        return False, "brand_not_from_domain"
+
+    words = (title or "").split()
+    if len(words) < MIN_TITLE_WORDS:
+        return False, "empty_title"
+    if len(words) > MAX_TITLE_WORDS:
+        return False, "title_too_long"
+
+    own = _tokens(brand)
+    for token in _tokens(title):
+        if token in BORROWED_BRANDS and token not in own:
+            return False, f"title_borrows_brand:{token}"
+    return True, "ok"

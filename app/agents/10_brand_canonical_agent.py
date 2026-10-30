@@ -37,7 +37,7 @@ __all__ = [
 
 #: A title is a label on a phone screen: three to five words, and never more
 #: than this many characters however many words fit.
-ACTION_TITLE_WORDS = 5
+ACTION_TITLE_WORDS = 4
 ACTION_TITLE_CHAR_CAP = 60
 
 #: Separators that sites stuff keywords into a <title> with. Each one splits
