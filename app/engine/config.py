@@ -216,6 +216,18 @@ class Settings(BaseSettings):
     #: roughly cap x distinct domains, so this also bounds how long the crawl
     #: can keep finding new pages: at 10 the frontier starved after ~2,300 pages
     #: against a 300,000-page storage budget.
+    #: Words below which a page is navigation rather than content. The ingestion
+    #: gate and every maintenance agent read this one value, so the audit cannot
+    #: disagree with what was enforced on the way in.
+    min_page_words: int = 15
+
+    #: A page shorter than this was probably stored under an earlier, smaller
+    #: ceiling. Kept as a setting rather than a constant in the audit script.
+    legacy_truncated_chars: int = 45
+
+    #: How long the revalidation loop waits between passes.
+    revalidation_min_sleep_seconds: float = 30.0
+
     max_pages_per_domain: int = 25
 
     #: Strict per-page body ceiling, in characters, whatever the domain's page

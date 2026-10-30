@@ -184,6 +184,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 #: Words below which a page is navigation rather than content.
+#: Fallback only; the auditor reads `settings.min_page_words` when it has one.
 THIN_WORD_COUNT = 15
 #: A page is "supposed" to have marks if its language is one that uses them.
 MARKED_LANGUAGES = frozenset({"kn", "hi", "ta", "te", "ml", "bn", "gu", "pa", "or", "ar"})
@@ -297,6 +298,11 @@ class DefectAuditor:
         self._settings = settings
         self._batch = max(1, batch)
 
+    @property
+    def thin_words(self) -> int:
+        """The word floor, from the live settings rather than a constant."""
+        return int(getattr(self._settings, "min_page_words", THIN_WORD_COUNT))
+
     async def scan(self) -> DefectReport:
         report = DefectReport()
         ceiling = int(self._settings.page_body_char_ceiling)
@@ -323,6 +329,7 @@ class DefectAuditor:
                         body_text=str(body or ""),
                         language=str(language or "en"),
                         ceiling=ceiling,
+                        thin_words=self.thin_words,
                     )
                 )
 

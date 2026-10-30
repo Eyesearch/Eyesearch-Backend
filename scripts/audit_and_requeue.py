@@ -47,11 +47,12 @@ from app.engine.config import get_settings  # noqa: E402
 from app.engine.store import IndexStore  # noqa: E402
 from app.postgres import PostgresClient  # noqa: E402
 
-#: A page at or below this length was stored under the old 40-character rule
-#: (with room for the word-boundary trim and the ellipsis).
-TRUNCATED_THRESHOLD = 45
-#: Below this many words a page is navigation, not content.
-THIN_WORD_COUNT = 15
+# These were constants here, and they drifted: the ingestion agents moved to
+# settings while the audit kept asserting the old numbers. They are read from
+# the live settings now, so the audit evaluates pages against whatever is
+# actually enforced at the moment it runs.
+TRUNCATED_THRESHOLD = 45   # overridden by settings.legacy_truncated_chars
+THIN_WORD_COUNT = 15       # overridden by settings.min_page_words
 #: Pages whose body looks like this are boilerplate, not a document.
 BOILERPLATE_MARKERS = (
     "accept all cookies", "we use cookies", "subscribe to our newsletter",
@@ -137,6 +138,11 @@ class AuditReport:
 
 async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
     settings = get_settings()
+    # Bind the thresholds to the live configuration rather than to the module
+    # constants above, which exist only as defaults for a caller without settings.
+    global TRUNCATED_THRESHOLD, THIN_WORD_COUNT
+    TRUNCATED_THRESHOLD = int(getattr(settings, "legacy_truncated_chars", TRUNCATED_THRESHOLD))
+    THIN_WORD_COUNT = int(getattr(settings, "min_page_words", THIN_WORD_COUNT))
     client = PostgresClient(dsn, statement_timeout_ms=60_000)
     store = IndexStore(client, settings)
     report = AuditReport(dry_run=dry_run)

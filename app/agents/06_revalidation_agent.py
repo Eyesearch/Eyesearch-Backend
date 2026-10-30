@@ -22,6 +22,8 @@ from app.engine.store import IndexStore, PageDocument
 logger = logging.getLogger(__name__)
 
 #: The worker never sleeps less than this, however it is configured.
+#: Fallback only. The agent reads `settings.revalidation_min_sleep_seconds` at
+#: run time; this is what it uses when constructed without settings.
 MIN_SLEEP_SECONDS = 30.0
 
 _frontier_module = load_agent("01_frontier_agent")
