@@ -50,6 +50,12 @@ FAST_CANDIDATE_LIMIT = 500
 
 LANGUAGE_MATCH_BOOST = 0.35
 
+#: The architecture ceilings. Mirrored from the parser rather than imported, so
+#: the store does not depend on an agent to know how wide its own columns are.
+TITLE_CHAR_CAP = 50
+BRAND_CHAR_CAP = 35
+DESCRIPTION_CHAR_CAP = 300
+
 #: Navigational intent. A query that *is* the brand or the domain name is not a
 #: topic search — the reader wants that site — so it outranks ordinary relevance
 #: by a wide margin, and the site's front door outranks its sub-pages.
@@ -118,19 +124,22 @@ class PageDocument:
         sent as an integer while a `Decimal` would be sent as text. Turso
         rejects both for a REAL column.
         """
+        # The last line of defence. Every upstream agent applies these caps, and
+        # this applies them again: a bug in any one of them should not be able to
+        # put a 400-character paragraph where a 300-character description goes.
         return (
             self.domain,
             self.url,
-            self.title,
-            self.description,
+            (self.title or "")[:TITLE_CHAR_CAP],
+            (self.description or "")[:DESCRIPTION_CHAR_CAP],
             self.body_text,
             float(self.quality_score),
             self.digest,
             self.category,
             self.language,
-            self.brand_name,
+            (self.brand_name or "")[:BRAND_CHAR_CAP],
             self.clean_url,
-            self.action_title,
+            (self.action_title or "")[:TITLE_CHAR_CAP],
             json.dumps(self.sitelinks or []),
         )
 

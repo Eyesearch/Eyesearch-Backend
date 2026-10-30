@@ -299,6 +299,18 @@ BRAND_FLUFF = re.compile(
 
 #: What a cut can leave behind: "Government of Karnataka -" is not a name.
 DANGLING_BRAND_PUNCTUATION = re.compile(r"[\s\-_|:&,./;]+$")
+#: Separators that survive at either end after a title is split.
+EDGE_PUNCTUATION = re.compile(r"^[\s\-:_|•·»]+|[\s\-:_|•·»]+$")
+#: A development prefix that leaks from local builds into og:site_name.
+LOCAL_DEV_PREFIX = re.compile(r"(?i)\blocal\s+dev\b")
+
+
+def sanitize_brand(brand: str) -> str:
+    """A brand with its scars removed, cut to the limit."""
+    cleaned = LOCAL_DEV_PREFIX.sub("", brand or "")
+    cleaned = EDGE_PUNCTUATION.sub("", cleaned.strip()).strip()
+    cleaned = _collapse(cleaned)
+    return cleaned[:MAX_BRAND_LENGTH]
 
 
 def trim_brand(text: str) -> str:
@@ -317,7 +329,7 @@ def trim_brand(text: str) -> str:
         cleaned = cut
 
     # Punctuation left hanging by the cut.
-    return DANGLING_BRAND_PUNCTUATION.sub("", cleaned).strip()
+    return EDGE_PUNCTUATION.sub("", DANGLING_BRAND_PUNCTUATION.sub("", cleaned)).strip()
 
 
 def curated_brand(url: str) -> str:

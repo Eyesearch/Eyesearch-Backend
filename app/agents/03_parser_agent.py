@@ -34,10 +34,12 @@ BODY_CHAR_CAP = 1000
 
 #: Ceilings for the card metadata fields. The brand sits on its own line now,
 #: so the title carries the whole subject rather than four words of it.
-BRAND_CHAR_CAP = 80
 CLEAN_URL_CHAR_CAP = 160
-TITLE_CHAR_CAP = 200
-DESCRIPTION_CHAR_CAP = 400
+#: The architecture ceilings, mirrored here so the parser cannot hand the
+#: store a string the card has no room for.
+TITLE_CHAR_CAP = 50
+BRAND_CHAR_CAP = 35
+DESCRIPTION_CHAR_CAP = 300
 
 #: A meta description shorter than this says nothing useful.
 MIN_DESCRIPTION_CHARS = 20
@@ -76,18 +78,41 @@ SKIP_HREF_PREFIXES: tuple[str, ...] = (
 
 # Elements that are never prose.
 STRIP_TAGS: tuple[str, ...] = (
-    "script",
-    "style",
-    "noscript",
-    "iframe",
-    "svg",
-    "canvas",
-    "form",
-    "nav",
-    "footer",
-    "header",
-    "aside",
-    "template",
+    "script", "style", "noscript", "iframe", "svg", "canvas",
+    "form", "nav", "footer", "header", "aside", "template",
+    # Interactive chrome. A button's label is not a sentence, and a <select> is
+    # a list of options rather than prose — both leak into snippets as
+    # "Okay Cancel Loading..." when they are left in.
+    "button", "dialog", "select", "option", "input", "textarea",
+    "audio", "video", "track",
+)
+
+#: Overlays that carry UI text rather than page text. Removed before any
+#: extraction, because their contents are what make a snippet read
+#: "Translation Feedback CPGRAMS Calendar Share Colour".
+OVERLAY_SELECTORS: tuple[str, ...] = (
+    '[role="dialog"]',
+    '[role="alert"]',
+    '[role="menu"]',
+    '[role="tooltip"]',
+    '[aria-hidden="true"]',
+    ".modal",
+    ".popup",
+    ".cookie-banner",
+)
+
+#: Decorative symbols, media controls and arrows. Stripped from text because
+#: "⏪ ⏸️ ▶️ ⏩" is a player, not a description.
+#:
+#: Deliberately narrower than the whole symbol plane: the currency block
+#: (U+20A0–U+20CF, which holds ₹) and the dash characters (U+2013, U+2014) are
+#: left alone. A rupee sign is content, and an em dash is punctuation we put
+#: into titles ourselves.
+EMOJI_AND_SYMBOLS = re.compile(
+    "[\u2000-\u2012\u2015-\u206F\u20D0-\u20FF"
+    "\u2190-\u21FF\u2300-\u23FF\u25A0-\u25FF"
+    "\u2600-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F"
+    "\U0001F000-\U0001FAFF]"
 )
 
 WHITESPACE = re.compile(r"\s+")
@@ -101,10 +126,11 @@ CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def collapse(text: str) -> str:
-    """Collapse every run of whitespace to one space and trim."""
+    """Collapse whitespace, drop control characters and decorative symbols."""
     # Replaced with a space, not deleted: dropping the NUL runs "before" and
     # "after" together and breaks the word boundary for search.
     cleaned = CONTROL_CHARS.sub(" ", (text or "").replace("\u00a0", " "))
+    cleaned = EMOJI_AND_SYMBOLS.sub(" ", cleaned)
     return WHITESPACE.sub(" ", cleaned).strip()
 
 
@@ -222,6 +248,13 @@ class ParserAgent:
         brand_name = self._brand_name(soup, url)
         schema_types = self._schema_types(soup)
         sitelinks = self._sitelinks(soup, url)
+
+        # Overlays first: a modal nested inside a stripped tag would be removed
+        # anyway, but one wrapped around the article is not, and its UI text
+        # would land in the body.
+        for selector in OVERLAY_SELECTORS:
+            for element in soup.select(selector):
+                element.decompose()
 
         for tag in soup.find_all(STRIP_TAGS):
             tag.decompose()
@@ -461,6 +494,28 @@ TITLE_FLUFF_PATTERNS: tuple[str, ...] = (
 #: Punctuation left hanging when a title is cut mid-phrase.
 DANGLING_SYMBOLS = re.compile(r"[\s\-_|:&,./;]+$")
 
+#: The same problem at both ends: ":: Rmrc Bbsr" and "NIV ::" are scars from
+#: splitting a title on a separator, not names.
+EDGE_PUNCTUATION = re.compile(r"^[\s\-:_|•·»]+|[\s\-:_|•·»]+$")
+
+#: A domain extension standing alone: ".in", "com", "co.uk". It is not a title.
+TLD_PATTERN = re.compile(r"^\.?[a-z]{2,6}(\.[a-z]{2,4})?$", re.IGNORECASE)
+
+
+def clean_punctuation(text: str) -> str:
+    """Trim separators and dots from both ends of a fragment."""
+    return EDGE_PUNCTUATION.sub("", (text or "").strip()).strip()
+
+
+def is_bare_tld(text: str) -> bool:
+    """Whether a fragment is only a domain suffix."""
+    return bool(TLD_PATTERN.match((text or "").strip()))
+
+
+def has_real_words(text: str) -> bool:
+    """At least three letters or digits, in any script."""
+    return len(re.sub(r"[^0-9A-Za-z\u0900-\u0DFF]", "", text or "")) >= 3
+
 #: Sites stuff their titles with pipes and dashes — "SBI - Personal Banking |
 #: Net Banking | Loans | Home". The first chunk is the subject; the rest is the
 #: site's navigation, and it eats the 50-character budget.
@@ -563,14 +618,24 @@ def format_company_bounded_title(
     else:
         context = re.sub(r"[\s\-_|:]+", " ", candidate).strip()
 
-    # A title that was only the brand tells us nothing; the path does.
-    if len(context) < 3:
+    # A context of ".in", "com" or "::" is not a description of a page. When the
+    # title was only a domain extension the path knows more than the title does,
+    # so it supplies the intent instead.
+    context = clean_punctuation(context)
+    if (
+        len(context) < 3
+        or is_bare_tld(context)
+        or not has_real_words(context)
+        or context.lower() == company.lower()
+    ):
         intent = resolve_url_intent(url)
-        context = intent or (h1_text or "").strip() or "Home"
+        context = clean_punctuation(intent or (h1_text or "").strip() or "")
         if company:
-            context = re.sub(
-                rf"\b{re.escape(company)}\b", "", context, flags=re.IGNORECASE
-            ).strip() or "Official Gateway"
+            context = clean_punctuation(
+                re.sub(rf"\b{re.escape(company)}\b", "", context, flags=re.IGNORECASE)
+            )
+        if not context or len(context) < 3 or is_bare_tld(context):
+            context = "Official Portal"
 
     title = f"{company}: {context}" if company else context
     title = re.sub(r"\s+", " ", title).strip()

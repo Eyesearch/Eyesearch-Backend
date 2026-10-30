@@ -25,6 +25,19 @@ from app.engine.store import IndexStore, PageDocument, QueuedUrl
 from app.indexer.guard import StorageGuard
 from app.libsql_http import LibsqlClient
 
+#: The three ceilings, and the three functions that enforce them. Imported from
+#: the agents that own the rules rather than reimplemented here.
+_parser = load_agent("03_parser_agent")
+_brand = load_agent("10_brand_canonical_agent")
+_indexer = load_agent("05_indexer_agent")
+format_company_bounded_title = _parser.format_company_bounded_title
+sanitize_brand = _brand.sanitize_brand
+brand_from_domain = _brand.brand_from_domain
+format_ai_snippet = _indexer.format_ai_snippet
+TITLE_CHAR_CAP = _parser.TITLE_CHAR_CAP
+BRAND_CHAR_CAP = _parser.BRAND_CHAR_CAP
+DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
+
 logger = logging.getLogger(__name__)
 
 #: When the frontier is dry and nothing can be re-armed yet, back off longer
@@ -344,17 +357,31 @@ class Orchestrator:
                 )
             )
 
+            # Nothing unvalidated reaches the store. The parser produces a
+            # title, a brand and a description from a page it did not write, and
+            # every one of them can be a domain suffix, a modal's button label or
+            # a 400-character paragraph. The caps are applied here as well as in
+            # the parser because a page that slips past one check should not slip
+            # past both.
+            clean_brand = sanitize_brand(parsed.brand_name or brand_from_domain(item.url))
+            bounded_title = format_company_bounded_title(
+                parsed.title, clean_brand, h1_text=parsed.action_title, url=item.url
+            )
+            clean_desc = format_ai_snippet(
+                meta_description=parsed.description, body_text_sample=parsed.body_text
+            ) or parsed.description
+
             document = PageDocument(
                 url=item.url,
                 domain=item.domain,
-                title=parsed.title,
-                description=parsed.description,
+                title=bounded_title[:TITLE_CHAR_CAP],
+                description=clean_desc[:DESCRIPTION_CHAR_CAP],
                 body_text=parsed.body_text,
                 schema_types=list(parsed.schema_types),
                 sitelinks=list(parsed.sitelinks),
-                brand_name=parsed.brand_name,
+                brand_name=clean_brand[:BRAND_CHAR_CAP],
                 clean_url=parsed.clean_url,
-                action_title=parsed.action_title,
+                action_title=bounded_title[:TITLE_CHAR_CAP],
             )
             verdict = self._quality.check(document)
             if not verdict.ok:
