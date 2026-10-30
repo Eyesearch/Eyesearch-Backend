@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 
 from app.engine.store import IndexStore, PageDocument
-from app.services.search_service import cluster_by_domain
+from app.agents import load_agent
+
+cluster_by_domain = load_agent("13_dedupe_compact_agent").cluster_by_domain
 
 BODY = "karnataka health district notification office government scheme passport " * 2
 

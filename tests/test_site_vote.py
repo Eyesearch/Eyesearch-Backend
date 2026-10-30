@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from app.engine.store import IndexStore, PageDocument
-from app.indexer.site_vote import SiteVoteAgent, vote
+from app.agents import load_agent
+
+_classifier = load_agent("07_classifier_agent")
+SiteVoteAgent = _classifier.SiteVoteAgent
+vote = _classifier.vote
 from app.services.search_service import to_result
 
 BODY = "karnataka health district notification office government scheme passport " * 2

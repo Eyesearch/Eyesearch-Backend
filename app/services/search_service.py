@@ -35,7 +35,12 @@ from app.agents import load_agent
 
 logger = logging.getLogger(__name__)
 
+#: How many extra matches to fetch before the dedupe agent clusters them. The
+#: over-fetch lives here because this is the side that does the fetching.
+DOMAIN_CLUSTER_OVERFETCH = 4
+
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
+ResultClusterer = load_agent("13_dedupe_compact_agent").ResultClusterer
 brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
 
 SOURCE_LABEL = "eyesearch_index"
@@ -240,42 +245,6 @@ def sanitise_query(text: str, limit: int = MAX_QUERY_CHARS) -> str:
     return value[:limit]
 
 
-#: How many extra matches to fetch before clustering by domain.
-DOMAIN_CLUSTER_OVERFETCH = 4
-
-
-def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) -> list:
-    """At most `per_domain` results from any one domain, in rank order.
-
-    A search that returns eight pages from the same site is technically ranked
-    and practically useless: the reader wanted the best page on the subject, not
-    the site's whole navigation. Capping per domain lets the other sites through.
-
-    Order is preserved, so this narrows the list rather than reordering it.
-    """
-    if per_domain <= 0:
-        return list(hits)[:limit] if limit else list(hits)
-
-    seen: dict[str, int] = {}
-    kept: list = []
-    for hit in hits:
-        domain = _domain_of(getattr(hit, "url", "") or "")
-        if seen.get(domain, 0) >= per_domain:
-            continue
-        seen[domain] = seen.get(domain, 0) + 1
-        kept.append(hit)
-        if limit is not None and len(kept) >= limit:
-            break
-    return kept
-
-
-def _domain_of(url: str) -> str:
-    try:
-        return (urlparse(url).hostname or "").lower()
-    except ValueError:
-        return ""
-
-
 def _breadcrumbs(url: str) -> list[str]:
     """The path as readable words, for a card to show above the title."""
     if not url:
@@ -468,7 +437,7 @@ class SearchService:
             category=category,
             language=language,
         )
-        hits = cluster_by_domain(hits, per_domain=self._settings.max_results_per_domain, limit=size)
+        hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
         results = [to_result(hit).as_dict() for hit in hits]
 
         if highlight:

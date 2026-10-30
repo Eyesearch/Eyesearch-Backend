@@ -5,8 +5,15 @@ from __future__ import annotations
 import pytest
 from bs4 import BeautifulSoup
 
-from app.indexer.defect_audit import DefectAuditor, classify_row, mark_ratio
-from app.indexer.sitelinks import classify_label, extract_sitelinks
+from app.agents import load_agent
+
+_king = load_agent("14_king_orchestrator_agent")
+DefectAuditor = _king.DefectAuditor
+classify_row = _king.classify_row
+mark_ratio = _king.mark_ratio
+_parser = load_agent("03_parser_agent")
+classify_label = _parser.classify_label
+extract_sitelinks = _parser.extract_sitelinks
 
 KANNADA_REAL = (
     "ಕರ್ನಾಟಕ ಆರೋಗ್ಯ ಇಲಾಖೆ ಜಿಲ್ಲಾ ಅಧಿಸೂಚನೆ ಸರ್ಕಾರ ಯೋಜನೆ ಪಾಸ್ಪೋರ್ಟ್ ರೈಲ್ವೆ ಪರೀಕ್ಷೆ ಫಲಿತಾಂಶ"

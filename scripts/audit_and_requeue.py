@@ -237,9 +237,11 @@ async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
         # Scanned before the brand backfill so the telemetry records what was
         # actually wrong. A missing brand is cheaper to repair in place than to
         # re-crawl, so those are fixed below rather than queued.
-        from app.indexer.defect_audit import DefectAuditor
+        from app.agents import load_agent
 
-        from app.indexer.defect_audit import DefectReport
+        DefectAuditor = load_agent("14_king_orchestrator_agent").DefectAuditor
+
+        DefectReport = load_agent("14_king_orchestrator_agent").DefectReport
 
         auditor = DefectAuditor(client, settings)
         defects = await auditor.scan()

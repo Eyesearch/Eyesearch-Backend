@@ -33,6 +33,7 @@ from app.agents import load_agent
 logger = logging.getLogger(__name__)
 
 LanguageAgent = load_agent("08_language_agent").LanguageAgent
+autosuggest = load_agent("39_autosuggest_trie_agent")
 
 # Columns the FTS index carries, in bm25 weight order.
 BM25_WEIGHTS = (10.0, 5.0, 1.0)
@@ -1148,22 +1149,21 @@ class IndexStore:
         vocabulary is read from the search vectors themselves, so a suggestion is
         always a term that will match.
         """
-        prefix = " ".join((query or "").split())
-        if len(prefix) < 2:
+        # The rule — what a suggestion is, and how short a prefix may be — is
+        # the trie agent's, so the two suggestion paths cannot disagree.
+        if not autosuggest.is_suggestable(query):
             return []
 
         try:
             result = await self._client.execute(
-                "SELECT word FROM ts_stat("
-                "  'SELECT search_vector FROM pages'"
-                ") WHERE word LIKE ? ORDER BY nentry DESC, word ASC LIMIT ?",
-                (f"{prefix.lower()}%", limit),
+                autosuggest.suggestion_query(query),
+                autosuggest.suggestion_params(query, limit),
             )
             words = [str(row[0]) for row in result.rows if row[0]]
             if words:
                 return words
         except Exception as error:  # noqa: BLE001 - fall through to titles
-            logger.debug("ts_stat suggest failed for %r: %s", prefix, error)
+            logger.debug("ts_stat suggest failed for %r: %s", query, error)
 
         match = build_tsquery(query, prefix=True)
         if not match:

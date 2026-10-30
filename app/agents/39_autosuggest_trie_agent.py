@@ -107,3 +107,33 @@ class TrieAutosuggestAgent:
 
     def stats(self) -> dict[str, object]:
         return {"words": len(self.trie), "min_prefix": MIN_PREFIX}
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary suggestions
+#
+# A suggestion is a word the index contains, not a page title. A dropdown of
+# sentences is not a completion, and a word read from the search vectors is
+# guaranteed to match when the user accepts it.
+# ---------------------------------------------------------------------------
+
+#: Below this many characters a prefix matches too much to be a suggestion.
+MIN_SUGGEST_PREFIX = 2
+
+
+def suggestion_query(prefix: str) -> str:
+    """The SQL that reads matching words out of the index's own vectors."""
+    return (
+        "SELECT word FROM ts_stat('SELECT search_vector FROM pages') "
+        "WHERE word LIKE ? ORDER BY nentry DESC, word ASC LIMIT ?"
+    )
+
+
+def suggestion_params(prefix: str, limit: int) -> tuple[str, int]:
+    """The bound parameters for `suggestion_query`."""
+    return (f"{(prefix or '').strip().lower()}%", int(limit))
+
+
+def is_suggestable(prefix: str) -> bool:
+    """Whether a prefix is long enough to complete."""
+    return len(" ".join((prefix or "").split())) >= MIN_SUGGEST_PREFIX

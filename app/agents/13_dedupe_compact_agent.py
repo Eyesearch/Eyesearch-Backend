@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -137,3 +137,54 @@ class DedupeCompactAgent:
 
         logger.info("compaction: %s", report.as_dict())
         return report
+
+
+# ---------------------------------------------------------------------------
+# Result clustering
+#
+# Deduplication at query time rather than at storage time: the same page stored
+# once can still crowd a result page if one site holds eight good matches. The
+# rule is two per host, in rank order.
+# ---------------------------------------------------------------------------
+
+#: How many extra matches to fetch before clustering by domain.
+DOMAIN_CLUSTER_OVERFETCH = 4
+
+
+def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) -> list:
+    """At most `per_domain` results from any one domain, in rank order.
+
+    A search that returns eight pages from the same site is technically ranked
+    and practically useless: the reader wanted the best page on the subject, not
+    the site's whole navigation. Capping per domain lets the other sites through.
+
+    Order is preserved, so this narrows the list rather than reordering it.
+    """
+    if per_domain <= 0:
+        return list(hits)[:limit] if limit else list(hits)
+
+    seen: dict[str, int] = {}
+    kept: list = []
+    for hit in hits:
+        domain = _domain_of(getattr(hit, "url", "") or "")
+        if seen.get(domain, 0) >= per_domain:
+            continue
+        seen[domain] = seen.get(domain, 0) + 1
+        kept.append(hit)
+        if limit is not None and len(kept) >= limit:
+            break
+    return kept
+
+
+def _domain_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+class ResultClusterer:
+    """The rule, as something a service can call without importing a function."""
+
+    def cluster(self, hits, *, per_domain: int = 2, limit: int | None = None) -> list:
+        return cluster_by_domain(hits, per_domain=per_domain, limit=limit)
