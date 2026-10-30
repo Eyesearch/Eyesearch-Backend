@@ -425,3 +425,42 @@ def fleet_contract_report() -> dict:
         "supervisor": rules.SUPERVISOR,
         "audited": audited,
     }
+
+
+# ---------------------------------------------------------------------------
+# The quarantine ratio
+#
+# WEB is where a page lands when no rule could place it. That is honest for a
+# few pages and a symptom for many: past a tenth of the corpus, the classifier
+# is missing patterns rather than the web being unclassifiable.
+# ---------------------------------------------------------------------------
+
+#: Above this share of the corpus, WEB is drift rather than a fallback.
+WEB_RATIO_WARNING = 0.10
+
+
+async def web_ratio(client) -> dict:
+    """How much of the index is sitting in the quarantine, and whether that is too much."""
+    result = await client.execute(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE c.code = 'WEB') AS web, "
+        "  COUNT(*) AS total "
+        "FROM pages p LEFT JOIN categories c ON c.id = p.category_id"
+    )
+    web, total = (int(value or 0) for value in result.rows[0])
+    ratio = (web / total) if total else 0.0
+
+    report = {
+        "web_pages": web,
+        "total_pages": total,
+        "web_ratio": round(ratio, 4),
+        "threshold": WEB_RATIO_WARNING,
+        "breach": ratio > WEB_RATIO_WARNING,
+    }
+    if report["breach"]:
+        logger.warning(
+            "WEB is %.1f%% of the corpus (%d of %d pages), above the %.0f%% threshold — "
+            "the classifier is missing patterns, not facing unclassifiable pages",
+            ratio * 100, web, total, WEB_RATIO_WARNING * 100,
+        )
+    return report
