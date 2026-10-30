@@ -21,6 +21,10 @@ from typing import Any
 from urllib.parse import parse_qsl, unquote, urlsplit, urlunparse
 
 from app.engine.config import Settings, get_settings
+
+#: The page-selection rule lives with the parser; the frontier applies it at
+#: admission so a rejected URL never costs a fetch.
+from app.agents import load_agent as _load_agent
 from app.engine.urls import safe_port, safe_urljoin, safe_urlparse
 from app.engine.store import IndexStore, QueuedUrl
 
@@ -485,6 +489,18 @@ def is_crawlable(url: str) -> bool:
     return True
 
 
+def is_worthy_page(url: str, current_domain_page_count: int, cap: int | None = None) -> bool:
+    """Whether a URL may enter the frontier at all.
+
+    Applied here rather than only in the parser: a login token or an endless
+    pagination loop is refused before the queue spends a fetch on it.
+    """
+    rule = _load_agent("03_parser_agent").is_worthy_page
+    if cap is None:
+        return rule(url, current_domain_page_count)
+    return rule(url, current_domain_page_count, cap)
+
+
 def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) -> bool:
     """Whether a link belongs to the crawl.
 
@@ -652,6 +668,8 @@ async def discover_sitemap_urls(
         if not is_crawlable(normalised):
             continue
         if not in_crawl_scope(normalised, domain, allow_global=allow_global):
+            continue
+        if not is_worthy_page(normalised, 0):
             continue
         seen.add(normalised)
         accepted.append(normalised)
@@ -901,6 +919,8 @@ class FrontierAgent:
             if not is_crawlable(normalised):
                 continue
             if not in_crawl_scope(normalised, source_host, allow_global=allow_global):
+                continue
+            if not is_worthy_page(normalised, 0):
                 continue
             seen.add(normalised)
             accepted.append(normalised)

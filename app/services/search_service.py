@@ -41,6 +41,7 @@ DOMAIN_CLUSTER_OVERFETCH = 4
 
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
 ResultClusterer = load_agent("13_dedupe_compact_agent").ResultClusterer
+format_company_bounded_title = load_agent("03_parser_agent").format_company_bounded_title
 brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
 
 SOURCE_LABEL = "eyesearch_index"
@@ -369,7 +370,12 @@ def to_result(hit: SearchHit) -> SearchResult:
     field existed.
     """
     raw_title = hit.title or hit.url
-    title = (hit.action_title or "").strip() or raw_title
+    # The card title is `[Brand]: [context]`, capped at 50 characters — the one
+    # authoritative display title. The four-word action title is retired as a
+    # display string; where it exists it is only the context it contributes.
+    context = (hit.action_title or "").strip() or raw_title
+    brand = (getattr(hit, "brand_name", "") or "").strip()
+    title = format_company_bounded_title(context, brand) if brand else context
     return SearchResult(
         id=f"eyesearch:{hit.page_id}",
         title=title,

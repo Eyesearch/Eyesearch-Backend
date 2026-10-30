@@ -179,7 +179,11 @@ async def test_the_api_result_carries_the_card_fields(client):
     assert hits, "the seeded page should be found"
     result = to_result(hits[0]).as_dict()
 
-    assert result["title"] == "District Health Notifications"
+    # The display title is `[Brand]: [context]`, capped at 50 characters — the
+    # one authoritative title. The bare page title is no longer what a card
+    # shows.
+    assert result["title"].startswith("Karnataka Health Department: ")
+    assert len(result["title"]) <= 50
     assert result["brand_name"] == "Karnataka Health Department"
     assert result["clean_url"] == "karnataka.gov.in › health › notifications"
 

@@ -7,6 +7,8 @@ the database has confirmed the commit.
 
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import dataclass
 from typing import Sequence
@@ -37,6 +39,79 @@ class IndexOutcome:
         from `committed` rather than from the number of documents offered.
         """
         return self.pages_written if self.committed else 0
+
+
+# ---------------------------------------------------------------------------
+# The AI resale snippet
+#
+# A context capsule, not a blurb: dense, factual, free of the boilerplate that
+# every page repeats. Twenty-five pages at 300 characters is 7.5K characters of
+# a domain's knowledge, which is what a retrieval pipeline actually consumes.
+# ---------------------------------------------------------------------------
+
+#: One capsule. Long enough for a full sentence, short enough to be dense.
+MAX_SNIPPET_LENGTH = 300
+#: Below this a string is a label, not an explanation — "Click here to login".
+MIN_SNIPPET_LENGTH = 60
+#: A sentence ending inside this window is preferred to a mid-clause cut.
+SENTENCE_WINDOW_START = 180
+
+#: Text that is on every page and says nothing about this one.
+BOILERPLATE_PATTERNS: tuple[str, ...] = (
+    r"(?i)\b(we use cookies|cookie policy|accept all cookies|privacy choices)\b",
+    r"(?i)\b(javascript is disabled|enable javascript|please turn on javascript)\b",
+    r"(?i)\b(all rights reserved|copyright ©|terms and conditions apply)\b",
+    r"(?i)\b(skip to main content|skip to navigation|toggle navigation)\b",
+    r"(?i)\b(subscribe to our newsletter|enter your email address)\b",
+)
+
+#: Punctuation left hanging when a string is cut mid-phrase.
+SNIPPET_DANGLING = re.compile(r"[\s\-_|:&,./;]+$")
+
+
+def is_boilerplate(text: str) -> bool:
+    """Whether a string is one of the things every page says."""
+    return any(re.search(pattern, text or "") for pattern in BOILERPLATE_PATTERNS)
+
+
+def format_ai_snippet(
+    meta_description: str | None = None,
+    og_description: str | None = None,
+    first_paragraph: str | None = None,
+    body_text_sample: str | None = None,
+) -> str:
+    """The densest ≤300 characters available, in order of trustworthiness."""
+    for raw in (meta_description, og_description, first_paragraph, body_text_sample):
+        if not raw:
+            continue
+        cleaned = re.sub(r"&[a-z]+;|&#\d+;", " ", raw)
+        cleaned = re.sub(r"[\r\n\t]+", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+        if len(cleaned) < MIN_SNIPPET_LENGTH:
+            continue
+        if is_boilerplate(cleaned):
+            continue
+
+        return _cap_snippet(cleaned)
+
+    return ""
+
+
+def _cap_snippet(text: str) -> str:
+    """Cut to the limit, preferring a sentence end over a word boundary."""
+    if len(text) <= MAX_SNIPPET_LENGTH:
+        return text
+
+    window = text[:MAX_SNIPPET_LENGTH]
+    last_stop = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
+    if last_stop >= SENTENCE_WINDOW_START:
+        return window[: last_stop + 1].strip()
+
+    cut = window[: MAX_SNIPPET_LENGTH - 3]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return f"{SNIPPET_DANGLING.sub('', cut).strip()}..."
 
 
 class IndexerAgent:
