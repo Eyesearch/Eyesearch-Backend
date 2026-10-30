@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass, field
 
 from app.engine.urls import safe_urljoin
@@ -415,6 +416,130 @@ __all__ = [
     "collapse",
     "truncate_body",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Page selection and the card title
+#
+# Two rules that belong to the parser because they are decided from the URL and
+# the page's own metadata, before anything is stored.
+# ---------------------------------------------------------------------------
+
+#: A card title is one line on a phone. Past this it is truncated, not wrapped.
+MAX_TITLE_LENGTH = 50
+#: The domain budget, read from settings where one is available.
+MAX_PAGES_PER_DOMAIN = 25
+
+#: Paths that are the point of a site: someone searching for a bank wants its
+#: login, not its third blog post.
+GOLDEN_PATH_PATTERNS: tuple[str, ...] = (
+    r"^/?$",
+    r"/(login|signin|sign-in|signup|sign-up|register|registration)",
+    r"/(portal|dashboard|account|citizen|member|auth)",
+    r"/(services|schemes|apply|products|solutions|features)",
+    r"/(download|circulars|orders|notifications|contact|careers|jobs)",
+)
+
+#: Paths that must never be stored: they end a session, carry a credential, or
+#: are one position in an endless list.
+BANNED_PATH_PATTERNS: tuple[str, ...] = (
+    r"(logout|signout)",
+    r"(forgot-password|reset-password|change-password)",
+    r"(\?.*(?:token|session|auth_token|redirect_uri)=)",
+    r"(\?page=|\?p=|/page/\d+|\?sort=|\?filter=|\?search=)",
+    r"(tag/|category/|feed/|rss|author/)",
+)
+
+#: Words a page uses to introduce itself rather than to say what it is.
+TITLE_FLUFF_PATTERNS: tuple[str, ...] = (
+    r"(?i)\b(welcome to|official website of|official portal of|home page|index)\b",
+    r"(?i)\b(best platform for|click here to|online portal)\b",
+    r"(?i)\b(homepage|welcome)\b",
+)
+
+#: Punctuation left hanging when a title is cut mid-phrase.
+DANGLING_SYMBOLS = re.compile(r"[\s\-_|:&,./;]+$")
+
+
+def is_worthy_page(url: str, current_domain_page_count: int, cap: int = MAX_PAGES_PER_DOMAIN) -> bool:
+    """Whether a page earns one of a domain's slots."""
+    if current_domain_page_count >= cap:
+        return False
+
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+    except ValueError:
+        return False
+
+    full_check = f"{path}?{query}" if query else path
+
+    for pattern in BANNED_PATH_PATTERNS:
+        if re.search(pattern, full_check):
+            return False
+
+    for pattern in GOLDEN_PATH_PATTERNS:
+        if re.search(pattern, path):
+            return True
+
+    # A shallow path with no query is a real page often enough to keep.
+    segments = [segment for segment in path.split("/") if segment]
+    return len(segments) <= 2 and not query
+
+
+def format_company_bounded_title(
+    raw_title: str | None,
+    company_name: str,
+    h1_text: str | None = None,
+    og_title: str | None = None,
+) -> str:
+    """`[Brand]: [what the page is]`, never longer than 50 characters.
+
+    The brand leads so that a search for the brand's own name matches the first
+    word of the title. Everything after it is the page's own description with
+    the fluff taken out.
+    """
+    company = (company_name or "").strip()
+    candidate = (raw_title or og_title or h1_text or company).strip()
+
+    for pattern in TITLE_FLUFF_PATTERNS:
+        candidate = re.sub(pattern, "", candidate).strip()
+
+    candidate = re.sub(r"[\s\-_|:]+", " ", candidate).strip()
+
+    if company:
+        if not candidate.lower().startswith(company.lower()):
+            candidate = f"{company}: {candidate}"
+        else:
+            rest = candidate[len(company):].lstrip(" -:|")
+            candidate = f"{company}: {rest}" if rest else company
+
+        # "SBI: SBI Online" is the same word twice — and the repetition is not
+        # always at the front: "SBI: Online SBI Personal Banking" reads badly
+        # too. The brand is said once, at the start, and removed from the rest.
+        duplicate = rf"(?i)^{re.escape(company)}:\s*{re.escape(company)}\s*"
+        candidate = re.sub(duplicate, f"{company}: ", candidate)
+        prefix = f"{company}: "
+        if candidate.lower().startswith(prefix.lower()):
+            rest = re.sub(rf"(?i)\b{re.escape(company)}\b\s*", "", candidate[len(prefix):])
+            rest = rest.strip()
+            candidate = f"{company}: {rest}" if rest else company
+
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    if len(candidate) < 3:
+        return company or "Home"
+
+    if len(candidate) > MAX_TITLE_LENGTH:
+        budget = MAX_TITLE_LENGTH - 3  # room for the ellipsis
+        cut = candidate[:budget]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        cut = DANGLING_SYMBOLS.sub("", cut).strip()
+        candidate = f"{cut}..."
+
+    return candidate
 
 
 # ---------------------------------------------------------------------------
