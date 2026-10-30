@@ -227,7 +227,10 @@ async def test_the_categories_table_is_seeded(client):
     assert rows["WEB"] == "general_reference"
     # Every category the classifier can emit must have a row, or a page would
     # link to nothing.
-    assert {"GOV", "TECH", "NEWS", "JOBS", "FINANCE", "EDU", "HEALTH", "AGRI", "LEGAL", "WEB"} <= set(rows)
+    assert {
+        "GOV", "FIN", "LEGAL", "TECH", "EDU", "NEWS", "JOBS", "HEALTH",
+        "TRANS", "UTIL", "COMM", "SOCIAL", "CORP", "FOOD", "MEDIA", "WEB",
+    } <= set(rows)
 
 
 @pytest.mark.asyncio

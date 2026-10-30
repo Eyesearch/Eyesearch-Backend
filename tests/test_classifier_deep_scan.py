@@ -17,11 +17,11 @@ def classifier():
 @pytest.mark.parametrize(
     "url, expected",
     [
-        ("https://www.paytm.com/recharge", "payments"),
+        ("https://www.paytm.com/recharge", "business_finance"),
         ("https://indiankanoon.org/doc/1", "legal_judiciary"),
         ("https://www.thehindu.com/news/x", "news_media"),
         ("https://iitb.ac.in/admissions", "education_exams"),
-        ("https://krishijagran.com/crops", "agriculture_rural"),
+        ("https://krishijagran.com/crops", "food_dining"),
         ("https://www.practo.com/", "health_medical"),
         ("https://zerodha.com/", "business_finance"),
         ("https://github.com/x/y", "tech_developer"),
@@ -38,7 +38,7 @@ def test_a_named_domain_decides(classifier, url, expected):
 def test_a_specialised_domain_beats_the_government_suffix(classifier):
     """sci.gov.in is a court, not a ministry; icar.org.in is agriculture."""
     assert classifier.classify("https://sci.gov.in/x", "", "", "").category == "legal_judiciary"
-    assert classifier.classify("https://icar.org.in/x", "", "", "").category == "agriculture_rural"
+    assert classifier.classify("https://icar.org.in/x", "", "", "").category == "food_dining"
 
 
 def test_a_named_site_beats_a_bare_suffix(classifier):
@@ -51,7 +51,7 @@ def test_a_named_site_beats_a_bare_suffix(classifier):
     [
         ("https://highcourt.gov.in/judgment", "legal_judiciary"),
         ("https://ssc.nic.in/recruitment", "jobs_careers"),
-        ("https://krishi.gov.in/mandi", "agriculture_rural"),
+        ("https://krishi.gov.in/mandi", "food_dining"),
     ],
 )
 def test_the_path_refines_a_government_suffix(classifier, url, expected):
@@ -63,7 +63,7 @@ def test_the_title_decides_when_the_url_says_nothing(classifier):
     """Signal 3: phrases a page uses about itself."""
     result = classifier.classify("https://example.com/x", "Kharif and rabi crops", "", "")
 
-    assert result.category == "agriculture_rural"
+    assert result.category == "food_dining"
 
 
 def test_a_page_with_no_signal_falls_back_to_general_reference(classifier):
@@ -81,7 +81,7 @@ def test_a_page_with_no_signal_falls_back_to_general_reference(classifier):
     [
         ("https://x.gov.in/careers", "jobs_careers"),
         ("https://x.gov.in/court-orders", "legal_judiciary"),
-        ("https://x.in/netbanking", "payments"),
+        ("https://x.in/netbanking", "business_finance"),
         ("https://shop.in/cart", "commerce"),
         ("https://x.gov.in/fir-status", "government"),
         ("https://x.ac.in/admissions", "education_exams"),

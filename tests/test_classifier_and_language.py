@@ -50,21 +50,32 @@ def _page(url: str, title: str, body: str, category: str, language: str = "en") 
 # ---------------------------------------------------------------------------
 
 
-def test_the_twelve_categories_are_exactly_the_specified_ones():
+def test_the_sixteen_categories_are_exactly_the_specified_ones():
+    """The taxonomy is data, so it is asserted as data."""
     assert CATEGORIES == (
         "government",
-        "legal_judiciary",
         "business_finance",
-        "payments",
-        "commerce",
+        "legal_judiciary",
         "tech_developer",
+        "education_exams",
         "news_media",
         "jobs_careers",
-        "education_exams",
         "health_medical",
-        "agriculture_rural",
+        "travel_transit",
+        "utilities",
+        "commerce",
+        "community_social",
+        "business_corp",
+        "food_dining",
+        "entertainment_media",
         "general_reference",
     )
+
+
+def test_the_published_codes_are_sixteen():
+    from app.agents import load_agent
+
+    assert len(load_agent("07_classifier_agent").ALLOWED_CATEGORIES) == 16
 
 
 @pytest.mark.parametrize(
@@ -122,7 +133,7 @@ def test_the_twelve_categories_are_exactly_the_specified_ones():
             "https://krishi.gov.in/mandi",
             "Mandi prices",
             "Farmers can check the minimum support price at the mandi.",
-            "agriculture_rural",
+            "food_dining",
         ),
     ],
 )

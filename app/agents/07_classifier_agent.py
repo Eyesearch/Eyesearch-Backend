@@ -29,16 +29,20 @@ logger = logging.getLogger(__name__)
 #: Every category this agent can emit, in priority order. Earlier wins a tie.
 CATEGORIES: tuple[str, ...] = (
     "government",
-    "legal_judiciary",
     "business_finance",
-    "payments",
-    "commerce",
+    "legal_judiciary",
     "tech_developer",
+    "education_exams",
     "news_media",
     "jobs_careers",
-    "education_exams",
     "health_medical",
-    "agriculture_rural",
+    "travel_transit",
+    "utilities",
+    "commerce",
+    "community_social",
+    "business_corp",
+    "food_dining",
+    "entertainment_media",
     "general_reference",
 )
 
@@ -115,16 +119,8 @@ RULES: tuple[CategoryRule, ...] = (
             "interest rate", "repo rate", "fiscal deficit", "quarterly results",
             "market capitalisation", "mutual fund", "stock exchange", "equity",
             "insurance policy", "income tax", "gst", "net worth",
-        ),
-    ),
-    CategoryRule(
-        name="payments",
-        schema_types=("PaymentCharge", "PaymentService", "Invoice"),
-        url_tokens=(
-            "payment", "payments", "checkout", "gateway", "upi", "recharge",
-            "wallet", "billing", "invoice", "pay", "remit",
-        ),
-        keywords=(
+            # Payments live here now: the sixteen codes have no separate PAY,
+            # and a wallet is a financial product.
             "payment gateway", "make a payment", "pay online", "upi", "net banking",
             "checkout", "billing address", "transaction id", "refund policy",
         ),
@@ -211,15 +207,68 @@ RULES: tuple[CategoryRule, ...] = (
         ),
     ),
     CategoryRule(
-        name="agriculture_rural",
-        schema_types=("AgriculturalProduct",),
+        name="food_dining",
+        schema_types=("AgriculturalProduct", "FoodEstablishment", "Restaurant", "Menu"),
         url_tokens=(
             "farmer", "farmers", "krishi", "agri", "agriculture", "crop", "crops",
             "mandi", "apmc", "rural", "irrigation", "monsoon", "harvest",
+            "restaurant", "menu", "dining", "food", "recipe", "order-food",
         ),
         keywords=(
             "farmer", "krishi", "mandi", "minimum support price", "crop yield",
             "sowing", "irrigation", "agricultural produce", "harvest",
+            "restaurant", "dine in", "food delivery", "menu", "cuisine",
+        ),
+    ),
+    CategoryRule(
+        name="travel_transit",
+        schema_types=("BusTrip", "TrainTrip", "Flight", "TaxiService"),
+        url_tokens=(
+            "irctc", "railway", "train", "bus", "metro", "flight", "ticket",
+            "booking", "route", "depot", "transport", "rto", "parivahan",
+        ),
+        keywords=(
+            "train status", "bus booking", "ticket booking", "metro", "flight status",
+            "reservation", "bus pass", "rto", "driving licence", "vehicle registration",
+        ),
+    ),
+    CategoryRule(
+        name="utilities",
+        schema_types=("UtilityService",),
+        url_tokens=(
+            "electricity", "water", "gas", "bescom", "bwssb", "bill-payment",
+            "quick-pay", "meter", "tariff", "utility",
+        ),
+        keywords=(
+            "electricity bill", "water supply", "bescom", "meter reading",
+            "tariff", "gas cylinder", "bill payment", "utility bill",
+        ),
+    ),
+    CategoryRule(
+        name="community_social",
+        schema_types=("DiscussionForumPosting", "Question", "Comment"),
+        url_tokens=("forum", "community", "discussion", "thread", "q-and-a", "answers"),
+        keywords=(
+            "forum", "discussion thread", "community", "replies", "upvote",
+            "asked by", "answered by", "question and answer",
+        ),
+    ),
+    CategoryRule(
+        name="business_corp",
+        schema_types=("Corporation", "Organization", "LocalBusiness"),
+        url_tokens=("company", "corporate", "about-us", "investors", "enterprise", "b2b"),
+        keywords=(
+            "our company", "corporate profile", "board of directors", "annual report",
+            "enterprise solutions", "b2b", "investor relations",
+        ),
+    ),
+    CategoryRule(
+        name="entertainment_media",
+        schema_types=("Movie", "TVSeries", "VideoObject", "MusicRecording", "SportsEvent"),
+        url_tokens=("watch", "movie", "movies", "music", "stream", "video", "sports", "live"),
+        keywords=(
+            "watch online", "streaming", "movie", "web series", "music", "playlist",
+            "live match", "highlights", "trailer",
         ),
     ),
 )
@@ -282,11 +331,11 @@ def _token_matches(token: str, words: set[str]) -> bool:
 
 DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "PAY",
+        "FIN",
         (
             "paytm", "phonepe", "razorpay", "cred.club", "cashfree", "bhimupi",
             "mobikwik", "freecharge", "instamojo", "billdesk", "payu", "slice",
-            "jupiter.money",
+            "jupiter.money", "epfindia.gov.in", "incometax.gov.in",
         ),
     ),
     (
@@ -313,13 +362,6 @@ DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "AGRI",
-        (
-            "krishijagran", "ikisan", "icar.org.in", "agricoop", "enam.gov.in",
-            "farmer.gov.in", "fert.nic.in", "kvk.icar.gov.in",
-        ),
-    ),
-    (
         "HEALTH",
         (
             "practo", "mohfw.gov.in", "nhp.gov.in", "1mg", "pharmeasy",
@@ -327,7 +369,7 @@ DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "FINANCE",
+        "FIN",
         (
             "zerodha", "groww", "rbi.org.in", "sebi.gov.in", "moneycontrol",
             "nseindia", "bseindia", "sbi.co.in", "hdfcbank.com", "icicibank.com",
@@ -337,14 +379,26 @@ DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "TECH",
         (
-            "github.com", "stackoverflow.com", "python.org", "developer.", "docs.",
-            "npm", "pypi", "gitlab.com", "kernel.org",
+            "github.com", "python.org", "developer.", "docs.",
+            "npm", "pypi", "gitlab.com", "kernel.org", "huggingface.co",
         ),
     ),
     (
-        "COMMERCE",
+        "COMM",
         ("amazon.in", "flipkart.com", "myntra", "meesho", "tatacliq", "jiomart"),
     ),
+    (
+        "TRANS",
+        ("irctc.co.in", "ksrtc.in", "mybmtc.karnataka.gov.in", "parivahan.gov.in",
+         "indianrail", "bmtc", "metro"),
+    ),
+    ("UTIL", ("bescom.karnataka.gov.in", "bwssb.karnataka.gov.in", "bescom", "bwssb")),
+    (
+        "SOCIAL",
+        ("reddit.com", "stackoverflow.com", "quora.com", "discourse", "stackexchange"),
+    ),
+    ("MEDIA", ("youtube.com", "netflix.com", "hotstar.com", "spotify.com", "sonyliv")),
+    ("FOOD", ("zomato.com", "swiggy.com", "krishijagran", "icar.org.in", "agmarknet")),
     (
         "JOBS",
         ("naukri.com", "internshala.com", "linkedin.com/jobs", "foundit.in", "freshersworld"),
@@ -358,22 +412,24 @@ PATH_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("JOBS", ("careers", "jobs", "recruitment", "vacancies", "walk-in", "employment")),
     ("LEGAL", ("court-orders", "judgments", "judgment", "judgement", "acts-rules",
                "bare-acts", "act", "case", "court", "tribunal")),
-    ("PAY", ("netbanking", "bill-pay", "payment-gateway", "tax-payment",
+    ("FIN", ("netbanking", "bill-pay", "payment-gateway", "tax-payment",
              "payments", "payment", "wallet", "upi", "checkout", "recharge")),
-    ("FINANCE", ("fixed-deposit", "mutual-fund", "demat", "loan", "interest-rate")),
+    ("FIN", ("fixed-deposit", "mutual-fund", "demat", "loan", "interest-rate")),
+    ("UTIL", ("bill-payment", "electricity-bill", "water-bill", "gas-booking")),
+    ("TRANS", ("ticket-booking", "train-status", "bus-booking", "flight-status")),
     ("EDU", ("admissions", "syllabus", "exam-results", "hall-ticket",
              "course", "courses", "lecture", "faculty")),
     ("GOV", ("fir-status", "police-verification", "complaint", "gazette")),
-    ("COMMERCE", ("cart", "checkout", "shop", "products", "pricing")),
+    ("COMM", ("cart", "checkout", "shop", "products", "pricing")),
     ("NEWS", ("news", "article", "national", "editorial", "headlines")),
-    ("AGRI", ("crops", "crop", "mandiprices", "mandi", "farming", "kharif", "rabi")),
+    ("FOOD", ("crops", "crop", "mandiprices", "mandi", "farming", "kharif", "rabi")),
     ("HEALTH", ("hospital", "clinic", "vaccination", "opd")),
 )
 
 #: Signal 3: phrases in the title, description or snippet.
 TEXT_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
-        "PAY",
+        "FIN",
         (
             "upi payment", "wallet balance", "payment gateway", "recharge",
             "bill payment", "qr scanner", "send money to bank", "net banking transaction",
@@ -394,7 +450,7 @@ TEXT_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     (
-        "AGRI",
+        "FOOD",
         (
             "kharif", "rabi", "fertilizer", "soil health", "mandi rate",
             "crop yield", "horticulture",
@@ -407,18 +463,25 @@ TEXT_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
 #: the signals below speak in codes, so the translation lives here.
 CODE_TO_RULE: dict[str, str] = {
     "GOV": "government",
+    "FIN": "business_finance",
     "LEGAL": "legal_judiciary",
-    "FINANCE": "business_finance",
-    "PAY": "payments",
-    "COMMERCE": "commerce",
     "TECH": "tech_developer",
+    "EDU": "education_exams",
     "NEWS": "news_media",
     "JOBS": "jobs_careers",
-    "EDU": "education_exams",
     "HEALTH": "health_medical",
-    "AGRI": "agriculture_rural",
+    "TRANS": "travel_transit",
+    "UTIL": "utilities",
+    "COMM": "commerce",
+    "SOCIAL": "community_social",
+    "CORP": "business_corp",
+    "FOOD": "food_dining",
+    "MEDIA": "entertainment_media",
     "WEB": "general_reference",
 }
+
+#: The sixteen codes the API publishes. Anything else is a bug, not a category.
+ALLOWED_CATEGORIES: tuple[str, ...] = tuple(CODE_TO_RULE)
 
 #: Words in a hostname that make it a court rather than a department, whatever
 #: the suffix says. ecourts.gov.in is the judiciary; karnataka.gov.in is not.

@@ -22,6 +22,27 @@ __all__ = ["POSTGRES_SCHEMA_STATEMENTS", "SEARCH_CONFIG"]
 #: The text search configuration used by the trigger and by search queries.
 SEARCH_CONFIG = "simple"
 
+#: The sixteen published categories. The schema seeds them and the migration
+#: script reads the same list, so the two cannot drift.
+CATEGORY_SEED: tuple[tuple[str, str], ...] = (
+    ("GOV", "government"),
+    ("FIN", "business_finance"),
+    ("LEGAL", "legal_judiciary"),
+    ("TECH", "tech_developer"),
+    ("EDU", "education_exams"),
+    ("NEWS", "news_media"),
+    ("JOBS", "jobs_careers"),
+    ("HEALTH", "health_medical"),
+    ("TRANS", "travel_transit"),
+    ("UTIL", "utilities"),
+    ("COMM", "commerce"),
+    ("SOCIAL", "community_social"),
+    ("CORP", "business_corp"),
+    ("FOOD", "food_dining"),
+    ("MEDIA", "entertainment_media"),
+    ("WEB", "general_reference"),
+)
+
 POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS sites (
@@ -47,17 +68,21 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     INSERT INTO categories (code, name) VALUES
         ('GOV', 'government'),
+        ('FIN', 'business_finance'),
+        ('LEGAL', 'legal_judiciary'),
         ('TECH', 'tech_developer'),
+        ('EDU', 'education_exams'),
         ('NEWS', 'news_media'),
         ('JOBS', 'jobs_careers'),
-        ('FINANCE', 'business_finance'),
-        ('PAY', 'payments'),
-        ('EDU', 'education_exams'),
         ('HEALTH', 'health_medical'),
-        ('AGRI', 'agriculture_rural'),
-        ('LEGAL', 'legal_judiciary'),
-        ('WEB', 'general_reference'),
-        ('COMMERCE', 'commerce')
+        ('TRANS', 'travel_transit'),
+        ('UTIL', 'utilities'),
+        ('COMM', 'commerce'),
+        ('SOCIAL', 'community_social'),
+        ('CORP', 'business_corp'),
+        ('FOOD', 'food_dining'),
+        ('MEDIA', 'entertainment_media'),
+        ('WEB', 'general_reference')
     ON CONFLICT (code) DO NOTHING
     """,
     """
