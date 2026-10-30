@@ -26,6 +26,14 @@ class FastCacheAgent:
     def get(self, key: tuple) -> object | None:
         return self.cache.get(key)
 
+    def invalidate_urls(self, urls) -> int:
+        """Drop cached answers that mention these pages.
+
+        The rule lives here rather than in the service so that the cache's two
+        behaviours — serve fast, forget precisely — are defined in one file.
+        """
+        return self.cache.invalidate_urls(urls)
+
     def set(self, key: tuple, payload: object) -> None:
         self.cache.set(key, payload)
 

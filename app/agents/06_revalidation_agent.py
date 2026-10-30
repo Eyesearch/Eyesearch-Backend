@@ -131,3 +131,51 @@ class RevalidationAgent:
 
 
 __all__ = ["MIN_SLEEP_SECONDS", "RevalidationAgent"]
+
+
+# ---------------------------------------------------------------------------
+# Conditional requests
+#
+# A page that has not changed does not need downloading again. The server says
+# so with an ETag or a Last-Modified date; sending them back costs one header
+# and saves the whole body.
+#
+# The validators are built and interpreted here. Storing them needs two columns
+# on `pages` and a write path through the fetcher, which is a schema change this
+# module deliberately does not make on its own.
+# ---------------------------------------------------------------------------
+
+#: A response that means "nothing changed, use what you have".
+NOT_MODIFIED = 304
+
+
+def conditional_headers(
+    etag: str | None = None, last_modified: str | None = None
+) -> dict[str, str]:
+    """The headers that ask a server to answer 304 when nothing has changed."""
+    headers: dict[str, str] = {}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+    return headers
+
+
+def validators_from(response_headers) -> dict[str, str]:
+    """The validators a response offers, for the next request."""
+    found: dict[str, str] = {}
+    try:
+        etag = response_headers.get("ETag")
+        last_modified = response_headers.get("Last-Modified")
+    except AttributeError:
+        return found
+    if etag:
+        found["etag"] = str(etag)
+    if last_modified:
+        found["last_modified"] = str(last_modified)
+    return found
+
+
+def is_unchanged(status: int) -> bool:
+    """Whether a response says the cached copy is still current."""
+    return int(status) == NOT_MODIFIED
