@@ -61,3 +61,55 @@ async def test_the_migration_is_idempotent(client):
 
     assert second["orphaned_pages"] == 0
     assert all(count == 0 for key, count in second.items() if key.startswith("renamed:"))
+
+
+@pytest.mark.asyncio
+async def test_it_survives_a_database_that_already_has_the_new_codes(client):
+    """The production failure: initialize_database seeds FIN, then the rename of
+    FINANCE tries to take a code that is already taken."""
+    module = load_script()
+
+    for code, name in (
+        ("FINANCE", "business_finance"),
+        ("PAY", "payments"),
+        ("COMMERCE", "commerce"),
+        ("AGRI", "agriculture_rural"),
+    ):
+        await client.execute(
+            "INSERT INTO categories (code, name) VALUES (?, ?) ON CONFLICT (code) DO NOTHING",
+            (code, name),
+        )
+
+    report = await module.migrate(client, dry_run=False)
+
+    assert report["orphaned_pages"] == 0
+    remaining = await client.execute("SELECT code FROM categories ORDER BY code")
+    codes = [str(row[0]) for row in remaining.rows]
+    assert len(codes) == 16
+    for old in ("FINANCE", "PAY", "COMMERCE", "AGRI"):
+        assert old not in codes, old
+
+
+@pytest.mark.asyncio
+async def test_a_page_under_a_retired_code_keeps_its_category(client):
+    """Re-pointing, not deleting: the page must not lose its classification."""
+    module = load_script()
+    await client.execute(
+        "INSERT INTO categories (code, name) VALUES ('FINANCE', 'business_finance') "
+        "ON CONFLICT (code) DO NOTHING"
+    )
+    await client.execute(
+        "INSERT INTO pages (url, title, description, body_text, digest) "
+        "VALUES ('https://a.gov.in/x', 'T', 'd', 'body', 'mig-1')"
+    )
+    await client.execute(
+        "UPDATE pages SET category_id = (SELECT id FROM categories WHERE code = 'FINANCE')"
+    )
+
+    await module.migrate(client, dry_run=False)
+
+    result = await client.execute(
+        "SELECT c.code FROM pages p JOIN categories c ON c.id = p.category_id "
+        "WHERE p.url = 'https://a.gov.in/x'"
+    )
+    assert str(result.rows[0][0]) == "FIN"

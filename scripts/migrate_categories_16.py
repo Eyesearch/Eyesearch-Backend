@@ -74,13 +74,38 @@ async def migrate(client: PostgresClient, *, dry_run: bool) -> dict[str, int]:
         )
         counts[f"seeded:{new_code}"] = result.rows_affected
 
+    # A rename only works when the target code is free. `initialize_database`
+    # seeds the sixteen on boot, so by the time this runs FIN almost always
+    # already exists and the rename collides. When it does, the old row's pages
+    # are re-pointed at the new one and the old row goes — which is the same
+    # outcome, reached without touching a unique constraint.
     for old, new_code in RENAMES.items():
-        result = await client.execute(
-            "UPDATE categories SET code = ? WHERE code = ?", (new_code, old)
-        )
-        counts[f"renamed:{old}->{new_code}"] = result.rows_affected
+        present_now = await client.execute("SELECT code FROM categories")
+        codes = {str(row[0]) for row in present_now.rows}
+        if old not in codes:
+            counts[f"absent:{old}"] = 0
+            continue
+
+        if new_code in codes:
+            moved = await client.execute(
+                "UPDATE pages SET category_id = (SELECT id FROM categories WHERE code = ?) "
+                "WHERE category_id = (SELECT id FROM categories WHERE code = ?)",
+                (new_code, old),
+            )
+            removed = await client.execute("DELETE FROM categories WHERE code = ?", (old,))
+            counts[f"merged:{old}->{new_code}"] = moved.rows_affected
+            counts[f"removed:{old}"] = removed.rows_affected
+        else:
+            result = await client.execute(
+                "UPDATE categories SET code = ? WHERE code = ?", (new_code, old)
+            )
+            counts[f"renamed:{old}->{new_code}"] = result.rows_affected
 
     for old, new_code in MERGES.items():
+        present_now = await client.execute("SELECT code FROM categories")
+        if old not in {str(row[0]) for row in present_now.rows}:
+            counts[f"absent:{old}"] = 0
+            continue
         moved = await client.execute(
             "UPDATE pages SET category_id = (SELECT id FROM categories WHERE code = ?) "
             "WHERE category_id = (SELECT id FROM categories WHERE code = ?)",
