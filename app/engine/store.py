@@ -50,6 +50,19 @@ FAST_CANDIDATE_LIMIT = 500
 
 LANGUAGE_MATCH_BOOST = 0.35
 
+#: Navigational intent. A query that *is* the brand or the domain name is not a
+#: topic search — the reader wants that site — so it outranks ordinary relevance
+#: by a wide margin, and the site's front door outranks its sub-pages.
+NAVIGATIONAL_BOOST = 5.0
+ROOT_PIN_BOOST = 10.0
+#: A term found only in prose is a passing mention. On a one- or two-word query
+#: that is how a blog outranks the site it is writing about.
+DESCRIPTION_ONLY_PENALTY = 3.0
+#: A gentle pull toward Indian domains, decided by the suffix.
+REGIONAL_BOOST = 0.2
+#: The description-only rule applies only to queries this short.
+DESCRIPTION_ONLY_MAX_TOKENS = 2
+
 TITLE_MATCH_BOOST = 1.0
 
 #: Institutional Indian suffixes that earn a ranking boost.
@@ -94,6 +107,8 @@ class PageDocument:
     category: str = ""
     category_code: str = ""
     sitelinks: list[dict[str, str]] = field(default_factory=list)
+    #: Ranking signals, carried so a caller can tell a navigational hit from an
+    #: ordinary one without re-deriving it.
 
     def as_row(self) -> tuple[Any, ...]:
         """The twelve bound values the page insert expects, in SQL order.
@@ -164,12 +179,22 @@ class SearchHit:
     #: Action links found on the page: [{"intent","label","url"}]. Empty for a
     #: page with none, which is the common case.
     sitelinks: list[dict[str, str]] = field(default_factory=list)
+    #: Ranking signals, carried so a caller can tell a navigational hit from an
+    #: ordinary one without re-deriving it.
+    nav_hit: int = 0
+    root_hit: int = 0
+    region_hit: int = 0
     #: Schema.org types from the page, used for classification only. Not a
     #: column: it describes the page, it is not part of the index.
     schema_types: list[str] = field(default_factory=list)
     category: str = ""
     category_code: str = ""
     sitelinks: list[dict[str, str]] = field(default_factory=list)
+    #: Ranking signals, carried so a caller can tell a navigational hit from an
+    #: ordinary one without re-deriving it.
+    nav_hit: int = 0
+    root_hit: int = 0
+    region_hit: int = 0
 
     @property
     def snippet(self) -> str:
@@ -1008,6 +1033,13 @@ class IndexStore:
         # here is `alias - boost * flag`.
         sql = (
             "SELECT * FROM ("
+            # Nested twice: a select list cannot refer to its own aliases, so
+            # description_only cannot test title_hit in the SELECT that defines
+            # it. The inner query computes the hits, the middle derives the
+            # flags, the outer orders.
+            "SELECT base.*, CASE WHEN ? > 0 AND base.title_hit = 0 "
+            "AND base.nav_hit = 0 THEN 1 ELSE 0 END AS description_only "
+            "FROM ("
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
             "p.brand_name, p.clean_url, p.action_title, "
             f"(-ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?))) "
@@ -1018,6 +1050,17 @@ class IndexStore:
             # The code is detected from the query's own script, so nothing is
             # hardcoded per language beyond the ISO mapping.
             "CASE WHEN p.language = ? THEN 1 ELSE 0 END AS lang_hit, "
+            # Navigational: the query is the brand, or the domain's own name.
+            "CASE WHEN lower(coalesce(p.brand_name, '')) = lower(?) "
+            "  OR lower(split_part(coalesce(s.domain, ''), '.', 1)) = lower(?) "
+            "THEN 1 ELSE 0 END AS nav_hit, "
+            # The site's front door, not one of its articles.
+            "CASE WHEN coalesce(s.domain, '') <> '' AND rtrim(p.url, '/') IN ("
+            "  'https://' || s.domain, 'http://' || s.domain, "
+            "  'https://www.' || s.domain, 'http://www.' || s.domain) "
+            "THEN 1 ELSE 0 END AS root_hit, "
+            # An Indian suffix, decided by the TLD rather than a name list.
+            "CASE WHEN coalesce(s.domain, '') LIKE '%.in' THEN 1 ELSE 0 END AS region_hit, "
             # Appended last on purpose: the row mapper reads by position, and
             # inserting them earlier would shift every index after it.
             "p.category, c.code AS category_code, p.sitelinks "
@@ -1025,22 +1068,39 @@ class IndexStore:
             "LEFT JOIN sites s ON s.site_id = p.site_id "
             "LEFT JOIN categories c ON c.id = p.category_id "
             f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
+            ") base"
             ") ranked "
-            "ORDER BY (lexical_score - ? * title_hit - ? * auth_hit "
-            "- ? * lang_hit) ASC "
+            "ORDER BY (lexical_score "
+            "  - ? * title_hit - ? * auth_hit - ? * lang_hit "
+            "  - ? * nav_hit - ? * root_hit * nav_hit "
+            "  + ? * description_only "
+            "  - ? * region_hit) ASC "
             "LIMIT ? OFFSET ?"
         )
         query_language = _query_language(query)
 
+        navigational_term = " ".join((query or "").split())
+        short_query = 1 if len(fts_tokens(query)) <= DESCRIPTION_ONLY_MAX_TOKENS else 0
+
+        # Bound in the order the placeholders appear in the SQL text, which
+        # begins with the outer select list: the short-query flag first, then
+        # the inner SELECT, the inner WHERE, the weights and the window.
         args = (
+            short_query,
             rank_query,
             *title_tokens,
             query_language,
+            navigational_term,
+            navigational_term,
             match_query,
             *extra,
             TITLE_MATCH_BOOST,
             AUTHORITY_DOMAIN_BOOST,
             LANGUAGE_MATCH_BOOST,
+            NAVIGATIONAL_BOOST,
+            ROOT_PIN_BOOST,
+            DESCRIPTION_ONLY_PENALTY,
+            REGIONAL_BOOST,
             limit,
             offset,
         )
@@ -1060,6 +1120,7 @@ class IndexStore:
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
 
         if hits:
+            hits = await self._with_official_siblings(hits, limit)
             self._rescale_scores(hits)
             return hits
 
@@ -1073,20 +1134,107 @@ class IndexStore:
             result = await self._client.execute(
                 sql,
                 (
+                    short_query,
                     rank_query,
                     *title_tokens,
                     query_language,
+                    navigational_term,
+                    navigational_term,
                     loose,
                     *extra,
                     TITLE_MATCH_BOOST,
                     AUTHORITY_DOMAIN_BOOST,
                     LANGUAGE_MATCH_BOOST,
+                    NAVIGATIONAL_BOOST,
+                    ROOT_PIN_BOOST,
+                    DESCRIPTION_ONLY_PENALTY,
+                    REGIONAL_BOOST,
                     limit,
                     offset,
                 ),
             )
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
             self._rescale_scores(hits)
+        return hits
+
+    async def _with_official_siblings(self, hits: list["SearchHit"], limit: int) -> list["SearchHit"]:
+        """Put the named site's own pages directly behind its front door.
+
+        A sub-page of the site the reader asked for rarely mentions the site's
+        own name, so it does not match the query at all and the navigational
+        result would sit alone with unrelated pages behind it.
+        """
+        if not hits or limit <= 1:
+            return hits
+        top = hits[0]
+        if not getattr(top, "nav_hit", 0):
+            return hits
+
+        from urllib.parse import urlsplit
+
+        try:
+            domain = (urlsplit(top.url or "").hostname or "").lstrip("www.").lower()
+        except ValueError:
+            return hits
+        if not domain:
+            return hits
+
+        seen = {hit.page_id for hit in hits}
+        sql = (
+            "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
+            "p.brand_name, p.clean_url, p.action_title, 0.0 AS lexical_score, "
+            "0 AS title_hit, 0 AS auth_hit, 0 AS lang_hit, 0 AS nav_hit, "
+            "0 AS root_hit, 0 AS region_hit, p.category, c.code AS category_code, "
+            "p.sitelinks, 0 AS description_only "
+            "FROM pages p "
+            "LEFT JOIN sites s ON s.site_id = p.site_id "
+            "LEFT JOIN categories c ON c.id = p.category_id "
+            "WHERE s.domain = ? "
+            "ORDER BY p.quality_score DESC, p.page_id ASC LIMIT ?"
+        )
+        result = await self._client.execute(sql, (domain, limit))
+        siblings = [
+            self._row_to_hit(row, []) for row in result.rows if int(row[0]) not in seen
+        ]
+        if not siblings:
+            return hits
+        return ([top, *siblings, *hits[1:]])[:limit]
+
+    async def _fast_search(
+        self,
+        match_query: str,
+        filters: str,
+        extra: list[Any],
+        limit: int,
+        offset: int,
+        tokens: list[str],
+    ) -> list["SearchHit"]:
+        """Index-only retrieval: no ts_rank_cd, no full-table scoring.
+
+        This is the path taken when the ranked query runs past the statement
+        timeout. Ranking every match is the expensive part, so it is dropped:
+        the GIN index narrows to a bounded candidate set and only those are
+        read. What is given up is ranking across every match — a query matching
+        most of the index returns the first candidates in page order rather than
+        the best ones, which is the right trade against a timeout.
+        """
+        sql = (
+            "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
+            "p.brand_name, p.clean_url, p.action_title, "
+            "0.0 AS lexical_score, 0 AS title_hit, 0 AS auth_hit, 0 AS lang_hit, "
+            "0 AS nav_hit, 0 AS root_hit, 0 AS region_hit, "
+            "p.category, c.code AS category_code, p.sitelinks, 0 AS description_only "
+            "FROM pages p "
+            "LEFT JOIN sites s ON s.site_id = p.site_id "
+            "LEFT JOIN categories c ON c.id = p.category_id "
+            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters} "
+            "ORDER BY p.page_id "
+            "LIMIT ? OFFSET ?"
+        )
+        args: list[Any] = [match_query, *extra, FAST_CANDIDATE_LIMIT, offset]
+        result = await self._client.execute(sql, args)
+        hits = [self._row_to_hit(row, tokens) for row in result.rows]
+        self._rescale_scores(hits)
         return hits
 
     @staticmethod
@@ -1118,9 +1266,18 @@ class IndexStore:
             brand_name=str(row[5] or ""),
             clean_url=str(row[6] or ""),
             action_title=str(row[7] or ""),
-            category=str(row[12] or ""),
-            category_code=str(row[13] or ""),
-            sitelinks=_sitelinks_from(row[14] if len(row) > 14 else None),
+            # Read by position. A wrong index does not raise — it silently
+            # returns another column's value, which is how the category once
+            # came back as a ranking flag.
+            #   8 lexical, 9 title_hit, 10 auth_hit, 11 lang_hit, 12 nav_hit,
+            #   13 root_hit, 14 region_hit, 15 category, 16 category_code,
+            #   17 sitelinks, 18 description_only.
+            category=str(row[15] or ""),
+            category_code=str(row[16] or ""),
+            sitelinks=_sitelinks_from(row[17] if len(row) > 17 else None),
+            nav_hit=int(row[12] or 0) if len(row) > 12 else 0,
+            root_hit=int(row[13] or 0) if len(row) > 13 else 0,
+            region_hit=int(row[14] or 0) if len(row) > 14 else 0,
         )
 
     @staticmethod

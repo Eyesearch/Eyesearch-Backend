@@ -87,6 +87,11 @@ class Settings(BaseSettings):
     #: the index must stop short of it, so the cap is stated in MB and derived
     #: into a page count using `estimated_kb_per_page`.
     max_storage_mb: float = 4608.0
+
+    @property
+    def storage_ceiling_bytes(self) -> int:
+        """The same ceiling in bytes: 4.5 GB. One number, two units."""
+        return int(self.max_storage_mb * 1024 * 1024)
     #: Fraction of the ceiling at which the worker stops taking new URLs and
     #: switches to refreshing what it already holds. Below 1.0 on purpose: a
     #: crawl batch in flight can add pages between two checks.
