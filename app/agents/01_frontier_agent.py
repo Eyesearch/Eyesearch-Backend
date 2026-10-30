@@ -302,21 +302,6 @@ class FrontierItem:
 
 #: Public suffixes that carry an extra label: the registrable domain is the
 #: last three labels, so `optica.iiita.ac.in` is `iiita.ac.in`. Derived from
-#: Named domains that are first in the queue regardless of TLD. This is a
-#: deliberate reversal of the earlier "no domain names in code" rule: the
-#: request asks for these by name, and a rule that cannot name India's own
-#: portals cannot prioritise them. Everything else is still decided by TLD, so
-#: the list is the exception rather than the mechanism.
-HIGH_UTILITY_DOMAINS: frozenset[str] = frozenset(
-    {
-        # Indian government portals named in the brief.
-        "india.gov.in", "isro.gov.in", "pib.gov.in", "ddnews.gov.in", "uidai.gov.in",
-        # Global platforms a person actually uses.
-        "youtube.com", "facebook.com", "instagram.com", "whatsapp.com",
-        "x.com", "twitter.com", "wikipedia.org", "apple.com", "samsung.com",
-    }
-)
-
 #: Suffixes reserved for government, academia and the military. Narrower than
 #: `PRIORITY_SUFFIXES`, which treats the whole `.in` space as worth crawling:
 #: everything Indian is worth crawling, but only these are the first band.
@@ -522,25 +507,25 @@ def in_crawl_scope(url: str, source_host: str, *, allow_global: bool = False) ->
         return True
     if is_authoritative(host):
         return True
-    if is_high_utility(host):
-        return True
-    if allow_global:
-        # Following every outlink of an ordinary site is how a crawl turns into
-        # an endless tour of link farms. A global target is followed only when
-        # the page that links to it is itself worth crawling — a low-utility
-        # source contributes its own pages and nothing else.
-        return _is_worth_following(source_host) and any(
-            host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS
-        )
-    return False
-
-
-def _is_worth_following(source_host: str) -> bool:
-    """Whether a site's outbound links are worth the queue slots."""
-    host = (source_host or "").lower()
-    if not host:
+    # The classifier decides, not a name list. A target is followed when it
+    # scores into a band; a discarded one never expands the graph, whatever
+    # linked to it.
+    # No referral context here on purpose: a referral lifts a domain's *rank*,
+    # not its scope. Whether a foreign host is in the crawl at all is still
+    # decided by ALLOW_GLOBAL_DOMAINS, or every government page that links
+    # abroad would quietly turn global crawling back on.
+    band = classify_domain_priority(url)
+    if band == PRIORITY_DISCARD:
         return False
-    return is_authoritative(host) or is_high_utility(host) or host.endswith(".in")
+    if band <= PRIORITY_UTILITY:
+        return True
+    # A band-2 target is reachable, but not from another band-2 site: two
+    # unremarkable sites linking to each other is precisely the random
+    # third-party network this rule exists to stop. A verified source — a
+    # government or academic portal, a bank — may still refer to one.
+    if priority_of(f"https://{source_host}") > PRIORITY_UTILITY:
+        return False
+    return allow_global and any(host.endswith(tld) for tld in GLOBAL_ALLOWED_TLDS)
 
 
 def is_civic(host: str) -> bool:
@@ -674,35 +659,121 @@ async def discover_sitemap_urls(
     return accepted
 
 
-def priority_of(url: str) -> int:
-    """Lower sorts first.
+# ---------------------------------------------------------------------------
+# Dynamic authority and sector classification
+#
+# No brand names. A domain is scored from what it structurally is — its suffix,
+# its shape, and where the link came from — because a list of names is wrong the
+# week after it is written and cannot cover the global web.
+# ---------------------------------------------------------------------------
 
-    Three bands rather than two:
+#: Bands, lowest first. 99 is "do not crawl".
+PRIORITY_SOVEREIGN = 0
+PRIORITY_UTILITY = 1
+PRIORITY_ENTERPRISE = 2
+PRIORITY_DISCARD = 99
 
-    * 0 — Indian civic domains (.gov.in, .nic.in, .ac.in, .res.in and the rest
-      of the public suffixes), and other reserved government suffixes.
-    * 1 — the Indian web more broadly: .in, .co.in, .org.in, and academic or
-      news domains on them.
-    * 2 — everything else.
+#: Government and military suffixes, anywhere in the world.
+#: Multi-part suffixes are listed explicitly: "karnataka.gov.in" does not end
+#: with ".gov", so a single-part list silently misses every Indian government
+#: domain — which is the whole point of the band.
+SOVEREIGN_SUFFIXES: tuple[str, ...] = (
+    ".gov", ".gov.in", ".gov.uk", ".gov.au", ".govt", ".gob", ".gouv", ".gc.ca",
+    ".mil", ".mil.in", ".nic.in",
+)
 
-    The point of the middle band is that a crawl spends its first hours on
-    Indian infrastructure instead of whatever foreign commercial site happened
-    to be linked first. The bands come from the TLD, so no site is named.
+#: Higher education and research.
+ACADEMIC_SUFFIXES: tuple[str, ...] = (
+    ".edu", ".edu.in", ".ac.in", ".res.in", ".ac.uk", ".edu.au", ".ac.jp",
+)
+
+#: Stems that mark a banking, financial or payments institution. A stem is a
+#: shape, not a brand: any bank in any country lands here.
+FINANCIAL_STEMS: frozenset[str] = frozenset(
+    {
+        "bank", "banking", "finance", "financial", "fintech", "insurance",
+        "mutualfund", "pension", "treasury", "securities", "exchange",
+        "payments", "wallet", "credit", "lending",
+    }
+)
+
+#: Suffixes that are themselves a sector.
+FINANCIAL_SUFFIXES: tuple[str, ...] = (".bank", ".finance", ".insurance")
+
+#: A registrable label longer than this is a phrase, and phrases in hostnames
+#: are how keyword-stuffed SEO farms are built.
+MAX_CLEAN_LABEL = 24
+#: More hyphens than this in a label is the same signal.
+MAX_LABEL_HYPHENS = 1
+
+
+def _registrable_label(host: str) -> str:
+    """The name a person would say: "karnataka" from karnataka.gov.in."""
+    parts = [part for part in (host or "").lower().split(".") if part]
+    if not parts:
+        return ""
+    if len(parts) >= 3 and parts[-2] in {"gov", "nic", "ac", "res", "co", "org", "edu", "com", "net"}:
+        return parts[-3]
+    return parts[-2] if len(parts) >= 2 else parts[0]
+
+
+def looks_like_spam(host: str) -> bool:
+    """Whether a hostname has the shape of a content farm rather than a site."""
+    label = _registrable_label(host)
+    if not label:
+        return True
+    if len(label) > MAX_CLEAN_LABEL:
+        return True
+    if label.count("-") > MAX_LABEL_HYPHENS:
+        return True
+    # A long run of digits is a generated host, not a name.
+    return bool(re.search(r"\d{4,}", label))
+
+
+def classify_domain_priority(domain: str, source_context: dict | None = None) -> int:
+    """Score a domain into a crawl band, from its structure and its referrer.
+
+    `source_context` carries what we know about the link: the band of the page
+    that pointed here, and whether that page was a government one. An official
+    portal vouching for a service provider is the strongest signal available
+    without a list of names, so it is used as one.
     """
-    host = domain_of(url)
-    if is_high_utility(host):
-        return 0
-    if any(host.endswith(suffix) for suffix in RESERVED_SUFFIXES):
-        return 0
-    if host.endswith(".in"):
-        return 1
-    return 2
+    host = domain_of(domain if "://" in (domain or "") else f"https://{domain}")
+    if not host:
+        return PRIORITY_DISCARD
+    if host in UNUSABLE_HOSTS:
+        return PRIORITY_DISCARD
+
+    if any(host.endswith(suffix) for suffix in SOVEREIGN_SUFFIXES):
+        return PRIORITY_SOVEREIGN
+    if any(host.endswith(suffix) for suffix in ACADEMIC_SUFFIXES):
+        return PRIORITY_SOVEREIGN
+
+    # Checked before any referral: a keyword-stuffed host stays discarded even
+    # when a government portal links to it, because the shape is the evidence.
+    if looks_like_spam(host):
+        return PRIORITY_DISCARD
+
+    context = source_context or {}
+    source_band = int(context.get("source_priority", PRIORITY_DISCARD))
+    source_host = str(context.get("source_host") or "")
+
+    # An authority referral: a government portal pointing at a service provider.
+    if source_band == PRIORITY_SOVEREIGN and source_host and source_host != host:
+        return PRIORITY_UTILITY
+
+    if any(host.endswith(suffix) for suffix in FINANCIAL_SUFFIXES):
+        return PRIORITY_UTILITY
+    label = _registrable_label(host)
+    if any(stem in label for stem in FINANCIAL_STEMS):
+        return PRIORITY_UTILITY
+
+    return PRIORITY_ENTERPRISE
 
 
-def is_high_utility(host: str) -> bool:
-    """A named first-tier domain, matched on the host or a subdomain of it."""
-    host = (host or "").lower().lstrip(".")
-    return any(host == name or host.endswith("." + name) for name in HIGH_UTILITY_DOMAINS)
+def priority_of(url: str) -> int:
+    """The band for a URL, lower sorting first. 99 means do not crawl."""
+    return classify_domain_priority(url)
 
 
 class FrontierAgent:

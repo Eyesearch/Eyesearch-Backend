@@ -359,15 +359,15 @@ def test_civic_domains_outrank_commercial_portals():
     assert priority_of("https://www.iisc.ac.in/") == 0
     assert priority_of("https://bengaluruurban.nic.in/") == 0
 
-    # Band 1: the Indian web — worth crawling, after the reserved suffixes.
-    assert priority_of("https://somewhere.in/") == 1
-    assert priority_of("https://news.co.in/") == 1
+    # The bands come from structure now, not from nationality: a plain Indian
+    # commercial domain is an enterprise portal like any other.
+    assert priority_of("https://somewhere.in/") == 2
+    assert priority_of("https://news.co.in/") == 2
 
     # Band 2: everything else, so an Indian commercial site still beats a
     # foreign one rather than tying with it.
     assert priority_of("https://shop.example/") == 2
     assert priority_of("https://karnataka.gov.in/") < priority_of("https://somewhere.in/")
-    assert priority_of("https://somewhere.in/") < priority_of("https://shop.example/")
 
     # Allowed, but behind the reserved suffixes and the Indian web. The first
     # two are Indian publishers on .com, which is why they sit in band 2 with

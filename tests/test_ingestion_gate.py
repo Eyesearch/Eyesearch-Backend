@@ -23,22 +23,42 @@ quality = load_agent("04_quality_agent")
         "https://isro.gov.in/y",
         "https://pib.gov.in/z",
         "https://uidai.gov.in/a",
-        "https://www.youtube.com/watch",
-        "https://en.wikipedia.org/wiki/x",
         "https://karnataka.gov.in/b",
-        "https://iitb.ac.in/c",
+        "https://bengaluruurban.nic.in/c",
+        "https://iitb.ac.in/d",
+        "https://mit.edu/e",
     ],
 )
-def test_named_and_civic_domains_are_first(url):
-    assert frontier.priority_of(url) == 0
+def test_sovereign_and_academic_domains_are_first(url):
+    """Band 0 comes from the suffix, not from a list of names."""
+    assert frontier.classify_domain_priority(url) == 0
 
 
-def test_an_ordinary_site_is_last():
-    assert frontier.priority_of("https://someblog.com/post") == 2
+def test_an_ordinary_site_is_enterprise_tier():
+    assert frontier.classify_domain_priority("https://someblog.com/post") == 2
 
 
-def test_the_indian_web_sits_between_them():
-    assert frontier.priority_of("https://shop.in/x") == 1
+def test_a_financial_host_is_utility_tier():
+    """A bank is recognised by its shape, not by its name."""
+    assert frontier.classify_domain_priority("https://hdfcbank.com/a") == 1
+    assert frontier.classify_domain_priority("https://acme-bank.example/b") == 1
+
+
+def test_a_referral_from_a_government_portal_lifts_a_provider():
+    context = {"source_priority": 0, "source_host": "india.gov.in"}
+    assert frontier.classify_domain_priority("https://serviceprovider.example/", context) == 1
+
+
+def test_a_referral_does_not_rescue_a_spam_shaped_host():
+    """The shape is the evidence; vouching for it does not change that."""
+    context = {"source_priority": 0, "source_host": "india.gov.in"}
+    assert (
+        frontier.classify_domain_priority("https://best-cheap-deals-online-2026.com/x", context) == 99
+    )
+
+
+def test_a_generated_host_is_discarded():
+    assert frontier.classify_domain_priority("https://site123456.com/x") == 99
 
 
 # ---------------------------------------------------------------------------
@@ -47,15 +67,24 @@ def test_the_indian_web_sits_between_them():
 
 
 def test_a_blog_does_not_get_to_refer_the_whole_web():
-    """A low-utility site contributes its own pages, not a tour of its links."""
+    """Two ordinary sites linking to each other is the random network this stops."""
     assert (
         frontier.in_crawl_scope("https://another-blog.com/post", "someblog.com", allow_global=True)
         is False
     )
 
 
-def test_a_high_utility_target_is_followed_from_anywhere():
-    assert frontier.in_crawl_scope("https://youtube.com/x", "someblog.com", allow_global=True) is True
+def test_a_verified_target_is_followed_from_a_verified_source():
+    assert frontier.in_crawl_scope("https://somebank.com/a", "karnataka.gov.in", allow_global=True) is True
+
+
+def test_a_discarded_target_is_never_followed():
+    assert (
+        frontier.in_crawl_scope(
+            "https://best-cheap-deals-online-2026.com/x", "karnataka.gov.in", allow_global=True
+        )
+        is False
+    )
 
 
 def test_a_government_site_may_refer_outwards():
