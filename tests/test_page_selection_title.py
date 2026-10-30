@@ -115,3 +115,59 @@ def test_every_title_respects_the_limit():
         ("Paytm: Secure UPI Payments, Bill Payments & Wallet Recharge", "Paytm"),
     ]:
         assert len(format_title(raw, brand)) <= MAX_TITLE_LENGTH
+
+
+# ---------------------------------------------------------------------------
+# The three precision upgrades
+# ---------------------------------------------------------------------------
+
+
+def test_keyword_stuffing_does_not_eat_the_budget():
+    """The first chunk is the subject; the rest is the site's navigation."""
+    title = format_title("SBI - Personal Banking | Net Banking | Loans | Home", "SBI")
+
+    assert title == "SBI: Personal Banking"
+
+
+def test_a_bare_brand_title_borrows_the_path_intent():
+    """A /login page whose title is just the brand still says what it is."""
+    title = format_title("Paytm", "Paytm", url="https://paytm.com/login")
+
+    assert title == "Paytm: Login & Sign In"
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/login", "Login & Sign In"),
+        ("/signup", "Register & Sign Up"),
+        ("/dashboard", "Online Portal"),
+        ("/schemes", "Services & Schemes"),
+        ("/contact", "Contact & Support"),
+        ("/careers", "Careers & Recruitment"),
+    ],
+)
+def test_each_gateway_path_has_its_own_intent(path, expected):
+    assert parser.resolve_url_intent("https://example.com" + path) == expected
+
+
+def test_an_unknown_path_has_no_intent():
+    assert parser.resolve_url_intent("https://example.com/about") is None
+
+
+def test_a_kannada_title_is_cut_without_breaking_a_conjunct():
+    """Slicing by code point cannot break UTF-8. What it can break is a
+    conjunct: cutting after a halant leaves the virama waiting for a consonant
+    that is no longer there. Ending on a vowel sign is fine — that is a
+    complete syllable."""
+    import unicodedata
+
+    title = format_title(
+        "ಕರ್ನಾಟಕ ಸರ್ಕಾರದ ಆರೋಗ್ಯ ಇಲಾಖೆಯ ಅಧಿಸೂಚನೆಗಳು ಮತ್ತು ಯೋಜನೆಗಳ ವಿವರ", "ಕರ್ನಾಟಕ"
+    )
+
+    assert len(title) <= MAX_TITLE_LENGTH
+    body = title[:-3] if title.endswith("...") else title
+    # Mn at the end is a halant or a stray mark; Mc is a vowel sign, which is
+    # attached to its own consonant and therefore complete.
+    assert unicodedata.category(body[-1]) != "Mn"

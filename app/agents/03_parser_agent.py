@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 
@@ -460,6 +461,47 @@ TITLE_FLUFF_PATTERNS: tuple[str, ...] = (
 #: Punctuation left hanging when a title is cut mid-phrase.
 DANGLING_SYMBOLS = re.compile(r"[\s\-_|:&,./;]+$")
 
+#: Sites stuff their titles with pipes and dashes — "SBI - Personal Banking |
+#: Net Banking | Loans | Home". The first chunk is the subject; the rest is the
+#: site's navigation, and it eats the 50-character budget.
+DELIMITER_SPLIT = re.compile(r"\s+[|•–—]\s+|\s+-\s+|\s*\|\s*")
+
+#: When a page's title is just the brand — a /login page called "Paytm" — the
+#: path still says what the page is for.
+URL_INTENT_MAP: tuple[tuple[str, str], ...] = (
+    (r"/(login|signin|sign-in)", "Login & Sign In"),
+    (r"/(signup|sign-up|register|registration)", "Register & Sign Up"),
+    (r"/(portal|dashboard|account)", "Online Portal"),
+    (r"/(services|schemes|products)", "Services & Schemes"),
+    (r"/(contact|support|help)", "Contact & Support"),
+    (r"/(careers|jobs|recruitment)", "Careers & Recruitment"),
+)
+
+
+def resolve_url_intent(url: str) -> str | None:
+    """What a bare page is for, from its path."""
+    try:
+        path = urlparse(url or "").path.lower()
+    except ValueError:
+        return None
+    for pattern, label in URL_INTENT_MAP:
+        if re.search(pattern, path):
+            return label
+    return None
+
+
+def _safe_cut(text: str, budget: int) -> str:
+    """Slice without leaving a combining mark stranded at the end.
+
+    Python slices by code point, so a Kannada or Devanagari string cannot be cut
+    mid-byte — but it can be cut between a base letter and the matra that
+    modifies it, which renders as a detached mark.
+    """
+    cut = text[:budget]
+    while cut and unicodedata.category(cut[-1]) in {"Mn", "Mc", "Me"}:
+        cut = cut[:-1]
+    return cut
+
 
 def is_worthy_page(url: str, current_domain_page_count: int, cap: int = MAX_PAGES_PER_DOMAIN) -> bool:
     """Whether a page earns one of a domain's slots."""
@@ -493,53 +535,57 @@ def format_company_bounded_title(
     company_name: str,
     h1_text: str | None = None,
     og_title: str | None = None,
+    url: str = "",
 ) -> str:
     """`[Brand]: [what the page is]`, never longer than 50 characters.
 
-    The brand leads so that a search for the brand's own name matches the first
-    word of the title. Everything after it is the page's own description with
-    the fluff taken out.
+    The brand leads so a search for the brand's own name matches the first word.
+    Everything after it is the page's own description with the fluff, the site's
+    navigation, and any repetition of the brand taken out.
     """
     company = (company_name or "").strip()
-    candidate = (raw_title or og_title or h1_text or company).strip()
+    candidate = (raw_title or og_title or h1_text or "").strip()
 
     for pattern in TITLE_FLUFF_PATTERNS:
         candidate = re.sub(pattern, "", candidate).strip()
 
-    candidate = re.sub(r"[\s\-_|:]+", " ", candidate).strip()
+    # The first chunk is the subject. The rest is navigation stuffed in to catch
+    # searches, and it would spend the whole budget saying "Net Banking | Loans".
+    chunks = [chunk.strip() for chunk in DELIMITER_SPLIT.split(candidate) if chunk.strip()]
+    if len(chunks) > 1:
+        informative = [chunk for chunk in chunks if chunk.lower() != company.lower()]
+        candidate = informative[0] if informative else chunks[0]
 
     if company:
-        if not candidate.lower().startswith(company.lower()):
-            candidate = f"{company}: {candidate}"
-        else:
-            rest = candidate[len(company):].lstrip(" -:|")
-            candidate = f"{company}: {rest}" if rest else company
+        # The brand is said once, at the front. Remove it wherever else it fell.
+        brand_pattern = re.compile(rf"\b{re.escape(company)}\b", re.IGNORECASE)
+        context = re.sub(r"[\s\-_|:]+", " ", brand_pattern.sub("", candidate)).strip()
+    else:
+        context = re.sub(r"[\s\-_|:]+", " ", candidate).strip()
 
-        # "SBI: SBI Online" is the same word twice — and the repetition is not
-        # always at the front: "SBI: Online SBI Personal Banking" reads badly
-        # too. The brand is said once, at the start, and removed from the rest.
-        duplicate = rf"(?i)^{re.escape(company)}:\s*{re.escape(company)}\s*"
-        candidate = re.sub(duplicate, f"{company}: ", candidate)
-        prefix = f"{company}: "
-        if candidate.lower().startswith(prefix.lower()):
-            rest = re.sub(rf"(?i)\b{re.escape(company)}\b\s*", "", candidate[len(prefix):])
-            rest = rest.strip()
-            candidate = f"{company}: {rest}" if rest else company
+    # A title that was only the brand tells us nothing; the path does.
+    if len(context) < 3:
+        intent = resolve_url_intent(url)
+        context = intent or (h1_text or "").strip() or "Home"
+        if company:
+            context = re.sub(
+                rf"\b{re.escape(company)}\b", "", context, flags=re.IGNORECASE
+            ).strip() or "Official Gateway"
 
-    candidate = re.sub(r"\s+", " ", candidate).strip()
+    title = f"{company}: {context}" if company else context
+    title = re.sub(r"\s+", " ", title).strip()
 
-    if len(candidate) < 3:
+    if len(title) < 3:
         return company or "Home"
 
-    if len(candidate) > MAX_TITLE_LENGTH:
-        budget = MAX_TITLE_LENGTH - 3  # room for the ellipsis
-        cut = candidate[:budget]
+    if len(title) > MAX_TITLE_LENGTH:
+        cut = _safe_cut(title, MAX_TITLE_LENGTH - 3)  # room for the ellipsis
         if " " in cut:
             cut = cut.rsplit(" ", 1)[0]
         cut = DANGLING_SYMBOLS.sub("", cut).strip()
-        candidate = f"{cut}..."
+        title = f"{cut}..."
 
-    return candidate
+    return title
 
 
 # ---------------------------------------------------------------------------
