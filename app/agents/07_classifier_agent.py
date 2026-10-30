@@ -267,6 +267,213 @@ def _token_matches(token: str, words: set[str]) -> bool:
     return all(part in words for part in parts)
 
 
+# ---------------------------------------------------------------------------
+# Signal 1: deterministic domain matching
+#
+# This is a reversal of the standing "no domain names in code" rule, and it is
+# worth being explicit about why it is here: the rule exists so classification
+# never depends on a list that rots. A curated list of the sites people actually
+# search for is the opposite trade — it is narrow, it is checked first, and when
+# it misses, the structural signals below still decide.
+#
+# Order matters. A specialised category beats the suffix rule, which is why GOV
+# is last: sci.gov.in is a court, not a ministry, and icar.org.in is agriculture.
+# ---------------------------------------------------------------------------
+
+DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "PAY",
+        (
+            "paytm", "phonepe", "razorpay", "cred.club", "cashfree", "bhimupi",
+            "mobikwik", "freecharge", "instamojo", "billdesk", "payu", "slice",
+            "jupiter.money",
+        ),
+    ),
+    (
+        "LEGAL",
+        (
+            "indiankanoon", "livelaw", "barandbench", "scconline", "sci.gov.in",
+            "judgments", "casemine", "vakilsearch", "legalserviceindia", "lawrato",
+        ),
+    ),
+    (
+        "NEWS",
+        (
+            "thehindu", "deccanherald", "indianexpress", "prajavani", "kannadaprabha",
+            "timesofindia", "hindustantimes", "ndtv", "theprint", "scroll.in",
+            "vijaykarnataka", "udayavani", "news18",
+        ),
+    ),
+    (
+        "EDU",
+        (
+            ".ac.in", ".edu", "iisc.", "iit", "nptel", "coursera", "khanacademy",
+            "edx", "ugc.ac.in", "swayam.gov.in", "ncert.nic.in",
+        ),
+    ),
+    (
+        "AGRI",
+        (
+            "krishijagran", "ikisan", "icar.org.in", "agricoop", "enam.gov.in",
+            "farmer.gov.in", "fert.nic.in", "kvk.icar.gov.in",
+        ),
+    ),
+    (
+        "HEALTH",
+        (
+            "practo", "mohfw.gov.in", "nhp.gov.in", "1mg", "pharmeasy",
+            "apollohospitals", "medlineplus", "aiims.edu",
+        ),
+    ),
+    (
+        "FINANCE",
+        (
+            "zerodha", "groww", "rbi.org.in", "sebi.gov.in", "moneycontrol",
+            "nseindia", "bseindia", "sbi.co.in", "hdfcbank.com", "icicibank.com",
+            "axisbank.com",
+        ),
+    ),
+    (
+        "TECH",
+        (
+            "github.com", "stackoverflow.com", "python.org", "developer.", "docs.",
+            "npm", "pypi", "gitlab.com", "kernel.org",
+        ),
+    ),
+    (
+        "COMMERCE",
+        ("amazon.in", "flipkart.com", "myntra", "meesho", "tatacliq", "jiomart"),
+    ),
+    (
+        "JOBS",
+        ("naukri.com", "internshala.com", "linkedin.com/jobs", "foundit.in", "freshersworld"),
+    ),
+    # Last: a specialised domain above has already claimed its own pages.
+    ("GOV", (".gov.in", ".nic.in")),
+)
+
+#: Signal 2: URL segments, for when the domain says nothing.
+PATH_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("LEGAL", ("judgments", "judgment", "judgement", "act", "case", "court", "tribunal")),
+    ("PAY", ("payments", "payment", "wallet", "upi", "checkout", "recharge")),
+    ("NEWS", ("news", "article", "national", "editorial", "headlines")),
+    ("EDU", ("course", "courses", "syllabus", "admissions", "lecture", "faculty")),
+    ("AGRI", ("crops", "crop", "mandiprices", "mandi", "farming", "kharif", "rabi")),
+    ("JOBS", ("recruitment", "vacancy", "vacancies", "careers", "apply")),
+    ("HEALTH", ("hospital", "clinic", "vaccination", "opd")),
+)
+
+#: Signal 3: phrases in the title, description or snippet.
+TEXT_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "PAY",
+        (
+            "upi payment", "wallet balance", "payment gateway", "recharge",
+            "bill payment", "qr scanner", "send money to bank", "net banking transaction",
+        ),
+    ),
+    (
+        "LEGAL",
+        (
+            "court judgment", "bench", "high court", "supreme court", "section act",
+            "petitioner", "advocate general", "tribunal",
+        ),
+    ),
+    (
+        "EDU",
+        (
+            "curriculum", "degree program", "admissions", "faculty",
+            "examination schedule", "syllabus",
+        ),
+    ),
+    (
+        "AGRI",
+        (
+            "kharif", "rabi", "fertilizer", "soil health", "mandi rate",
+            "crop yield", "horticulture",
+        ),
+    ),
+)
+
+#: The twelve codes the API publishes, mapped to the rule names this agent uses
+#: internally. `Classification.category` has always carried the rule name, and
+#: the signals below speak in codes, so the translation lives here.
+CODE_TO_RULE: dict[str, str] = {
+    "GOV": "government",
+    "LEGAL": "legal_judiciary",
+    "FINANCE": "business_finance",
+    "PAY": "payments",
+    "COMMERCE": "commerce",
+    "TECH": "tech_developer",
+    "NEWS": "news_media",
+    "JOBS": "jobs_careers",
+    "EDU": "education_exams",
+    "HEALTH": "health_medical",
+    "AGRI": "agriculture_rural",
+    "WEB": "general_reference",
+}
+
+#: A deterministic domain match is not a score to be beaten, it is an answer.
+DOMAIN_MATCH_SCORE = 1000
+#: How many path segments must match before the path decides.
+PATH_MATCH_SCORE = 60
+#: A single distinctive phrase is enough for Signal 3.
+TEXT_MATCH_SCORE = 40
+
+
+def classify_by_domain(url: str) -> Classification | None:
+    """Signal 1: the domain and path, matched against the curated list."""
+    host, path = _host_and_path(url)
+    haystack = f"{host}{path}"
+
+    # Named entries first, bare suffixes second: "aiims.edu" is a hospital that
+    # happens to sit under .edu, and a suffix should not outrank a name.
+    for weak in (False, True):
+        for code, needles in DOMAIN_SIGNALS:
+            for needle in needles:
+                if needle.startswith(".") != weak:
+                    continue
+                if needle in haystack:
+                    return Classification(
+                        category=CODE_TO_RULE.get(code, code), score=DOMAIN_MATCH_SCORE,
+                        matched=[f"domain:{needle}"],
+                    )
+    return None
+
+
+def classify_by_path(url: str) -> Classification | None:
+    """Signal 2: the URL's own words, when the domain said nothing."""
+    _host, path = _host_and_path(url)
+    words = set(_url_words("", path))
+    for code, tokens in PATH_SIGNALS:
+        hits = [token for token in tokens if token in words]
+        if hits:
+            return Classification(
+                category=CODE_TO_RULE.get(code, code), score=PATH_MATCH_SCORE,
+                matched=[f"path:{h}" for h in hits],
+            )
+    return None
+
+
+def classify_by_text(title: str, description: str, body_text: str) -> Classification | None:
+    """Signal 3: the phrases a page uses about itself."""
+    headline = f"{title} {description}".lower()
+    body = (body_text or "").lower()
+    best: Classification | None = None
+    for code, phrases in TEXT_SIGNALS:
+        matched = [phrase for phrase in phrases if phrase in headline]
+        if not matched:
+            matched = [phrase for phrase in phrases if phrase in body]
+        if matched:
+            score = TEXT_MATCH_SCORE + 10 * len(matched)
+            if best is None or score > best.score:
+                best = Classification(
+                    category=CODE_TO_RULE.get(code, code), score=score,
+                    matched=[f"text:{m}" for m in matched],
+                )
+    return best
+
+
 class ClassifierAgent:
     """Score a page against every rule and take the best one."""
 
@@ -285,6 +492,25 @@ class ClassifierAgent:
         headline = f"{title} {description}".lower()
         body = (body_text or "").lower()
         types = {str(item).strip().lower() for item in (schema_types or ())}
+
+        # The signals are tried in order of authority, and the first one with
+        # something to say wins. WEB is not a decision, it is the absence of one.
+        decided = classify_by_domain(url)
+        if decided is not None:
+            # A bare suffix says "government", not which department. When the
+            # path names one — /judgment, /mandi, /recruitment — the path is the
+            # more specific answer and wins.
+            if decided.matched and decided.matched[0].startswith("domain:."):
+                refined = classify_by_path(url)
+                if refined is not None:
+                    return refined
+            return decided
+        decided = classify_by_path(url)
+        if decided is not None:
+            return decided
+        decided = classify_by_text(title, description, body_text)
+        if decided is not None:
+            return decided
 
         best = Classification()
         for rule in self._rules:
