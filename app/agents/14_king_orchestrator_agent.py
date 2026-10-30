@@ -391,7 +391,30 @@ telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)
 
 
 def fleet_contract_report() -> dict:
-    """Every agent's breach count, for the supervisor's health report."""
-    from app.agents import _contract as rules
+    """Run every agent's audit and report the fleet's health.
 
-    return {"agents": rules.fleet_telemetry(), "supervisor": rules.SUPERVISOR}
+    The audits are *run* here rather than read from whatever happened to call
+    them: an empty registry would otherwise report "no breaches" for agents that
+    had never been checked, which is the most misleading answer a health check
+    can give.
+    """
+    import glob
+    import os
+
+    from app.agents import _contract as rules
+    from app.agents import load_agent
+
+    audited = 0
+    for path in sorted(glob.glob(os.path.join(os.path.dirname(__file__), "[0-9]*.py"))):
+        module = load_agent(os.path.basename(path)[:-3])
+        audit = getattr(module, "audit_contract", None)
+        if audit is None:
+            continue
+        audit()
+        audited += 1
+
+    return {
+        "agents": rules.fleet_telemetry(),
+        "supervisor": rules.SUPERVISOR,
+        "audited": audited,
+    }
