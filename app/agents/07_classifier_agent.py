@@ -294,6 +294,7 @@ DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "indiankanoon", "livelaw", "barandbench", "scconline", "sci.gov.in",
             "judgments", "casemine", "vakilsearch", "legalserviceindia", "lawrato",
+            "ecourts", "karnatakahi",
         ),
     ),
     (
@@ -354,12 +355,18 @@ DOMAIN_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 #: Signal 2: URL segments, for when the domain says nothing.
 PATH_SIGNALS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("LEGAL", ("judgments", "judgment", "judgement", "act", "case", "court", "tribunal")),
-    ("PAY", ("payments", "payment", "wallet", "upi", "checkout", "recharge")),
+    ("JOBS", ("careers", "jobs", "recruitment", "vacancies", "walk-in", "employment")),
+    ("LEGAL", ("court-orders", "judgments", "judgment", "judgement", "acts-rules",
+               "bare-acts", "act", "case", "court", "tribunal")),
+    ("PAY", ("netbanking", "bill-pay", "payment-gateway", "tax-payment",
+             "payments", "payment", "wallet", "upi", "checkout", "recharge")),
+    ("FINANCE", ("fixed-deposit", "mutual-fund", "demat", "loan", "interest-rate")),
+    ("EDU", ("admissions", "syllabus", "exam-results", "hall-ticket",
+             "course", "courses", "lecture", "faculty")),
+    ("GOV", ("fir-status", "police-verification", "complaint", "gazette")),
+    ("COMMERCE", ("cart", "checkout", "shop", "products", "pricing")),
     ("NEWS", ("news", "article", "national", "editorial", "headlines")),
-    ("EDU", ("course", "courses", "syllabus", "admissions", "lecture", "faculty")),
     ("AGRI", ("crops", "crop", "mandiprices", "mandi", "farming", "kharif", "rabi")),
-    ("JOBS", ("recruitment", "vacancy", "vacancies", "careers", "apply")),
     ("HEALTH", ("hospital", "clinic", "vaccination", "opd")),
 )
 
@@ -413,6 +420,10 @@ CODE_TO_RULE: dict[str, str] = {
     "WEB": "general_reference",
 }
 
+#: Words in a hostname that make it a court rather than a department, whatever
+#: the suffix says. ecourts.gov.in is the judiciary; karnataka.gov.in is not.
+COURT_HOST_TOKENS: tuple[str, ...] = ("ecourt", "judiciary", "court", "legal")
+
 #: A deterministic domain match is not a score to be beaten, it is an answer.
 DOMAIN_MATCH_SCORE = 1000
 #: How many path segments must match before the path decides.
@@ -425,6 +436,13 @@ def classify_by_domain(url: str) -> Classification | None:
     """Signal 1: the domain and path, matched against the curated list."""
     host, path = _host_and_path(url)
     haystack = f"{host}{path}"
+
+    # A court is not a ministry. The suffix says ".gov.in", but the host says
+    # which part of the state it is, and that is the more specific answer.
+    if any(token in host for token in COURT_HOST_TOKENS):
+        return Classification(
+            category=CODE_TO_RULE["LEGAL"], score=DOMAIN_MATCH_SCORE, matched=["host:court"]
+        )
 
     # Named entries first, bare suffixes second: "aiims.edu" is a hospital that
     # happens to sit under .edu, and a suffix should not outrank a name.

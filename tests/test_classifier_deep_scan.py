@@ -69,3 +69,28 @@ def test_the_title_decides_when_the_url_says_nothing(classifier):
 def test_a_page_with_no_signal_falls_back_to_general_reference(classifier):
     """Signal 4: WEB is the absence of a decision, not a decision."""
     assert classifier.classify("https://randomshop.com/", "Home", "", "").category == "general_reference"
+
+
+# ---------------------------------------------------------------------------
+# Path intent, mapped onto the twelve codes this system has
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://x.gov.in/careers", "jobs_careers"),
+        ("https://x.gov.in/court-orders", "legal_judiciary"),
+        ("https://x.in/netbanking", "payments"),
+        ("https://shop.in/cart", "commerce"),
+        ("https://x.gov.in/fir-status", "government"),
+        ("https://x.ac.in/admissions", "education_exams"),
+    ],
+)
+def test_a_path_says_what_the_page_is_for(classifier, url, expected):
+    assert classifier.classify(url, "", "", "").category == expected
+
+
+def test_the_court_check_keeps_courts_out_of_government(classifier):
+    """.gov.in is government, except where the host says it is a court."""
+    assert classifier.classify("https://ecourts.gov.in/x", "", "", "").category == "legal_judiciary"
