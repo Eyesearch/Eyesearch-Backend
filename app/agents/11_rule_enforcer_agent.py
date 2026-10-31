@@ -18,6 +18,15 @@ import logging
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from app.agents import load_agent
+
+#: The ceilings, taken from the parser that owns them so a change lands in one
+#: place. The enforcer repairs rows written before the ceiling existed.
+_parser = load_agent("03_parser_agent")
+TITLE_CHAR_CAP = _parser.TITLE_CHAR_CAP
+BRAND_CHAR_CAP = _parser.BRAND_CHAR_CAP
+DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
+
 logger = logging.getLogger(__name__)
 
 #: Query keys that identify a campaign or a session, never a different page.
@@ -130,6 +139,45 @@ class RuleEnforcerAgent:
                 (limit, limit),
             )
         return over
+
+    async def _enforce_ceiling(
+        self, column: str, cap: int, *, dry_run: bool
+    ) -> int:
+        """Trim one text column to `cap`, counting the rows that were over.
+
+        The column name is interpolated rather than bound, so it is checked
+        against a fixed set first — a caller cannot turn it into SQL.
+        """
+        if column not in {"title", "brand_name", "description"}:
+            raise ValueError(f"not a bounded column: {column}")
+        if cap <= 0:
+            return 0
+
+        counted = await self._client.execute(
+            f"SELECT COUNT(*) FROM pages WHERE length({column}) > ?", (cap,)
+        )
+        over = int(counted.scalar(0) or 0)
+        if over and not dry_run:
+            await self._client.execute(
+                f"UPDATE pages SET {column} = substr({column}, 1, CAST(? AS INTEGER)) "
+                f"WHERE length({column}) > ?",
+                (cap, cap),
+            )
+        return over
+
+    async def enforce_title_ceiling(self, cap: int = TITLE_CHAR_CAP, *, dry_run: bool = False) -> int:
+        """Trim stored titles longer than the card can show."""
+        return await self._enforce_ceiling("title", int(cap), dry_run=dry_run)
+
+    async def enforce_brand_ceiling(self, cap: int = BRAND_CHAR_CAP, *, dry_run: bool = False) -> int:
+        """Trim stored brands longer than the limit."""
+        return await self._enforce_ceiling("brand_name", int(cap), dry_run=dry_run)
+
+    async def enforce_description_ceiling(
+        self, cap: int = DESCRIPTION_CHAR_CAP, *, dry_run: bool = False
+    ) -> int:
+        """Trim stored descriptions longer than the capsule allows."""
+        return await self._enforce_ceiling("description", int(cap), dry_run=dry_run)
 
     async def clean_urls(self, *, dry_run: bool = False, batch: int = 500) -> tuple[int, int]:
         """Strip tracking parameters from stored URLs.

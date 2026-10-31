@@ -19,6 +19,19 @@ from app.agents import load_agent
 from app.engine.config import Settings, get_settings
 from app.engine.store import IndexStore, PageDocument
 
+#: The same three gates the ingestion path applies, imported from the agents that
+#: own them so revalidation cannot drift from ingestion.
+_parser = load_agent("03_parser_agent")
+_brand = load_agent("10_brand_canonical_agent")
+_indexer = load_agent("05_indexer_agent")
+format_company_bounded_title = _parser.format_company_bounded_title
+TITLE_CHAR_CAP = _parser.TITLE_CHAR_CAP
+BRAND_CHAR_CAP = _parser.BRAND_CHAR_CAP
+DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
+sanitize_brand = _brand.sanitize_brand
+brand_from_domain = _brand.brand_from_domain
+format_ai_snippet = _indexer.format_ai_snippet
+
 logger = logging.getLogger(__name__)
 
 #: The worker never sleeps less than this, however it is configured.
@@ -78,16 +91,29 @@ class RevalidationAgent:
                     continue
 
                 domain = self._domain(url)
+                # Revalidation overwrites a row that was already cleaned on the
+                # way in. Writing the parser's raw output back would replace a
+                # bounded title with whatever the page says today — including a
+                # modal's button label or a bare ".in" — so the same pipeline the
+                # ingestion path uses runs here too.
+                clean_brand = sanitize_brand(parsed.brand_name or brand_from_domain(url))
+                bounded_title = format_company_bounded_title(
+                    parsed.title, clean_brand, h1_text=parsed.action_title, url=url
+                )
+                clean_desc = format_ai_snippet(
+                    meta_description=parsed.description, body_text_sample=parsed.body_text
+                ) or parsed.description
+
                 document = PageDocument(
                     url=url,
                     domain=domain,
-                    title=parsed.title,
-                    description=parsed.description,
+                    title=bounded_title[:TITLE_CHAR_CAP],
+                    description=clean_desc[:DESCRIPTION_CHAR_CAP],
                     body_text=parsed.body_text,
                     schema_types=list(parsed.schema_types),
-                    brand_name=parsed.brand_name,
+                    brand_name=clean_brand[:BRAND_CHAR_CAP],
                     clean_url=parsed.clean_url,
-                    action_title=parsed.action_title,
+                    action_title=bounded_title[:TITLE_CHAR_CAP],
                 )
                 verdict = self._quality.check(document)
                 if not verdict.ok:

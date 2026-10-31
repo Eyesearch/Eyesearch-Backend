@@ -10,6 +10,7 @@ rejects the repeat before it ever reaches the database.
 from __future__ import annotations
 
 import hashlib
+import re
 import logging
 from dataclasses import dataclass
 
@@ -27,6 +28,14 @@ MIN_BODY_CHARS = 80
 
 #: A title shorter than this is a filename or a placeholder, not a heading.
 MIN_TITLE_CHARS = 3
+
+#: A title must contain this many letters or digits. ".in" is three characters
+#: and no words; so is "-::".
+MIN_TITLE_ALPHANUMERIC = 3
+
+#: Letters and digits in any script this index serves — Latin, Devanagari and
+#: the Indic block. A Kannada title is not "punctuation only".
+TITLE_ALPHANUMERIC = re.compile(r"[0-9A-Za-z\u0900-\u0DFF]")
 
 #: Phrases that mean the page is an interstitial, not content.
 JUNK_MARKERS: tuple[str, ...] = (
@@ -83,13 +92,20 @@ class QualityAgent:
                 score=0.0,
             )
 
-        lowered = body[:600].lower()
+        # Junk is looked for in the title as well as the body. A 404 page can
+        # carry a long body of navigation and still be a 404.
+        lowered = f"{title} {body[:600]}".lower()
         for marker in JUNK_MARKERS:
             if marker in lowered:
                 return QualityVerdict(ok=False, reason="junk_page", score=0.0)
 
         if len(title) < MIN_TITLE_CHARS:
             return QualityVerdict(ok=False, reason="no_title", score=0.0)
+
+        # Length is not the same as content: ".in" and "-::" are three characters
+        # and carry nothing.
+        if len(TITLE_ALPHANUMERIC.findall(title)) < MIN_TITLE_ALPHANUMERIC:
+            return QualityVerdict(ok=False, reason="title_not_a_word", score=0.0)
 
         digest = digest_of(body)
         if digest in self._seen:
