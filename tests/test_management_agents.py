@@ -17,13 +17,12 @@ canonical_path = load_agent("13_dedupe_compact_agent").canonical_path
 ClassifierAgent = load_agent("07_classifier_agent").ClassifierAgent
 
 
-def settings(cap: int = 25, ceiling: int = 0) -> Settings:
+def settings(cap: int | None = None, ceiling: int = 0) -> Settings:
     return Settings(
         environment="test",
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=cap,
         page_body_char_ceiling=ceiling,
     )
 

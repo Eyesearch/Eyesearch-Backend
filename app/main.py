@@ -142,14 +142,13 @@ async def lifespan(app: FastAPI):
     logger.info(
         "effective crawl settings: enabled=%s batch_size=%d concurrency=%d "
         "timeout=%.1fs batch_sleep=%.3fs db_min_interval=%.3fs "
-        "domain_page_cap=%d storage_page_limit=%d allow_global_domains=%s",
+        "host_page_ceiling=tiered storage_page_limit=%d allow_global_domains=%s",
         settings.crawler_enabled,
         settings.crawl_batch_size,
         settings.crawl_concurrency,
         settings.crawl_timeout_seconds,
         settings.crawl_batch_sleep_seconds,
         settings.libsql_min_interval_seconds,
-        settings.max_pages_per_domain,
         settings.effective_storage_page_limit,
         settings.allow_global_domains,
     )

@@ -4,7 +4,7 @@ Three rules, all of which the write path already applies to new rows. This agent
 exists for the rows that got in before a rule did, or that a direct insert
 bypassed:
 
-* no domain holds more than `max_pages_per_domain` pages;
+* no host holds more pages than its tier's ceiling;
 * no page holds more than `page_body_char_ceiling` characters of body text;
 * no indexed URL carries a tracking or session parameter.
 

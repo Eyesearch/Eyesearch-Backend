@@ -281,17 +281,22 @@ async def test_skipped_rows_are_never_rearmed(store, client, settings):
     assert status.scalar("") == "skipped"
 
 
-async def test_the_cap_is_configurable(store, client):
-    settings = Settings(environment="test", max_pages_per_domain=25)
-    orchestrator = Orchestrator(client, settings)
+async def test_the_cap_is_not_a_setting_any_more(store, client):
+    """The flat cap is gone: a host's ceiling comes from its tier, not config."""
+    orchestrator = Orchestrator(client, Settings(environment="test"))
     try:
-        assert orchestrator._settings.max_pages_per_domain == 25
+        assert not hasattr(orchestrator._settings, "max_pages_per_domain")
     finally:
         await orchestrator.close()
 
 
-def test_the_default_cap_is_twenty_five_pages():
-    assert Settings().max_pages_per_domain == 25
+def test_the_ceiling_comes_from_the_frontier():
+    from app.agents import load_agent
+
+    frontier = load_agent("01_frontier_agent")
+
+    assert frontier.get_host_hard_limit("karnataka.gov.in") == 250
+    assert frontier.get_host_hard_limit("shop.in") == 5
 
 
 async def test_a_page_under_the_cap_is_still_crawled(store, client):

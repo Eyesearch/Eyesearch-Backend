@@ -131,7 +131,7 @@ def test_the_production_defaults_leave_room_for_the_ceiling():
     # The domain total must clear ceiling x page cap, or it clamps every page
     # back down and the ceiling above is a lie.
     assert default.domain_body_budget_chars >= (
-        default.page_body_char_ceiling * default.max_pages_per_domain
+        default.page_body_char_ceiling * 25  # the old uniform cap, for scale
     )
 
 

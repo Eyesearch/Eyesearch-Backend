@@ -45,6 +45,7 @@ def test_spam_is_still_discarded(url):
 
 
 def test_the_page_cap_is_unchanged():
-    from app.engine.config import Settings
+    
+    from app.agents import load_agent
 
-    assert Settings(_env_file=None).max_pages_per_domain == 25
+    assert load_agent("01_frontier_agent").get_host_hard_limit("karnataka.gov.in") == 250

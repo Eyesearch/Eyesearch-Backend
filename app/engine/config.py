@@ -233,7 +233,11 @@ class Settings(BaseSettings):
     #: How long the revalidation loop waits between passes.
     revalidation_min_sleep_seconds: float = 30.0
 
-    max_pages_per_domain: int = 25
+    #: Removed. Each host is now measured against its own tier ceiling — 250 for
+    #: a government portal, 50 for an institution, 5 for the general Indian web,
+    #: 0 for a foreign host — decided by `app.agents.01_frontier_agent`.
+    #: `get_host_hard_limit()` is the only place that number comes from; a flat
+    #: setting here would be a second source of truth, and the two would drift.
 
     #: Strict per-page body ceiling, in characters, whatever the domain's page
     #: count. 200 is about two lines of card text: enough for a sentence a reader

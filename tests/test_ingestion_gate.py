@@ -156,5 +156,6 @@ def test_the_crawl_is_back_to_one_at_a_time():
 def test_the_ceilings_are_unchanged():
     settings = Settings(_env_file=None)
 
-    assert settings.max_pages_per_domain == 25
+    # The flat cap is gone; the frontier owns the per-host ceiling now.
+    assert not hasattr(settings, "max_pages_per_domain")
     assert settings.page_body_char_ceiling == 200

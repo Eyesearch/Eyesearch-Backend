@@ -86,6 +86,7 @@ class AuditReport:
     purged_empty: int = 0
     purged_thin: int = 0
     purged_boilerplate: int = 0
+    purged_foreign: int = 0
     purged_over_cap: int = 0
     defects: dict[str, object] = field(default_factory=dict)
     brands_missing: int = 0
@@ -103,6 +104,7 @@ class AuditReport:
             "purged_empty": self.purged_empty,
             "purged_thin": self.purged_thin,
             "purged_boilerplate": self.purged_boilerplate,
+            "purged_foreign": self.purged_foreign,
             "purged_over_cap": self.purged_over_cap,
             "defects": self.defects,
             "brands_missing": self.brands_missing,
@@ -124,7 +126,8 @@ class AuditReport:
             f"  purged — empty body                     : {self.purged_empty}",
             f"  purged — under {THIN_WORD_COUNT} words                : {self.purged_thin}",
             f"  purged — boilerplate only               : {self.purged_boilerplate}",
-            f"  purged — over the per-domain cap        : {self.purged_over_cap}",
+            f"  purged — foreign domain                 : {self.purged_foreign}",
+            f"  purged — over the host tier ceiling     : {self.purged_over_cap}",
             f"  pages with no brand name                : {self.brands_missing}",
             f"  brands backfilled from the domain       : {self.brands_backfilled}",
             f"  search vectors rebuilt                  : {self.vectors_rebuilt}",
@@ -214,11 +217,26 @@ async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
         report.purged_thin = len(thin)
         report.purged_boilerplate = len(boiler_ids)
 
+        # Foreign hosts are not part of the corpus any more: the frontier gives
+        # them a ceiling of zero, so any row already stored is a leftover from
+        # before that rule. Checked in Python rather than SQL because the rule
+        # lives in the frontier, and duplicating it here is how the two drift.
+        foreign_rows = await client.execute(
+            "SELECT p.page_id, s.domain FROM pages p "
+            "LEFT JOIN sites s ON s.site_id = p.site_id"
+        )
+        foreign = [
+            int(row[0])
+            for row in foreign_rows.rows
+            if not frontier.is_allowed_indian_domain(str(row[1] or ""))
+        ]
+        report.purged_foreign = len(foreign)
+
         if not dry_run:
             await client.execute(
                 "DELETE FROM pages WHERE body_text IS NULL OR trim(body_text) = ''"
             )
-            doomed = sorted(set(thin) | set(boiler_ids))
+            doomed = sorted(set(thin) | set(boiler_ids) | set(foreign))
             for start in range(0, len(doomed), 200):
                 chunk = doomed[start : start + 200]
                 await client.execute(
