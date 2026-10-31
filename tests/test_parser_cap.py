@@ -17,8 +17,10 @@ ParserAgent = parser_module.ParserAgent
 truncate_body = parser_module.truncate_body
 
 
-def test_the_cap_is_one_thousand_characters():
-    assert BODY_CHAR_CAP == 1000
+def test_the_cap_is_two_kilobytes():
+    """Raised from 1,000: a thousand characters cut most articles off before
+    they said anything, and both the search vector and the snippet read this."""
+    assert BODY_CHAR_CAP == 2000
 
 
 def test_short_text_is_returned_unchanged():

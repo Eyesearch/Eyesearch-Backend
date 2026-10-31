@@ -34,6 +34,7 @@ format_company_bounded_title = _parser.format_company_bounded_title
 sanitize_brand = _brand.sanitize_brand
 brand_from_domain = _brand.brand_from_domain
 format_ai_snippet = _indexer.format_ai_snippet
+clean_description = load_agent("04_quality_agent").clean_description
 TITLE_CHAR_CAP = _parser.TITLE_CHAR_CAP
 BRAND_CHAR_CAP = _parser.BRAND_CHAR_CAP
 DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
@@ -367,9 +368,11 @@ class Orchestrator:
             bounded_title = format_company_bounded_title(
                 parsed.title, clean_brand, h1_text=parsed.action_title, url=item.url
             )
-            clean_desc = format_ai_snippet(
-                meta_description=parsed.description, body_text_sample=parsed.body_text
-            ) or parsed.description
+            # A clean description is kept exactly as it is, however short. The
+            # body is read only when there is no description left to keep.
+            clean_desc = clean_description(
+                parsed.description, parsed.body_text, bounded_title
+            )
 
             document = PageDocument(
                 url=item.url,

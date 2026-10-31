@@ -31,6 +31,7 @@ DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
 sanitize_brand = _brand.sanitize_brand
 brand_from_domain = _brand.brand_from_domain
 format_ai_snippet = _indexer.format_ai_snippet
+clean_description = load_agent("04_quality_agent").clean_description
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,9 @@ class RevalidationAgent:
                 bounded_title = format_company_bounded_title(
                     parsed.title, clean_brand, h1_text=parsed.action_title, url=url
                 )
-                clean_desc = format_ai_snippet(
-                    meta_description=parsed.description, body_text_sample=parsed.body_text
-                ) or parsed.description
+                clean_desc = clean_description(
+                    parsed.description, parsed.body_text, bounded_title
+                )
 
                 document = PageDocument(
                     url=url,

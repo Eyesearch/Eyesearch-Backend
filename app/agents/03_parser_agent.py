@@ -30,7 +30,10 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 #: Hard ceiling on stored body text, ellipsis included.
-BODY_CHAR_CAP = 1000
+#: 2 KB of clean body text. Raised from 1,000: the search vector and the AI
+#: snippet both read from this, and a thousand characters cut most articles off
+#: before they said anything.
+BODY_CHAR_CAP = 2000
 
 #: Ceilings for the card metadata fields. The brand sits on its own line now,
 #: so the title carries the whole subject rather than four words of it.

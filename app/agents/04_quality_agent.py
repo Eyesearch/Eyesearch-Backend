@@ -10,6 +10,7 @@ rejects the repeat before it ever reaches the database.
 from __future__ import annotations
 
 import hashlib
+import html
 import re
 import logging
 from dataclasses import dataclass
@@ -23,8 +24,14 @@ logger = logging.getLogger(__name__)
 # through the loader keeps a single implementation rather than a copy.
 collapse = load_agent("03_parser_agent").collapse
 
-#: Below this many characters of body text a page is not worth a row.
+#: Below this many characters of body text a page is not worth a row. This is
+#: about the whole page being empty, not about any one field: a description of
+#: twenty-five characters is fine, a page with twenty-five characters of prose is
+#: a login box.
 MIN_BODY_CHARS = 80
+
+#: The description ceiling, from the parser that owns it.
+DESCRIPTION_CHAR_CAP = load_agent("03_parser_agent").DESCRIPTION_CHAR_CAP
 
 #: A title shorter than this is a filename or a placeholder, not a heading.
 MIN_TITLE_CHARS = 3
@@ -156,6 +163,82 @@ CONTRACT = {
 
 audit_contract = _contract_rules.make_audit_contract(__name__, CONTRACT)
 telemetry = _contract_rules.make_telemetry(__name__, CONTRACT)
+
+
+# ---------------------------------------------------------------------------
+# Text sanitation
+#
+# The gate's job on text is to make it clean, not to make it long. A description
+# of twenty-five characters that says something is kept exactly as it is; only
+# an empty one is rebuilt.
+# ---------------------------------------------------------------------------
+
+#: Tags that survived extraction, and HTML entities that were never decoded.
+HTML_TAG = re.compile(r"<[^>]+>")
+#: Punctuation a page repeats for emphasis. One is enough.
+REPEATED_PUNCTUATION = re.compile(r"([!?.,;:\-])\1+")
+#: Emoji, dingbats and media controls. Currency and dashes are left alone.
+DECORATIVE = re.compile(
+    "[\u2000-\u2012\u2015-\u206F\u2190-\u21FF\u2300-\u23FF"
+    "\u25A0-\u25FF\u2600-\u27BF\u2B00-\u2BFF\uFE00-\uFE0F"
+    "\U0001F000-\U0001FAFF]"
+)
+
+#: Boilerplate that makes a description worthless even when it is clean.
+JUNK_BOILERPLATE: tuple[str, ...] = (
+    "we use cookies",
+    "accept all cookies",
+    "javascript is disabled",
+    "enable javascript",
+    "all rights reserved",
+    "terms and conditions apply",
+    "click here to continue",
+)
+
+#: How much of the body to borrow when a description is missing entirely.
+DESCRIPTION_FALLBACK_CHARS = 180
+
+
+def sanitize_text(text: str) -> str:
+    """Decode, strip markup and decoration, and collapse what is left."""
+    if not text:
+        return ""
+    cleaned = html.unescape(text)
+    cleaned = HTML_TAG.sub(" ", cleaned)
+    cleaned = DECORATIVE.sub(" ", cleaned)
+    cleaned = REPEATED_PUNCTUATION.sub(r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def is_junk_boilerplate(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in JUNK_BOILERPLATE)
+
+
+def clean_description(
+    description: str, body_text: str = "", title: str = "", cap: int = DESCRIPTION_CHAR_CAP
+) -> str:
+    """A description that is clean and within the ceiling — and no shorter.
+
+    There is no minimum. A short, clean description is the answer; the body is
+    read only when there is no description left to keep.
+    """
+    cleaned = sanitize_text(description)
+
+    if cleaned and not is_junk_boilerplate(cleaned):
+        return cleaned[:cap]
+
+    # Only now, when nothing usable survived, does the body get a say.
+    from_body = sanitize_text(body_text)
+    if from_body:
+        cut = from_body[:DESCRIPTION_FALLBACK_CHARS]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        return cut.strip()[:cap]
+
+    if title:
+        return f"{sanitize_text(title)} — official portal information"[:cap]
+    return ""
 
 
 # ---------------------------------------------------------------------------
