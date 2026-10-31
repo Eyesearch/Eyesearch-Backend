@@ -56,21 +56,23 @@ def test_tracking_parameters_are_stripped():
 
 
 @pytest.mark.asyncio
-async def test_a_domain_over_the_cap_loses_its_weakest_pages(client):
-    # A general Indian host has a hard ceiling of 5 pages; six is one over.
+async def test_a_foreign_host_loses_every_page(client):
+    """A foreign host's ceiling is zero, so the repair pass removes all of it.
+
+    Indian hosts share one ceiling of 200, which is not reachable in a unit
+    test without seeding 201 rows — the excess case is covered with an explicit
+    cap in test_ceiling_is_a_stop.py.
+    """
     store = IndexStore(client, settings())
     await store.persist_batch(
-        [doc(f"https://a.in/p{i}", "a.in", f"d{i}", quality=1.0 - i * 0.1) for i in range(6)]
+        [doc(f"https://a.example/p{i}", "a.example", f"d{i}") for i in range(3)]
     )
 
     report = await RuleEnforcerAgent(client, settings()).run()
 
     assert report.over_cap_domains == 1
-    assert report.pages_purged == 1
-    assert await count(client) == 5
-    # The best five survive; the weakest is the one that went.
-    kept = await client.execute("SELECT url FROM pages ORDER BY page_id")
-    assert [row[0] for row in kept.rows] == [f"https://a.in/p{i}" for i in range(5)]
+    assert report.pages_purged == 3
+    assert await count(client) == 0
 
 
 @pytest.mark.asyncio

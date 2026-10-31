@@ -45,8 +45,11 @@ def test_the_auditor_reads_the_configured_floor():
 
 
 @pytest.mark.asyncio
-async def test_the_enforcer_uses_each_host_tier_ceiling(client):
-    """The ceiling follows the host's tier, with no per-host code."""
+async def test_the_enforcer_uses_the_uniform_ceiling(client):
+    """One ceiling for every Indian host; the excess is measured against it."""
+    from app.agents import load_agent as _load
+
+    frontier = _load("01_frontier_agent")
     from app.engine.store import IndexStore
 
     index = IndexStore(client, settings(page_body_char_ceiling=0))
@@ -60,11 +63,15 @@ async def test_the_enforcer_uses_each_host_tier_ceiling(client):
         ]
     )
 
+    # Six pages is under 200, so nothing is purged at the real ceiling.
     strict = RuleEnforcerAgent(client, settings())
-    domains, purged = await strict.enforce_page_cap(dry_run=True)
+    assert await strict.enforce_page_cap(dry_run=True) == (0, 0)
 
+    # The mechanism still purges when a caller asks for a tighter cap.
+    domains, purged = await strict.enforce_page_cap(cap=5, dry_run=True)
     assert domains == 1
-    assert purged == 1   # six pages against a ceiling of five
+    assert purged == 1
+    assert frontier.UNIFORM_HOST_CAP == 200
 
 
 @pytest.mark.asyncio

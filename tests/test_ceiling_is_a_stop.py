@@ -36,20 +36,22 @@ async def test_a_site_with_three_pages_is_not_pushed_to_its_ceiling(client, stor
 
 
 @pytest.mark.asyncio
-async def test_a_host_over_its_tier_ceiling_loses_only_the_excess(client, store):
+async def test_a_host_over_its_ceiling_loses_only_the_excess(client, store):
+    """The ceiling is one number now, so the excess is tested with an explicit
+    cap rather than by seeding 201 pages."""
     await store.persist_batch([page("shop.in", i, quality=1.0 - i * 0.05) for i in range(8)])
 
     agent = RuleEnforcerAgent(client, load_agent("01_frontier_agent").get_settings())
-    domains, purged = await agent.enforce_page_cap(dry_run=True)
+    domains, purged = await agent.enforce_page_cap(cap=5, dry_run=True)
 
     assert domains == 1
-    assert purged == 3          # eight pages against a ceiling of five
-    assert frontier.get_host_hard_limit("shop.in") == 5
+    assert purged == 3
+    assert frontier.get_host_hard_limit("shop.in") == 200
 
 
 @pytest.mark.asyncio
 async def test_a_government_host_is_not_capped_at_five(client, store):
-    """The tier ceiling is what stops it, not the general one."""
+    """Eight pages is well under the uniform ceiling, whatever the suffix."""
     await store.persist_batch([page("big.gov.in", i) for i in range(8)])
 
     agent = RuleEnforcerAgent(client, load_agent("01_frontier_agent").get_settings())
@@ -57,4 +59,4 @@ async def test_a_government_host_is_not_capped_at_five(client, store):
 
     assert domains == 0
     assert purged == 0
-    assert frontier.get_host_hard_limit("big.gov.in") == 250
+    assert frontier.get_host_hard_limit("big.gov.in") == 200

@@ -517,15 +517,19 @@ APPROVED_INDIAN_BRANDS: frozenset[str] = frozenset(
     }
 )
 
-#: Hard page ceilings per tier. These are stops, not targets: the crawler takes
-#: no further page from a host once its count reaches the number.
-HARD_LIMIT_GOV = 250
-HARD_LIMIT_INSTITUTION = 50
-HARD_LIMIT_GENERAL = 5
+#: One ceiling for every Indian host, and zero for everything else.
+#:
+#: The tiers were replaced because they encoded an assumption that is not true:
+#: that a government portal deserves forty times the depth of a state transport
+#: corporation. KSRTC and BESCOM are public services with hundreds of genuinely
+#: useful pages, and capping them at five was the wrong kind of stinginess. What
+#: separates a good page from a bad one is its content, and that is decided at
+#: the quality gate — not by which suffix the host happens to carry.
+#:
+#: The ceiling is still a stop, not a target: a site with twelve good pages
+#: finishes at twelve.
+UNIFORM_HOST_CAP = 200
 HARD_LIMIT_FOREIGN = 0
-
-GOV_SUFFIXES: tuple[str, ...] = (".gov.in", ".nic.in")
-INSTITUTION_SUFFIXES: tuple[str, ...] = (".edu.in", ".ac.in", ".res.in")
 
 
 def _bare_host(url: str) -> str:
@@ -557,18 +561,7 @@ def is_allowed_indian_domain(url: str) -> bool:
 
 def get_host_hard_limit(domain: str) -> int:
     """The page ceiling for a host. 0 means it may not be crawled at all."""
-    host = _bare_host(domain)
-    if not host:
-        return HARD_LIMIT_FOREIGN
-    if any(host.endswith(suffix) for suffix in GOV_SUFFIXES):
-        return HARD_LIMIT_GOV
-    if any(host.endswith(suffix) for suffix in INSTITUTION_SUFFIXES):
-        return HARD_LIMIT_INSTITUTION
-    if host in APPROVED_INDIAN_BRANDS or _apex(host) in APPROVED_INDIAN_BRANDS:
-        return HARD_LIMIT_INSTITUTION
-    if any(host.endswith(tld) for tld in ALLOWED_INDIAN_TLDS):
-        return HARD_LIMIT_GENERAL
-    return HARD_LIMIT_FOREIGN
+    return UNIFORM_HOST_CAP if is_allowed_indian_domain(domain) else HARD_LIMIT_FOREIGN
 
 
 def host_limit_sql(domain_column: str = "s.domain") -> str:
@@ -577,15 +570,11 @@ def host_limit_sql(domain_column: str = "s.domain") -> str:
     Generated from the constants above rather than written out by hand, so the
     database and the frontier cannot disagree about what a host's ceiling is.
     """
-    gov = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in GOV_SUFFIXES)
-    inst = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in INSTITUTION_SUFFIXES)
     indian = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in ALLOWED_INDIAN_TLDS)
     brands = " OR ".join(f"{domain_column} = '{name}'" for name in sorted(APPROVED_INDIAN_BRANDS))
     return (
-        f"CASE WHEN {gov} THEN {HARD_LIMIT_GOV} "
-        f"WHEN {inst} THEN {HARD_LIMIT_INSTITUTION} "
-        f"WHEN {brands} THEN {HARD_LIMIT_INSTITUTION} "
-        f"WHEN {indian} THEN {HARD_LIMIT_GENERAL} "
+        f"CASE WHEN {indian} THEN {UNIFORM_HOST_CAP} "
+        f"WHEN {brands} THEN {UNIFORM_HOST_CAP} "
         f"ELSE {HARD_LIMIT_FOREIGN} END"
     )
 

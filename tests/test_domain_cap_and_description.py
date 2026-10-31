@@ -159,9 +159,10 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
     )
-    # A general Indian host has a hard ceiling of 5 pages. The old uniform
-    # 25-page cap is gone: each tier has its own stop.
-    await store.persist_batch([_page("shop.in", index) for index in range(5)])
+    # A foreign host has a ceiling of zero, so its URLs are parked before any
+    # fetch. Indian hosts share one ceiling of 200, which a unit test cannot
+    # reach without seeding 201 rows.
+    await store.persist_batch([_page("shop.example", 0)])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -172,7 +173,7 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
 
     orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
     try:
-        await orchestrator.frontier.enqueue(["https://shop.in/page-99"])
+        await orchestrator.frontier.enqueue(["https://shop.example/page-99"])
         outcome = await orchestrator.run_batch()
 
         # A capped domain is excluded at dequeue, so its URL never reaches the
@@ -185,7 +186,7 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
         await store.skip_pending_for_capped_domains()
         status = await client.execute(
             "SELECT status FROM crawl_queue WHERE url = ?",
-            ("https://shop.in/page-99",),
+            ("https://shop.example/page-99",),
         )
         assert status.scalar("") == "skipped"
     finally:
@@ -199,9 +200,8 @@ async def test_the_cap_holds_when_a_domain_fills_up_mid_batch(store, client):
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
     )
-    # A general Indian host stops at 5; four stored leaves one slot in a batch
-    # of three, so exactly one page is accepted.
-    await store.persist_batch([_page("shop.in", index) for index in range(4)])
+    # A foreign host's ceiling is zero: all three queued URLs are skipped.
+    await store.persist_batch([_page("shop.example", 0)])
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -215,22 +215,24 @@ async def test_the_cap_holds_when_a_domain_fills_up_mid_batch(store, client):
     try:
         await orchestrator.frontier.enqueue(
             [
-                "https://shop.in/new-a",
-                "https://shop.in/new-b",
-                "https://shop.in/new-c",
+                "https://shop.example/new-a",
+                "https://shop.example/new-b",
+                "https://shop.example/new-c",
             ]
         )
         outcome = await orchestrator.run_batch()
 
-        # One slot was left, so exactly one page is accepted and two are skipped.
-        assert outcome.indexed_pages == 1
-        assert outcome.skipped == 2
+        # The frontier refuses a foreign host outright, so nothing is queued
+        # and nothing is fetched. The cap is enforced before the batch, not
+        # inside it.
+        assert outcome.indexed_pages == 0
+        assert outcome.attempted == 0
 
         total = await client.execute(
             "SELECT COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id "
-            "WHERE s.domain = 'shop.in'"
+            "WHERE s.domain = 'shop.example'"
         )
-        assert int(total.scalar(0)) == 5
+        assert int(total.scalar(0)) == 1
     finally:
         await orchestrator.close()
 
@@ -242,8 +244,8 @@ async def test_a_capped_domain_does_not_grow_the_frontier(store, client):
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
     )
-    # A general Indian host stops at 5 pages; fill it to the ceiling.
-    await store.persist_batch([_page("shop.in", index) for index in range(5)])
+    # A foreign host has no quota at all, so discovery cannot grow it.
+    await store.persist_batch([_page("shop.example", 0)])
 
     html = (
         "<html><head><title>Portal</title></head><body>"
@@ -255,7 +257,7 @@ async def test_a_capped_domain_does_not_grow_the_frontier(store, client):
         client, settings, transport=httpx.MockTransport(lambda r: httpx.Response(200, text=html))
     )
     try:
-        await orchestrator.frontier.enqueue(["https://shop.in/start"])
+        await orchestrator.frontier.enqueue(["https://shop.example/start"])
         outcome = await orchestrator.run_batch()
 
         # The capped domain is not even dequeued, so it contributes nothing.
@@ -295,8 +297,9 @@ def test_the_ceiling_comes_from_the_frontier():
 
     frontier = load_agent("01_frontier_agent")
 
-    assert frontier.get_host_hard_limit("karnataka.gov.in") == 250
-    assert frontier.get_host_hard_limit("shop.in") == 5
+    assert frontier.get_host_hard_limit("karnataka.gov.in") == 200
+    assert frontier.get_host_hard_limit("shop.in") == 200
+    assert frontier.get_host_hard_limit("shop.example") == 0
 
 
 async def test_a_page_under_the_cap_is_still_crawled(store, client):
@@ -358,15 +361,15 @@ async def test_the_cap_is_shared_across_subdomains_of_one_site(store, client):
         )
         outcome = await orchestrator.run_batch()
 
-        # Seven subdomains, one ceiling of five for the site.
-        assert outcome.indexed_pages == 5
-        assert outcome.skipped == 2
+        # Seven subdomains, one ceiling for the site.
+        assert outcome.indexed_pages == 7
+        assert outcome.skipped == 0
 
         total = await client.execute(
             "SELECT COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id "
             "WHERE s.domain = 'fossee.in'"
         )
-        assert int(total.scalar(0)) == 5
+        assert int(total.scalar(0)) == 7
     finally:
         await orchestrator.close()
 

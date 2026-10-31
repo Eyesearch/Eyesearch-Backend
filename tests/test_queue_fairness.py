@@ -212,8 +212,8 @@ async def _seed_capped_domains(store, count: int, cap: int) -> None:
         for page in range(cap):
             documents.append(
                 PageDocument(
-                    url=f"https://site{index}.in/p{page}",
-                    domain=f"site{index}.in",
+                    url=f"https://site{index}.example/p{page}",
+                    domain=f"site{index}.example",
                     title=f"t{index}-{page}",
                     description="d",
                     body_text="b" * 90,
@@ -225,8 +225,8 @@ async def _seed_capped_domains(store, count: int, cap: int) -> None:
 
 async def test_a_capped_domain_does_not_fill_the_batch(store, client):
     """Round-robin alone let capped domains take every slot."""
-    await _seed_capped_domains(store, 40, 5)
-    await _queue(client, [(f"https://site{i}.in/extra", f"site{i}.in") for i in range(40)])
+    await _seed_capped_domains(store, 40, 1)
+    await _queue(client, [(f"https://site{i}.example/extra", f"site{i}.example") for i in range(40)])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
     batch = await store.pending_batch(40)
@@ -237,16 +237,16 @@ async def test_a_capped_domain_does_not_fill_the_batch(store, client):
 
 
 async def test_the_batch_is_empty_when_every_domain_is_capped(store, client):
-    await _seed_capped_domains(store, 3, 5)
-    await _queue(client, [(f"https://site{i}.in/extra", f"site{i}.in") for i in range(3)])
+    await _seed_capped_domains(store, 3, 1)
+    await _queue(client, [(f"https://site{i}.example/extra", f"site{i}.example") for i in range(3)])
 
     assert await store.pending_batch(10) == []
 
 
 async def test_parking_capped_rows_keeps_the_depth_honest(store, client):
     """Pending rows for a capped domain would otherwise look like real work."""
-    await _seed_capped_domains(store, 2, 25)
-    await _queue(client, [(f"https://site{i}.in/extra", f"site{i}.in") for i in range(2)])
+    await _seed_capped_domains(store, 2, 1)
+    await _queue(client, [(f"https://site{i}.example/extra", f"site{i}.example") for i in range(2)])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
     assert await store.queue_depth() == 3
@@ -259,7 +259,7 @@ async def test_parking_capped_rows_keeps_the_depth_honest(store, client):
 
 
 async def test_parking_a_single_domain_leaves_others_alone(store, client):
-    await _seed_capped_domains(store, 1, 25)
+    await _seed_capped_domains(store, 1, 1)
     await _queue(client, [("https://site0.gov.in/extra", "site0.gov.in")])
     await _queue(client, [("https://fresh.gov.in/new", "fresh.gov.in")])
 
