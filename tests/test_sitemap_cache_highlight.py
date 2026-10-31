@@ -387,7 +387,7 @@ async def test_the_orchestrator_harvests_for_a_newly_discovered_domain(store, cl
     """Discovery of an authoritative domain triggers its sitemap immediately."""
     page = (
         "<html><head><title>Karnataka portal</title></head><body>"
-        '<a href="https://www.thehindu.com/news/">news</a>'
+        '<a href="https://www.india.gov.in/news/">news</a>'
         "<p>The department publishes notifications, citizen services and contact "
         "details for district offices across the state of Karnataka.</p></body></html>"
     )
@@ -397,7 +397,7 @@ async def test_the_orchestrator_harvests_for_a_newly_discovered_domain(store, cl
         if url.endswith("sitemap.xml"):
             return httpx.Response(
                 200,
-                text="<urlset><url><loc>https://www.thehindu.com/news/national</loc></url></urlset>",
+                text="<urlset><url><loc>https://www.india.gov.in/news/national</loc></url></urlset>",
             )
         return httpx.Response(200, text=page)
 
@@ -421,6 +421,6 @@ async def test_the_orchestrator_harvests_for_a_newly_discovered_domain(store, cl
             "SELECT url FROM crawl_queue WHERE status = 'pending'"
         )
         urls = [str(row[0]) for row in queued.rows]
-        assert any("thehindu.com/news/national" in url for url in urls), urls
+        assert any("india.gov.in/news/national" in url for url in urls), urls
     finally:
         await orchestrator.close()

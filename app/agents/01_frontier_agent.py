@@ -489,6 +489,107 @@ def is_crawlable(url: str) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# The Indian domain shield and the hard host quotas
+#
+# Two decisions live here. Which domains may be crawled at all — the Indian web,
+# plus a short list of Indian services that live on .com — and how many pages
+# each host may contribute, as a hard stop rather than a range.
+#
+# The heuristic classifier still runs and still decides *scope* and the order
+# pages are found. The list below is an override, not the mechanism: it admits a
+# named Indian service that a suffix rule would reject, and it lifts that service
+# to the higher quota. A stale entry degrades to the heuristic, never to a wrong
+# answer.
+# ---------------------------------------------------------------------------
+
+ALLOWED_INDIAN_TLDS: tuple[str, ...] = (
+    ".in", ".gov.in", ".nic.in", ".edu.in", ".ac.in",
+    ".res.in", ".co.in", ".org.in", ".net.in", ".mil.in",
+)
+
+#: Indian services that are not on an Indian suffix.
+APPROVED_INDIAN_BRANDS: frozenset[str] = frozenset(
+    {
+        "flipkart.com", "paytm.com", "jio.com", "zomato.com", "swiggy.com",
+        "naukri.com", "phonepe.com", "zerodha.com", "groww.in", "bookmyshow.com",
+        "irctc.co.in", "makemytrip.com", "redbus.in", "cetonline.karnataka.gov.in",
+    }
+)
+
+#: Hard page ceilings per tier. These are stops, not targets: the crawler takes
+#: no further page from a host once its count reaches the number.
+HARD_LIMIT_GOV = 250
+HARD_LIMIT_INSTITUTION = 50
+HARD_LIMIT_GENERAL = 5
+HARD_LIMIT_FOREIGN = 0
+
+GOV_SUFFIXES: tuple[str, ...] = (".gov.in", ".nic.in")
+INSTITUTION_SUFFIXES: tuple[str, ...] = (".edu.in", ".ac.in", ".res.in")
+
+
+def _bare_host(url: str) -> str:
+    """The host, without `www.`, lowercased. Empty for anything unparseable."""
+    host = domain_of(url if "://" in (url or "") else f"https://{url}")
+    return host.removeprefix("www.").lower()
+
+
+def _apex(host: str) -> str:
+    """The registrable name: `m.flipkart.com` -> `flipkart.com`."""
+    parts = [part for part in (host or "").split(".") if part]
+    if len(parts) <= 2:
+        return ".".join(parts)
+    # Keep the public suffix pairs this index cares about together.
+    if parts[-2] in {"gov", "nic", "co", "org", "net", "ac", "res", "edu", "mil"}:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def is_allowed_indian_domain(url: str) -> bool:
+    """Whether a URL belongs to the Indian web, by suffix or by name."""
+    host = _bare_host(url)
+    if not host:
+        return False
+    if any(host.endswith(tld) for tld in ALLOWED_INDIAN_TLDS):
+        return True
+    return host in APPROVED_INDIAN_BRANDS or _apex(host) in APPROVED_INDIAN_BRANDS
+
+
+def get_host_hard_limit(domain: str) -> int:
+    """The page ceiling for a host. 0 means it may not be crawled at all."""
+    host = _bare_host(domain)
+    if not host:
+        return HARD_LIMIT_FOREIGN
+    if any(host.endswith(suffix) for suffix in GOV_SUFFIXES):
+        return HARD_LIMIT_GOV
+    if any(host.endswith(suffix) for suffix in INSTITUTION_SUFFIXES):
+        return HARD_LIMIT_INSTITUTION
+    if host in APPROVED_INDIAN_BRANDS or _apex(host) in APPROVED_INDIAN_BRANDS:
+        return HARD_LIMIT_INSTITUTION
+    if any(host.endswith(tld) for tld in ALLOWED_INDIAN_TLDS):
+        return HARD_LIMIT_GENERAL
+    return HARD_LIMIT_FOREIGN
+
+
+def host_limit_sql(domain_column: str = "s.domain") -> str:
+    """The same rule as SQL, for the queue's cap exclusion.
+
+    Generated from the constants above rather than written out by hand, so the
+    database and the frontier cannot disagree about what a host's ceiling is.
+    """
+    gov = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in GOV_SUFFIXES)
+    inst = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in INSTITUTION_SUFFIXES)
+    indian = " OR ".join(f"{domain_column} LIKE '%{suffix}'" for suffix in ALLOWED_INDIAN_TLDS)
+    brands = " OR ".join(f"{domain_column} = '{name}'" for name in sorted(APPROVED_INDIAN_BRANDS))
+    return (
+        f"CASE WHEN {gov} THEN {HARD_LIMIT_GOV} "
+        f"WHEN {inst} THEN {HARD_LIMIT_INSTITUTION} "
+        f"WHEN {brands} THEN {HARD_LIMIT_INSTITUTION} "
+        f"WHEN {indian} THEN {HARD_LIMIT_GENERAL} "
+        f"ELSE {HARD_LIMIT_FOREIGN} END"
+    )
+
+
 def is_worthy_page(url: str, current_domain_page_count: int, cap: int | None = None) -> bool:
     """Whether a URL may enter the frontier at all.
 
@@ -668,6 +769,10 @@ async def discover_sitemap_urls(
         if not is_crawlable(normalised):
             continue
         if not in_crawl_scope(normalised, domain, allow_global=allow_global):
+            continue
+        # The Indian shield: a foreign host has a hard ceiling of zero, so it
+        # never reaches the queue.
+        if not is_allowed_indian_domain(normalised):
             continue
         if not is_worthy_page(normalised, 0):
             continue
@@ -920,6 +1025,8 @@ class FrontierAgent:
                 continue
             if not in_crawl_scope(normalised, source_host, allow_global=allow_global):
                 continue
+            if not is_allowed_indian_domain(normalised):
+                continue
             if not is_worthy_page(normalised, 0):
                 continue
             seen.add(normalised)
@@ -928,11 +1035,27 @@ class FrontierAgent:
         return accepted
 
     async def discover(self, links: list[str] | tuple[str, ...], source_url: str) -> int:
-        """Filter a page's links and queue the survivors."""
+        """Filter a page's links, drop hosts at their ceiling, queue the rest."""
         candidates = self.filter_links(links, source_url)
         if not candidates:
             return 0
-        return await self.enqueue(candidates)
+
+        # The hard stop. A host that has reached its tier's ceiling contributes
+        # no further page — the count is fetched once for the whole batch, never
+        # once per URL.
+        hosts = list({domain_of(url) for url in candidates})
+        counts = await self._store.domain_page_counts(hosts)
+        under_quota = [
+            url for url in candidates
+            if counts.get(domain_of(url), 0) < get_host_hard_limit(domain_of(url))
+        ]
+        if not under_quota:
+            logger.info(
+                "discovery from %s produced %d links, all at their host ceiling",
+                source_url, len(candidates),
+            )
+            return 0
+        return await self.enqueue(under_quota)
 
     async def next_batch(self, limit: int | None = None) -> list[QueuedUrl]:
         """The next batch of pending URLs, in the order the plan specifies."""

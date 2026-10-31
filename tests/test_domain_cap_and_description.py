@@ -158,9 +158,10 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=2,
     )
-    await store.persist_batch([_page("karnataka.gov.in", index) for index in range(2)])
+    # A general Indian host has a hard ceiling of 5 pages. The old uniform
+    # 25-page cap is gone: each tier has its own stop.
+    await store.persist_batch([_page("shop.in", index) for index in range(5)])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -171,7 +172,7 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
 
     orchestrator = Orchestrator(client, settings, transport=httpx.MockTransport(handler))
     try:
-        await orchestrator.frontier.enqueue(["https://karnataka.gov.in/page-99"])
+        await orchestrator.frontier.enqueue(["https://shop.in/page-99"])
         outcome = await orchestrator.run_batch()
 
         # A capped domain is excluded at dequeue, so its URL never reaches the
@@ -181,10 +182,10 @@ async def test_a_full_domain_is_skipped_rather_than_crawled(store, client):
         assert outcome.indexed_pages == 0
 
         # The row is parked by the reconciliation, not by the batch.
-        await store.skip_pending_for_capped_domains(cap=2)
+        await store.skip_pending_for_capped_domains()
         status = await client.execute(
             "SELECT status FROM crawl_queue WHERE url = ?",
-            ("https://karnataka.gov.in/page-99",),
+            ("https://shop.in/page-99",),
         )
         assert status.scalar("") == "skipped"
     finally:
@@ -239,9 +240,9 @@ async def test_a_capped_domain_does_not_grow_the_frontier(store, client):
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=1,
     )
-    await store.persist_batch([_page("karnataka.gov.in", 0)])
+    # A general Indian host stops at 5 pages; fill it to the ceiling.
+    await store.persist_batch([_page("shop.in", index) for index in range(5)])
 
     html = (
         "<html><head><title>Portal</title></head><body>"
@@ -253,7 +254,7 @@ async def test_a_capped_domain_does_not_grow_the_frontier(store, client):
         client, settings, transport=httpx.MockTransport(lambda r: httpx.Response(200, text=html))
     )
     try:
-        await orchestrator.frontier.enqueue(["https://karnataka.gov.in/start"])
+        await orchestrator.frontier.enqueue(["https://shop.in/start"])
         outcome = await orchestrator.run_batch()
 
         # The capped domain is not even dequeued, so it contributes nothing.

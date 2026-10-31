@@ -24,6 +24,14 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
 from app.database import _dialect
+
+
+def _host_limit_sql(column: str) -> str:
+    """The frontier's per-host ceilings, as SQL. Imported lazily so the store
+    does not depend on an agent at module load."""
+    from app.agents import load_agent
+
+    return load_agent("01_frontier_agent").host_limit_sql(column)
 from app.schema_postgres import SEARCH_CONFIG
 from app.engine.config import Settings, get_settings
 from app.libsql_http import LibsqlClient, LibsqlError
@@ -650,20 +658,26 @@ class IndexStore:
         return result.rows_affected
 
     async def skip_pending_for_capped_domains(self, cap: int | None = None) -> int:
-        """One-off reconciliation for rows queued before a domain hit its cap."""
-        limit = cap if cap is not None else self._settings.max_pages_per_domain
+        """One-off reconciliation for rows queued before a host hit its ceiling.
+
+        Each host is measured against its own tier's ceiling. `cap` is kept as an
+        explicit override for a caller that wants one uniform number — the
+        repair script does, to clear a backlog quickly.
+        """
+        having = (
+            "COUNT(*) >= ?" if cap is not None else f"COUNT(*) >= ({_host_limit_sql('s.domain')})"
+        )
         result = await self._client.execute(
             "UPDATE crawl_queue SET status = 'skipped' WHERE status = 'pending' AND domain IN ("
             "  SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
-            "  GROUP BY s.domain HAVING COUNT(*) >= ?"
+            f"  GROUP BY s.domain HAVING {having}"
             ")",
-            (limit,),
+            (int(cap),) if cap is not None else (),
         )
         if result.rows_affected:
             logger.info(
-                "marked %d queued URLs skipped: their domain is at its %d-page cap",
+                "marked %d queued URLs skipped: their host is at its page ceiling",
                 result.rows_affected,
-                limit,
             )
         return result.rows_affected
 
@@ -937,7 +951,8 @@ class IndexStore:
         would shrink a batch below the configured size whenever few domains have
         work.
         """
-        cap = self._settings.max_pages_per_domain
+        # The per-host ceiling comes from the frontier, generated from the same
+        # constants the admission gate uses.
         result = await self._client.execute(
             "SELECT id, url, domain, retry_count FROM ("
             "  SELECT cq.id AS id, cq.url, cq.domain, cq.retry_count,"
@@ -949,10 +964,11 @@ class IndexStore:
             "  FROM crawl_queue cq WHERE cq.status = 'pending'"
             "    AND cq.domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
-            "      GROUP BY s.domain HAVING COUNT(*) >= ?"
+            "      GROUP BY s.domain HAVING COUNT(*) >= "
+            f"      ({_host_limit_sql('s.domain')})"
             "    )"
             ") ORDER BY rn ASC, id ASC LIMIT ?",
-            (cap, limit),
+            (limit,),
         )
         return [
             QueuedUrl(

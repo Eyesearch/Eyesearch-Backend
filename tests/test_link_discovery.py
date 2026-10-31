@@ -73,11 +73,11 @@ def test_the_parser_extracts_absolute_links_and_drops_non_navigable_hrefs():
     assert SEED + "login" not in kept
     assert SEED + "a/b/c/d/e/f/g/h" not in kept
 
-    # The crawl is India-focused, so an ordinary .com link is dropped...
+    # The crawl is India-only: a foreign host has a hard ceiling of zero, so it
+    # is dropped whether or not the global ring is switched on.
     assert "https://bbc.com/karnataka" not in kept
-    # ...unless the global ring is explicitly switched on.
     with_global = FrontierAgent.filter_links(None, parsed.links, SEED, allow_global=True)
-    assert "https://bbc.com/karnataka" in with_global
+    assert "https://bbc.com/karnataka" not in with_global
 
 
 def test_relative_links_are_resolved_against_the_page_url():
@@ -160,12 +160,11 @@ def test_filter_links_keeps_only_what_is_in_scope():
 
     assert accepted == [SEED + "about", "https://india.gov.in/services"]
 
+    # The Indian shield is a hard ceiling of zero for a foreign host, so
+    # allow_global no longer admits one. bbc.com is dropped either way.
     with_global = FrontierAgent.filter_links(None, links, SEED, allow_global=True)
-    assert with_global == [
-        SEED + "about",
-        "https://india.gov.in/services",
-        "https://bbc.com/karnataka",
-    ]
+    assert with_global == [SEED + "about", "https://india.gov.in/services"]
+    assert "https://bbc.com/karnataka" not in with_global
 
 
 def test_filter_links_never_returns_the_source_page():
