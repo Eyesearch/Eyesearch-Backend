@@ -201,6 +201,10 @@ class SearchHit:
     nav_hit: int = 0
     root_hit: int = 0
     region_hit: int = 0
+    #: A sentence from the body containing the query, or "" when the query does
+    #: not appear in the prose. Carries <b> around the match; the caller strips
+    #: them because both shipped clients render plain text.
+    dynamic_headline: str = ""
     #: Schema.org types from the page, used for classification only. Not a
     #: column: it describes the page, it is not part of the index.
     schema_types: list[str] = field(default_factory=list)
@@ -1063,7 +1067,15 @@ class IndexStore:
             # it. The inner query computes the hits, the middle derives the
             # flags, the outer orders.
             "SELECT base.*, CASE WHEN ? > 0 AND base.title_hit = 0 "
-            "AND base.nav_hit = 0 THEN 1 ELSE 0 END AS description_only "
+            "AND base.nav_hit = 0 THEN 1 ELSE 0 END AS description_only, "
+            # A sentence from the body that actually mentions the query. The
+            # tags are stripped before the card sees it — the client renders
+            # plain text and does its own highlighting — but they are kept here
+            # so the fragment is found by position, not by re-searching the body.
+            "ts_headline('" + SEARCH_CONFIG + "', coalesce(base.body_text, ''), "
+            "to_tsquery('" + SEARCH_CONFIG + "', ?), "
+            "'StartSel=<b>, StopSel=</b>, MaxWords=35, MinWords=15, ShortWord=3, "
+            "HighlightAll=FALSE, MaxFragments=1') AS dynamic_headline "
             "FROM ("
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
             "p.brand_name, p.clean_url, p.action_title, "
@@ -1112,6 +1124,7 @@ class IndexStore:
         # the inner SELECT, the inner WHERE, the weights and the window.
         args = (
             short_query,
+            match_query,
             rank_query,
             *title_tokens,
             query_language,
@@ -1160,6 +1173,7 @@ class IndexStore:
                 sql,
                 (
                     short_query,
+                    match_query,
                     rank_query,
                     *title_tokens,
                     query_language,
@@ -1210,7 +1224,7 @@ class IndexStore:
             "p.brand_name, p.clean_url, p.action_title, 0.0 AS lexical_score, "
             "0 AS title_hit, 0 AS auth_hit, 0 AS lang_hit, 0 AS nav_hit, "
             "0 AS root_hit, 0 AS region_hit, p.category, c.code AS category_code, "
-            "p.sitelinks, 0 AS description_only "
+            "p.sitelinks, 0 AS description_only, '' AS dynamic_headline "
             "FROM pages p "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
             "LEFT JOIN categories c ON c.id = p.category_id "
@@ -1303,6 +1317,7 @@ class IndexStore:
             nav_hit=int(row[12] or 0) if len(row) > 12 else 0,
             root_hit=int(row[13] or 0) if len(row) > 13 else 0,
             region_hit=int(row[14] or 0) if len(row) > 14 else 0,
+            dynamic_headline=str(row[19] or "") if len(row) > 19 else "",
         )
 
     @staticmethod

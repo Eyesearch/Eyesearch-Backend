@@ -362,6 +362,11 @@ def clean_display_snippet(snippet: str, title: str = "", limit: int = 300) -> st
     return clean[:limit]
 
 
+def _strip_tags(text: str) -> str:
+    """Remove the markup ts_headline adds, leaving the sentence intact."""
+    return re.sub(r"<[^>]+>", "", text or "").strip()
+
+
 def to_result(hit: SearchHit) -> SearchResult:
     """Map an index row onto the card contract.
 
@@ -369,6 +374,16 @@ def to_result(hit: SearchHit) -> SearchResult:
     page is for — and falls back to the raw title for rows indexed before that
     field existed.
     """
+    # Hybrid snippet. A navigational hit shows what the site says about itself;
+    # an informational one shows the sentence from the body that mentions the
+    # query, which is what the reader actually asked for. The headline arrives
+    # with <b> around the match and is stripped here: both shipped clients
+    # render a snippet as plain text and do their own highlighting.
+    snippet_source = hit.description
+    headline = _strip_tags(getattr(hit, "dynamic_headline", "") or "")
+    if not getattr(hit, "nav_hit", 0) and headline:
+        snippet_source = headline
+
     raw_title = hit.title or hit.url
     # The card title is `[Brand]: [context]`, capped at 50 characters — the one
     # authoritative display title. The four-word action title is retired as a
@@ -380,7 +395,7 @@ def to_result(hit: SearchHit) -> SearchResult:
         id=f"eyesearch:{hit.page_id}",
         title=title,
         url=hit.url,
-        snippet=clean_display_snippet(hit.snippet, title),
+        snippet=clean_display_snippet(snippet_source or hit.snippet, title),
         kind=kind_of(hit.url),
         thumbnail_url=youtube_thumbnail(hit.url),
         score=hit.score,
