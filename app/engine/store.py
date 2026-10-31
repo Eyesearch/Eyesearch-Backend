@@ -1061,21 +1061,24 @@ class IndexStore:
         # only as a bare reference, not inside an expression, and the ranking
         # here is `alias - boost * flag`.
         sql = (
+            # ts_headline is the expensive part: it reads a body and finds a
+            # fragment. Run over every candidate it costs O(matches) — a common
+            # word matching 40,000 pages pays for 40,000 headlines to show ten.
+            # Wrapping the ranked-and-sliced query means it runs on the rows
+            # that survive LIMIT, so the cost is the page size, not the corpus.
+            "SELECT top_slice.*, "
+            "ts_headline('" + SEARCH_CONFIG + "', coalesce(top_slice.body_text, ''), "
+            "to_tsquery('" + SEARCH_CONFIG + "', ?), "
+            "'StartSel=<b>, StopSel=</b>, MaxWords=35, MinWords=15, ShortWord=3, "
+            "HighlightAll=FALSE, MaxFragments=1') AS dynamic_headline "
+            "FROM ("
             "SELECT * FROM ("
             # Nested twice: a select list cannot refer to its own aliases, so
             # description_only cannot test title_hit in the SELECT that defines
             # it. The inner query computes the hits, the middle derives the
             # flags, the outer orders.
             "SELECT base.*, CASE WHEN ? > 0 AND base.title_hit = 0 "
-            "AND base.nav_hit = 0 THEN 1 ELSE 0 END AS description_only, "
-            # A sentence from the body that actually mentions the query. The
-            # tags are stripped before the card sees it — the client renders
-            # plain text and does its own highlighting — but they are kept here
-            # so the fragment is found by position, not by re-searching the body.
-            "ts_headline('" + SEARCH_CONFIG + "', coalesce(base.body_text, ''), "
-            "to_tsquery('" + SEARCH_CONFIG + "', ?), "
-            "'StartSel=<b>, StopSel=</b>, MaxWords=35, MinWords=15, ShortWord=3, "
-            "HighlightAll=FALSE, MaxFragments=1') AS dynamic_headline "
+            "AND base.nav_hit = 0 THEN 1 ELSE 0 END AS description_only "
             "FROM ("
             "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
             "p.brand_name, p.clean_url, p.action_title, "
@@ -1113,6 +1116,7 @@ class IndexStore:
             "  + ? * description_only "
             "  - ? * region_hit) ASC "
             "LIMIT ? OFFSET ?"
+            ") top_slice"
         )
         query_language = _query_language(query)
 
@@ -1122,9 +1126,11 @@ class IndexStore:
         # Bound in the order the placeholders appear in the SQL text, which
         # begins with the outer select list: the short-query flag first, then
         # the inner SELECT, the inner WHERE, the weights and the window.
+        # The outer select list is first in the text, so the headline's tsquery
+        # is bound before anything inside the subquery.
         args = (
-            short_query,
             match_query,
+            short_query,
             rank_query,
             *title_tokens,
             query_language,
@@ -1172,8 +1178,8 @@ class IndexStore:
             result = await self._client.execute(
                 sql,
                 (
-                    short_query,
                     match_query,
+                    short_query,
                     rank_query,
                     *title_tokens,
                     query_language,
