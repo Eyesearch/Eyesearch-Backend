@@ -198,9 +198,10 @@ async def test_the_cap_holds_when_a_domain_fills_up_mid_batch(store, client):
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=2,
     )
-    await store.persist_batch([_page("karnataka.gov.in", 0)])
+    # A general Indian host stops at 5; four stored leaves one slot in a batch
+    # of three, so exactly one page is accepted.
+    await store.persist_batch([_page("shop.in", index) for index in range(4)])
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -214,9 +215,9 @@ async def test_the_cap_holds_when_a_domain_fills_up_mid_batch(store, client):
     try:
         await orchestrator.frontier.enqueue(
             [
-                "https://karnataka.gov.in/new-a",
-                "https://karnataka.gov.in/new-b",
-                "https://karnataka.gov.in/new-c",
+                "https://shop.in/new-a",
+                "https://shop.in/new-b",
+                "https://shop.in/new-c",
             ]
         )
         outcome = await orchestrator.run_batch()
@@ -227,9 +228,9 @@ async def test_the_cap_holds_when_a_domain_fills_up_mid_batch(store, client):
 
         total = await client.execute(
             "SELECT COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id "
-            "WHERE s.domain = 'karnataka.gov.in'"
+            "WHERE s.domain = 'shop.in'"
         )
-        assert int(total.scalar(0)) == 2
+        assert int(total.scalar(0)) == 5
     finally:
         await orchestrator.close()
 
@@ -299,7 +300,6 @@ async def test_a_page_under_the_cap_is_still_crawled(store, client):
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=3,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -328,7 +328,6 @@ async def test_the_cap_is_shared_across_subdomains_of_one_site(store, client):
         crawler_enabled=False,
         revalidation_enabled=False,
         libsql_min_interval_seconds=0.0,
-        max_pages_per_domain=3,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -348,18 +347,21 @@ async def test_the_cap_is_shared_across_subdomains_of_one_site(store, client):
                 "https://om.fossee.in/guide",
                 "https://scilab.fossee.in/guide",
                 "https://spoken-tutorial.fossee.in/guide",
+                "https://efoss.fossee.in/guide",
+                "https://textbook.fossee.in/guide",
             ]
         )
         outcome = await orchestrator.run_batch()
 
-        assert outcome.indexed_pages == 3
+        # Seven subdomains, one ceiling of five for the site.
+        assert outcome.indexed_pages == 5
         assert outcome.skipped == 2
 
         total = await client.execute(
             "SELECT COUNT(*) FROM pages p JOIN sites s ON s.site_id = p.site_id "
             "WHERE s.domain = 'fossee.in'"
         )
-        assert int(total.scalar(0)) == 3
+        assert int(total.scalar(0)) == 5
     finally:
         await orchestrator.close()
 

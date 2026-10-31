@@ -58,23 +58,20 @@ def test_tracking_parameters_are_stripped():
 
 @pytest.mark.asyncio
 async def test_a_domain_over_the_cap_loses_its_weakest_pages(client):
-    store = IndexStore(client, settings(cap=3))
+    # A general Indian host has a hard ceiling of 5 pages; six is one over.
+    store = IndexStore(client, settings())
     await store.persist_batch(
-        [doc(f"https://a.gov.in/p{i}", "a.gov.in", f"d{i}", quality=1.0 - i * 0.1) for i in range(5)]
+        [doc(f"https://a.in/p{i}", "a.in", f"d{i}", quality=1.0 - i * 0.1) for i in range(6)]
     )
 
-    report = await RuleEnforcerAgent(client, settings(cap=3)).run()
+    report = await RuleEnforcerAgent(client, settings()).run()
 
     assert report.over_cap_domains == 1
-    assert report.pages_purged == 2
-    assert await count(client) == 3
-    # The best page survives; the two weakest are the ones that went.
+    assert report.pages_purged == 1
+    assert await count(client) == 5
+    # The best five survive; the weakest is the one that went.
     kept = await client.execute("SELECT url FROM pages ORDER BY page_id")
-    assert [row[0] for row in kept.rows] == [
-        "https://a.gov.in/p0",
-        "https://a.gov.in/p1",
-        "https://a.gov.in/p2",
-    ]
+    assert [row[0] for row in kept.rows] == [f"https://a.in/p{i}" for i in range(5)]
 
 
 @pytest.mark.asyncio

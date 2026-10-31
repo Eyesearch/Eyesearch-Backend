@@ -35,6 +35,7 @@ sanitize_brand = _brand.sanitize_brand
 brand_from_domain = _brand.brand_from_domain
 format_ai_snippet = _indexer.format_ai_snippet
 clean_description = load_agent("04_quality_agent").clean_description
+get_host_hard_limit = load_agent("01_frontier_agent").get_host_hard_limit
 TITLE_CHAR_CAP = _parser.TITLE_CHAR_CAP
 BRAND_CHAR_CAP = _parser.BRAND_CHAR_CAP
 DESCRIPTION_CHAR_CAP = _parser.DESCRIPTION_CHAR_CAP
@@ -282,13 +283,14 @@ class Orchestrator:
         skipped_ids: list[int] = []
         discovered: list[str] = []
 
-        # Per-domain page cap: one count query for the whole batch, and URLs on
-        # a domain that is already full are parked before any fetch happens.
-        cap = self._settings.max_pages_per_domain
+        # Per-host ceiling: one count query for the whole batch, and URLs on a
+        # host that has reached its tier's limit are parked before any fetch
+        # happens. The ceiling is a stop, not a quota to fill — a host with three
+        # good pages is finished at three, whatever its tier allows.
         counts = await self._store.domain_page_counts([item.domain for item in queue])
         eligible: list[QueuedUrl] = []
         for item in queue:
-            if counts.get(item.domain, 0) >= cap:
+            if counts.get(item.domain, 0) >= get_host_hard_limit(item.domain):
                 outcome.skipped += 1
                 self._tally(outcome.skip_reasons, "domain_cap")
                 skipped_ids.append(item.rowid)
@@ -316,8 +318,8 @@ class Orchestrator:
         results = await self._fetcher.fetch_many([item.url for item in eligible])
 
         for item, result in zip(eligible, results):
-            # A domain can fill up part-way through a batch.
-            if counts.get(item.domain, 0) >= cap:
+            # A host can reach its ceiling part-way through a batch.
+            if counts.get(item.domain, 0) >= get_host_hard_limit(item.domain):
                 outcome.skipped += 1
                 self._tally(outcome.skip_reasons, "domain_cap")
                 skipped_ids.append(item.rowid)
@@ -443,7 +445,8 @@ class Orchestrator:
             discovered = [
                 url
                 for url in discovered
-                if counts.get(_frontier_module.domain_of(url), 0) < cap
+                if counts.get(_frontier_module.domain_of(url), 0)
+                < get_host_hard_limit(_frontier_module.domain_of(url))
             ]
 
         if discovered and not outcome.paused:
@@ -534,9 +537,9 @@ class Orchestrator:
         # frontier look non-empty forever while no URL was eligible to crawl.
         # Reconcile that stale backlog once when the worker starts.
         try:
-            parked = await self._store.skip_pending_for_capped_domains(
-                cap=self._settings.max_pages_per_domain
-            )
+            # No cap argument: the reconciliation measures each host against
+            # its own tier's ceiling.
+            parked = await self._store.skip_pending_for_capped_domains()
             if parked:
                 logger.warning(
                     "startup frontier repair: parked %d pending URLs from capped domains",

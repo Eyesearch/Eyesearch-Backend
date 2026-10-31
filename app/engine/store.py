@@ -847,13 +847,18 @@ class IndexStore:
             "    AND (processed_at IS NULL OR processed_at <= now() + ?::interval)"
             "    AND domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id"
-            "      GROUP BY s.domain HAVING COUNT(*) >= ?"
+            "      GROUP BY s.domain HAVING COUNT(*) >= "
+            f"      ({_host_limit_sql('s.domain')})"
             "    )"
             f"{domain_clause}"
             "  ORDER BY COALESCE(processed_at, '1970-01-01 00:00:00') ASC"
             "  LIMIT ?"
             ")",
-            (f"-{int(cooldown_seconds)} seconds", int(self._settings.max_pages_per_domain), *domain_args, int(limit)),
+            (
+                f"-{int(cooldown_seconds)} seconds",
+                *domain_args,
+                int(limit),
+            ),
         )
         return result.rows_affected
 
@@ -878,10 +883,15 @@ class IndexStore:
             " OR last_error LIKE 'http_status:5%') "
             " AND domain NOT IN ("
             "   SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id"
-            "   GROUP BY s.domain HAVING COUNT(*) >= ?"
+            "   GROUP BY s.domain HAVING COUNT(*) >= "
+            f"   ({_host_limit_sql('s.domain')})"
             " )"
             " ORDER BY processed_at ASC LIMIT ?)",
-            (int(max_retries), f"-{int(cooldown_seconds)} seconds", int(self._settings.max_pages_per_domain), int(limit)),
+            (
+                int(max_retries),
+                f"-{int(cooldown_seconds)} seconds",
+                int(limit),
+            ),
         )
         if result.rows_affected:
             logger.info("re-armed %d transiently failed URLs", result.rows_affected)

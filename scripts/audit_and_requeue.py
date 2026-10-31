@@ -45,7 +45,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.engine.config import get_settings  # noqa: E402
 from app.engine.store import IndexStore  # noqa: E402
-from app.postgres import PostgresClient  # noqa: E402
+from app.postgres import PostgresClient
+
+
+def _frontier_module():
+    """The frontier, loaded on demand.
+
+    Importing it at module load would pull the agent layer in before the script
+    has read DATABASE_URL, which is the order the config expects.
+    """
+    from app.agents import load_agent
+
+    return load_agent("01_frontier_agent")  # noqa: E402
 
 # These were constants here, and they drifted: the ingestion agents moved to
 # settings while the audit kept asserting the old numbers. They are read from
@@ -138,6 +149,7 @@ class AuditReport:
 
 async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
     settings = get_settings()
+    frontier = _frontier_module()
     # Bind the thresholds to the live configuration rather than to the module
     # constants above, which exist only as defaults for a caller without settings.
     global TRUNCATED_THRESHOLD, THIN_WORD_COUNT
@@ -216,28 +228,24 @@ async def run(dsn: str, *, dry_run: bool, benchmark: bool) -> AuditReport:
                     tuple(chunk),
                 )
 
-        # -- 3. enforce the per-domain cap ------------------------------
-        cap = settings.max_pages_per_domain
-        excess = await client.execute(
-            "SELECT count(*) FROM ("
-            "  SELECT page_id, ROW_NUMBER() OVER ("
-            "    PARTITION BY site_id ORDER BY quality_score DESC, page_id DESC"
-            "  ) AS rn FROM pages WHERE site_id IS NOT NULL"
-            ") ranked WHERE rn > ?",
-            (cap,),
+        # -- 3. enforce each host's tier ceiling ------------------------
+        # A host is over its ceiling only relative to its own tier: 250 for a
+        # government portal, 50 for an institution, 5 for the general Indian
+        # web. A host with two or three pages is under its ceiling and is not
+        # touched — the ceiling is a stop, not a target to fill.
+        ranked = (
+            "SELECT p.page_id, p.site_id, s.domain, ROW_NUMBER() OVER ("
+            "  PARTITION BY p.site_id ORDER BY p.quality_score DESC, p.page_id DESC"
+            ") AS rn FROM pages p JOIN sites s ON s.site_id = p.site_id "
+            "WHERE p.site_id IS NOT NULL"
         )
+        excess_sql = (
+            f"SELECT page_id FROM ({ranked}) r WHERE r.rn > ({frontier.host_limit_sql('r.domain')})"
+        )
+        excess = await client.execute(f"SELECT count(*) FROM ({excess_sql}) over_ceiling")
         report.purged_over_cap = int(excess.scalar(0) or 0)
         if not dry_run and report.purged_over_cap:
-            await client.execute(
-                "DELETE FROM pages WHERE page_id IN ("
-                "  SELECT page_id FROM ("
-                "    SELECT page_id, ROW_NUMBER() OVER ("
-                "      PARTITION BY site_id ORDER BY quality_score DESC, page_id DESC"
-                "    ) AS rn FROM pages WHERE site_id IS NOT NULL"
-                "  ) ranked WHERE rn > ?"
-                ")",
-                (cap,),
-            )
+            await client.execute(f"DELETE FROM pages WHERE page_id IN ({excess_sql})")
 
         # -- 3b. contract breaches, attributed to the step that owns them --
         # Scanned before the brand backfill so the telemetry records what was

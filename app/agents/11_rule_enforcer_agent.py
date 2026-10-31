@@ -20,6 +20,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from app.agents import load_agent
 
+_host_limit_sql = load_agent("01_frontier_agent").host_limit_sql
+
 #: The ceilings, taken from the parser that owns them so a change lands in one
 #: place. The enforcer repairs rows written before the ceiling existed.
 _parser = load_agent("03_parser_agent")
@@ -89,14 +91,46 @@ class RuleEnforcerAgent:
         self._settings = settings
 
     async def enforce_page_cap(self, cap: int | None = None, *, dry_run: bool = False) -> tuple[int, int]:
-        """Drop the pages beyond each domain's cap.
+        """Drop the pages beyond each host's tier ceiling.
 
         Keeps the highest quality page of a domain, then the newest: a domain
-        that grew past the cap loses its weakest pages, not its best ones.
-        Returns (domains over cap, pages removed).
-        """
-        limit = int(cap if cap is not None else self._settings.max_pages_per_domain)
+        that grew past its ceiling loses its weakest pages, not its best ones.
+        A domain under its ceiling is not touched at all — the ceiling is a stop,
+        not a target, so a host with three good pages stays at three.
 
+        `cap` is an explicit override for a caller that wants one uniform number.
+        Returns (domains over their ceiling, pages removed).
+        """
+        if cap is not None:
+            return await self._enforce_uniform_cap(int(cap), dry_run=dry_run)
+
+        ceiling = _host_limit_sql("s.domain")
+        ranked = (
+            "SELECT p.page_id, p.site_id, s.domain, ROW_NUMBER() OVER ("
+            "  PARTITION BY p.site_id ORDER BY p.quality_score DESC, p.page_id DESC"
+            ") AS rn FROM pages p JOIN sites s ON s.site_id = p.site_id "
+            "WHERE p.site_id IS NOT NULL"
+        )
+        excess_sql = f"SELECT page_id FROM ({ranked}) r WHERE r.rn > ({_host_limit_sql('r.domain')})"
+
+        domains = await self._client.execute(
+            "SELECT COUNT(*) FROM ("
+            "  SELECT s.site_id FROM pages p JOIN sites s ON s.site_id = p.site_id "
+            f"  GROUP BY s.site_id, s.domain HAVING COUNT(*) > ({ceiling})"
+            ") over_ceiling"
+        )
+        over = int(domains.scalar(0) or 0)
+
+        counted = await self._client.execute(f"SELECT COUNT(*) FROM ({excess_sql}) excess")
+        excess = int(counted.scalar(0) or 0)
+
+        if excess and not dry_run:
+            await self._client.execute(f"DELETE FROM pages WHERE page_id IN ({excess_sql})")
+
+        return over, excess
+
+    async def _enforce_uniform_cap(self, limit: int, *, dry_run: bool) -> tuple[int, int]:
+        """The older, single-number behaviour, kept for an explicit override."""
         over = await self._client.execute(
             "SELECT COUNT(*) FROM (SELECT site_id FROM pages "
             "GROUP BY site_id HAVING COUNT(*) > ?) over_cap",

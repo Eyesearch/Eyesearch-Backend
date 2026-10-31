@@ -45,26 +45,26 @@ def test_the_auditor_reads_the_configured_floor():
 
 
 @pytest.mark.asyncio
-async def test_the_enforcer_uses_the_configured_page_cap(client):
-    """Change the cap and the purge follows it, with no code change."""
+async def test_the_enforcer_uses_each_host_tier_ceiling(client):
+    """The ceiling follows the host's tier, with no per-host code."""
     from app.engine.store import IndexStore
 
     index = IndexStore(client, settings(page_body_char_ceiling=0))
     await index.persist_batch(
         [
             PageDocument(
-                url=f"https://a.gov.in/{i}", domain="a.gov.in", title=f"Page {i}",
+                url=f"https://a.in/{i}", domain="a.in", title=f"Page {i}",
                 description="d", body_text=BODY, digest=f"sst-{i}", brand_name="A",
             )
-            for i in range(5)
+            for i in range(6)
         ]
     )
 
-    strict = RuleEnforcerAgent(client, settings(max_pages_per_domain=2))
+    strict = RuleEnforcerAgent(client, settings())
     domains, purged = await strict.enforce_page_cap(dry_run=True)
 
     assert domains == 1
-    assert purged == 3
+    assert purged == 1   # six pages against a ceiling of five
 
 
 @pytest.mark.asyncio
