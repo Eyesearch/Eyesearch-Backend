@@ -17,6 +17,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY scripts ./scripts
 
+# The test suite and its configuration ship in the image, so
+# `docker compose exec backend pytest` runs the same tests the repository
+# carries. Leaving them out meant the container could only run the app, and the
+# suite had to be trusted from a developer's machine instead.
+COPY pytest.ini ./pytest.ini
+COPY tests ./tests
+
 # Run as a normal user: nothing here needs root, and a crawler parses untrusted
 # HTML, so the blast radius of a parser bug should not be uid 0.
 RUN useradd --create-home --uid 10001 appuser \

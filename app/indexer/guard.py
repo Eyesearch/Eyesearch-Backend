@@ -56,6 +56,11 @@ class StorageState:
         }
 
 
+#: Logged when the ceiling is reached, so an operator sees the reason a crawl
+#: stopped rather than inferring it from a queue that stopped draining.
+CEILING_ALERT = "[STORAGE_CEILING_HIT] database disk usage reached the 4.5 GB limit"
+
+
 class StorageGuard:
     """Counts pages and sites at most once per TTL, and fails closed."""
 
@@ -64,10 +69,16 @@ class StorageGuard:
         client: LibsqlClient,
         *,
         limit: int = 300_000,
+        ceiling_bytes: int = 4_831_838_208,
         ttl_seconds: float = 60.0,
         clock=time.monotonic,
     ) -> None:
         self._client = client
+        #: The disk ceiling, 4.5 GB. Separate from the page limit because they
+        #: fail differently: a runaway crawl hits the page count, fat rows hit
+        #: the bytes.
+        self._ceiling_bytes = int(ceiling_bytes)
+        self._bytes = 0
         self._limit = limit
         self._ttl = ttl_seconds
         self._clock = clock
@@ -126,11 +137,16 @@ class StorageGuard:
                     [
                         ("SELECT COUNT(*) FROM pages", ()),
                         ("SELECT COUNT(*) FROM sites", ()),
+                        # The page count is a proxy. This is the actual disk the
+                        # database occupies, indexes and queue included, and it
+                        # is what the 4.5 GB ceiling is really about.
+                        ("SELECT pg_database_size(current_database())", ()),
                     ]
                 )
                 self._queries += 1
                 pages = int(results[0].scalar(0) or 0)
                 sites = int(results[1].scalar(0) or 0)
+                self._bytes = int(results[2].scalar(0) or 0)
             except (LibsqlError, ValueError, TypeError, IndexError) as error:
                 # Fail closed: an unknown page count is not permission to write.
                 state = StorageState(
@@ -146,7 +162,11 @@ class StorageGuard:
                 logger.error("storage guard failed closed: %s", error)
                 return state
 
-            over = pages >= self._limit
+            # Either ceiling stops writes. The page count catches a runaway
+            # crawl; the byte count catches fat rows — 2 KB bodies and GIN
+            # indexes fill a disk long before the page limit is reached.
+            over_bytes = self._bytes >= self._ceiling_bytes
+            over = pages >= self._limit or over_bytes
             state = StorageState(
                 pages=pages,
                 sites=sites,
@@ -157,7 +177,12 @@ class StorageGuard:
             )
             self._cached = state
             self._cached_at = now
-            if over:
+            if over_bytes:
+                logger.critical(
+                    "%s (%.2f GB of %.2f GB)", CEILING_ALERT,
+                    self._bytes / 1024**3, self._ceiling_bytes / 1024**3,
+                )
+            elif over:
                 logger.warning(STORAGE_WARNING)
             return state
 

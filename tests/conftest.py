@@ -12,6 +12,9 @@ fixture drops the `public` schema before every test.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit, urlunsplit
+
+import psycopg
 
 import pytest
 import pytest_asyncio
@@ -43,12 +46,58 @@ def settings() -> Settings:
     )
 
 
-#: Where the test database lives. Defaults to the local socket cluster the
-#: migration was developed against, so `pytest` works without extra setup there.
+#: Where the test database lives.
+#:
+#: The default is the PostgreSQL service that `docker compose` starts, so a fresh
+#: checkout runs `pytest` inside the container with no environment at all. An
+#: earlier default pointed at a developer's local socket, which meant the suite
+#: only ran on the machine it was written on — and failed everywhere else with a
+#: connection error that looked like a code fault.
+#:
+#: Set TEST_DATABASE_URL to point somewhere else; a Unix socket path works as
+#: long as it is passed explicitly.
 TEST_DSN = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://postgres@/eyesearch_test?host=/scratch/work&port=55432",
+    "postgresql://eyesearch:SecurePass_2026_Key@127.0.0.1:5432/eyesearch_test",
 )
+
+
+def _maintenance_dsn(dsn: str) -> str:
+    """The same server, connected to the maintenance database.
+
+    Needed to create `eyesearch_test` before anything can connect to it.
+    """
+    parts = urlsplit(dsn)
+    return urlunsplit(parts._replace(path="/postgres"))
+
+
+def ensure_test_database(dsn: str) -> None:
+    """Create the test database if it is not there yet.
+
+    Autocommit is required: PostgreSQL refuses CREATE DATABASE inside a
+    transaction block.
+    """
+    name = urlsplit(dsn).path.lstrip("/")
+    if not name:
+        return
+    try:
+        connection = psycopg.connect(_maintenance_dsn(dsn), autocommit=True, connect_timeout=5)
+    except Exception:
+        # No server to talk to. The test that needs one will report that far more
+        # clearly than this would.
+        return
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            if cursor.fetchone() is None:
+                cursor.execute(f'CREATE DATABASE "{name}"')
+    except Exception:
+        pass
+    finally:
+        connection.close()
+
+
+ensure_test_database(TEST_DSN)
 
 
 @pytest_asyncio.fixture

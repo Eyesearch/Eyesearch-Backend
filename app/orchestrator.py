@@ -186,6 +186,7 @@ class Orchestrator:
         self._guard = StorageGuard(
             client,
             limit=self._settings.effective_storage_page_limit,
+            ceiling_bytes=self._settings.storage_ceiling_bytes,
             ttl_seconds=self._settings.storage_count_ttl_seconds,
         )
         self._fetcher = FetcherAgent(self._settings, transport=transport)

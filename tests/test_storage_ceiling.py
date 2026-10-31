@@ -58,3 +58,79 @@ def test_the_guard_uses_the_derived_limit(client):
         import asyncio
 
         asyncio.get_event_loop().run_until_complete(orchestrator.close())
+
+
+# ---------------------------------------------------------------------------
+# The doctor reports the same ceiling the guard enforces
+# ---------------------------------------------------------------------------
+
+from app.agents import load_agent  # noqa: E402
+import pytest  # noqa: E402
+
+doctor = load_agent("15_db_doctor_agent")
+
+#: 4.5 GB, written out so the figure in the brief is the figure in the code.
+FOUR_AND_A_HALF_GB = 4_831_838_208
+
+
+def test_the_configured_ceiling_in_bytes():
+    settings = Settings(_env_file=None, environment="test")
+
+    assert settings.storage_ceiling_bytes == FOUR_AND_A_HALF_GB
+    assert round(settings.storage_ceiling_bytes / 1024**3, 2) == 4.5
+
+
+@pytest.mark.asyncio
+async def test_the_doctor_reports_the_database_size(client):
+    agent = doctor.DbDoctorAgent(client, Settings(_env_file=None, environment="test"))
+
+    report = await agent.storage_check(FOUR_AND_A_HALF_GB)
+
+    assert report["database_bytes"] > 0
+    assert report["over_ceiling"] is False
+    assert report["ceiling_bytes"] == FOUR_AND_A_HALF_GB
+
+
+@pytest.mark.asyncio
+async def test_the_doctor_flags_a_breach(client):
+    """A ceiling of one byte is certainly exceeded — the flag has to work."""
+    agent = doctor.DbDoctorAgent(client, Settings(_env_file=None, environment="test"))
+
+    report = await agent.storage_check(1)
+
+    assert report["over_ceiling"] is True
+    assert report["ratio"] > 1
+
+
+@pytest.mark.asyncio
+async def test_a_doctor_run_reports_the_size_in_its_notes(client):
+    agent = doctor.DbDoctorAgent(client, Settings(_env_file=None, environment="test"))
+
+    report = await agent.run(dry_run=True)
+
+    assert any("of 4608 MB" in note for note in report.notes), report.notes
+
+
+@pytest.mark.asyncio
+async def test_the_guard_pauses_on_the_byte_ceiling_not_only_the_page_count(client):
+    """A database over 4.5 GB stops writes even with pages to spare."""
+    from app.indexer.guard import StorageGuard
+
+    guard = StorageGuard(client, limit=10_000_000, ceiling_bytes=1)
+
+    state = await guard.storage_state()
+
+    assert state.paused is True
+    assert await guard.can_write() is False
+
+
+@pytest.mark.asyncio
+async def test_the_guard_allows_writes_under_both_ceilings(client):
+    from app.indexer.guard import StorageGuard
+
+    guard = StorageGuard(client, limit=10_000_000, ceiling_bytes=FOUR_AND_A_HALF_GB)
+
+    state = await guard.storage_state()
+
+    assert state.paused is False
+    assert await guard.can_write() is True

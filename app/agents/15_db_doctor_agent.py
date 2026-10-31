@@ -13,6 +13,8 @@ the supervisor, and each step is bounded.
 from __future__ import annotations
 
 import logging
+
+from app.engine.config import get_settings
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -76,8 +78,9 @@ def select_victims(rows, *, own_pid: int, hung_ms: int = HUNG_QUERY_MS) -> list[
 class DbDoctorAgent:
     """Watch the database and mend what it can."""
 
-    def __init__(self, client, *, hung_ms: int = HUNG_QUERY_MS) -> None:
+    def __init__(self, client, settings=None, *, hung_ms: int = HUNG_QUERY_MS) -> None:
         self._client = client
+        self._settings = settings or get_settings()
         self.hung_ms = int(hung_ms)
 
     async def own_pid(self) -> int:
@@ -113,6 +116,32 @@ class DbDoctorAgent:
         )
         return [str(row[0]) for row in result.rows]
 
+    async def database_size_bytes(self) -> int:
+        """How much disk the current database occupies, indexes included."""
+        result = await self._client.execute("SELECT pg_database_size(current_database())")
+        return int(result.scalar(0) or 0)
+
+    async def storage_check(self, ceiling_bytes: int) -> dict:
+        """Whether the database is still inside its ceiling.
+
+        The guard blocks writes when the ceiling is hit; this reports it, so an
+        operator can see the number rather than infer it from a stalled crawl.
+        """
+        size = await self.database_size_bytes()
+        over = size > ceiling_bytes
+        report = {
+            "database_bytes": size,
+            "ceiling_bytes": ceiling_bytes,
+            "ratio": round(size / ceiling_bytes, 4) if ceiling_bytes else 0.0,
+            "over_ceiling": over,
+        }
+        if over:
+            logger.critical(
+                "[STORAGE_CEILING_HIT] database is %.2f GB, above the %.2f GB ceiling",
+                size / 1024**3, ceiling_bytes / 1024**3,
+            )
+        return report
+
     async def run(self, *, dry_run: bool = False) -> DoctorReport:
         report = DoctorReport()
         try:
@@ -121,6 +150,17 @@ class DbDoctorAgent:
             report.hung = select_victims(rows, own_pid=pid, hung_ms=self.hung_ms)
             if report.hung and not dry_run:
                 report.terminated = await self.terminate(report.hung)
+
+            # The ceiling the guard enforces, reported here so a run shows the
+            # number rather than only the writes it blocked.
+            try:
+                size = await self.storage_check(self._settings.storage_ceiling_bytes)
+                report.notes.append(
+                    f"database {size['database_bytes'] / 1024**2:.0f} MB "
+                    f"of {size['ceiling_bytes'] / 1024**2:.0f} MB"
+                )
+            except Exception as error:  # noqa: BLE001 - a doctor run must not die
+                report.notes.append(f"storage check unavailable: {error}")
 
             tables = await self.stale_tables()
             if tables and not dry_run:
