@@ -158,3 +158,48 @@ async def test_an_explicit_attempt_count_still_retries():
         await fetcher.aclose()
 
     assert calls["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Where the cut lands
+# ---------------------------------------------------------------------------
+
+
+def test_a_long_run_of_sentences_ends_on_a_full_stop():
+    """A full stop late in the window reads better than a filled-to-the-brim
+    clause that stops mid-thought."""
+    text = "The institute offers doctoral programmes in many departments. " * 60
+    body = truncate_body(text)
+
+    assert len(body) <= BODY_CHAR_CAP
+    assert body.endswith(".")
+    assert not body.endswith("...")
+
+
+def test_a_word_is_never_split():
+    """The bug the audit saw: "Post Docto", "Innovation Organis"."""
+    text = "word " * 500
+    body = truncate_body(text)
+
+    stripped = body[:-1] if body.endswith("…") else body
+    assert stripped.endswith("word")
+    assert len(body) <= BODY_CHAR_CAP
+
+
+def test_the_ellipsis_counts_against_the_cap():
+    body = truncate_body("word " * 500)
+
+    assert len(body) <= BODY_CHAR_CAP
+    assert body.endswith("…")
+
+
+def test_a_single_unbroken_token_is_cut_at_the_cap():
+    """No boundary to find, so it is cut — with the ellipsis still counted."""
+    body = truncate_body("x" * 5000)
+
+    assert len(body) <= BODY_CHAR_CAP
+    assert body.rstrip("…") == "x" * (len(body) - 1)
+
+
+def test_the_cap_is_two_kilobytes_not_five_hundred():
+    assert BODY_CHAR_CAP == 2000

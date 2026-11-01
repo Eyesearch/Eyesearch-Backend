@@ -187,20 +187,38 @@ def build_description(title: str, meta_description: str, body_text: str) -> str:
     return (snippet or meta or collapse(title))[:DESCRIPTION_CHAR_CAP]
 
 
-def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
-    """Cut `text` to at most `cap` characters at a word boundary.
+#: A sentence ending this far into the window is preferred over a word cut.
+#: Ending on a full stop two-thirds of the way in reads better than filling the
+#: last few characters with a clause that stops mid-thought.
+SENTENCE_CUT_RATIO = 0.7
 
-    The ellipsis counts against the cap, so the returned string is never
-    longer than `cap`. A single unbroken token longer than the cap is cut at
-    the cap rather than being returned whole.
+
+def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
+    """Cut `text` to at most `cap` characters, preferring a sentence end.
+
+    Three outcomes, in order of preference: the whole text if it fits; a cut at
+    the last full stop that falls in the final third; otherwise a cut at a word
+    boundary with an ellipsis. A word is never split — "Post Docto" and
+    "Innovation Organis" are what a raw slice produces, and they are worse than
+    a shorter fragment.
+
+    The ellipsis counts against the cap, so the returned string is never longer
+    than `cap`.
     """
     cleaned = collapse(text)
     if len(cleaned) <= cap:
         return cleaned
 
     window = cleaned[: max(1, cap - len(ELLIPSIS))]
+
+    # A full stop well into the window ends a thought; take it and stop.
+    sentence_end = window.rfind(". ")
+    if sentence_end > int(cap * SENTENCE_CUT_RATIO):
+        return window[: sentence_end + 1].rstrip()
+
     boundary = window.rsplit(" ", 1)[0].rstrip(" ,;:-—")
     if not boundary:
+        # One unbroken token longer than the cap: there is no boundary to find.
         boundary = window
     return boundary + ELLIPSIS
 
