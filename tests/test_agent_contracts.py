@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import glob
 import os
+from importlib import import_module
 
 import pytest
 
@@ -12,10 +13,33 @@ from app.agents import load_agent
 
 
 def agent_files() -> list[str]:
-    return sorted(glob.glob(os.path.join(os.path.dirname(__file__), "..", "app", "agents", "[0-9]*.py")))
+    """Every agent module, wherever it lives.
+
+    The external fleet moved into `app/agents/federated/`, so a glob over the
+    numbered files alone counts 44 and calls six agents missing. They are not
+    missing; they are behind the air gap.
+    """
+    agents = os.path.join(os.path.dirname(__file__), "..", "app", "agents")
+    return sorted(
+        glob.glob(os.path.join(agents, "[0-9]*.py"))
+        + [path for path in glob.glob(os.path.join(agents, "federated", "*.py"))
+           if not path.endswith("__init__.py")]
+    )
+
+
+def module_name(path: str) -> str:
+    """The importable name of an agent file.
+
+    A numbered local agent is `app.agents.44_x`; a federated one is
+    `app.agents.federated.source_sanitizer`. Deriving it from the path keeps the
+    test honest when the layout changes again.
+    """
+    relative = os.path.relpath(path, os.path.join(os.path.dirname(__file__), ".."))
+    return relative[:-3].replace(os.sep, ".")
 
 
 def test_there_are_fifty_agents():
+    # 44 numbered local agents + 6 federated.
     assert len(agent_files()) == 50
 
 
@@ -34,8 +58,7 @@ def test_every_agent_defines_something(path):
 
 @pytest.mark.parametrize("path", agent_files(), ids=os.path.basename)
 def test_every_agent_imports_cleanly(path):
-    name = os.path.basename(path)[:-3]
-    assert load_agent(name) is not None
+    assert import_module(module_name(path)) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +70,7 @@ def test_every_agent_declares_a_contract():
     """Every one of the fifty states its rules as data, reports to the
     supervisor, and can be audited."""
     for path in agent_files():
-        module = load_agent(os.path.basename(path)[:-3])
+        module = import_module(module_name(path))
         assert hasattr(module, "CONTRACT"), f"{path} has no CONTRACT"
         assert module.CONTRACT["reports_to"] == "14_king_orchestrator_agent"
         assert module.CONTRACT["rules"], f"{path} declares no rules"
@@ -58,7 +81,7 @@ def test_every_agent_audits_clean():
     that breaks their own rule."""
     failures = {}
     for path in agent_files():
-        module = load_agent(os.path.basename(path)[:-3])
+        module = import_module(module_name(path))
         report = module.audit_contract()
         if not report.ok:
             failures[report.agent] = [rule.name for rule in report.breaches]
@@ -68,7 +91,7 @@ def test_every_agent_audits_clean():
 
 def test_every_agent_exposes_telemetry_to_the_supervisor():
     for path in agent_files():
-        module = load_agent(os.path.basename(path)[:-3])
+        module = import_module(module_name(path))
         payload = module.telemetry()
         assert payload["reports_to"] == "14_king_orchestrator_agent"
         assert "breaches" in payload

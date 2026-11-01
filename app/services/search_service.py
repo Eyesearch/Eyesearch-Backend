@@ -14,6 +14,7 @@ snippets passed off as our own extract.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import re
@@ -412,6 +413,33 @@ def to_result(hit: SearchHit) -> SearchResult:
     )
 
 
+class FederatedFallback:
+    """The external fleet, wrapped so a failure is a shrug rather than a 500.
+
+    Everything here is ephemeral. Results are dataclasses handed straight to the
+    caller; nothing is written to the store, the queue or the frontier. That is
+    the air gap, enforced at the only place a search request could cross it.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    async def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        from app.agents.federated import FederatedHorizonAgent, FreeKnowledgeCourierAgent
+
+        horizon = FederatedHorizonAgent(
+            knowledge=FreeKnowledgeCourierAgent(),
+            settings=self._settings,
+        )
+        result = await horizon.search(query, limit=limit)
+        return [card for card in result.cards or []][:limit]
+
+
+#: How long the external fleet gets before the fallback gives up. A reader who
+#: searched and found nothing should see an empty page quickly, not a spinner.
+FEDERATION_TIMEOUT_MS = 800
+
+
 class SearchService:
     """Search, suggest and retrieve over the index."""
 
@@ -424,6 +452,7 @@ class SearchService:
         self._store = store
         self._settings = settings or get_settings()
         self.cache = cache if cache is not None else SearchCache()
+        self._federation = FederatedFallback(self._settings)
 
     async def search(
         self,
@@ -461,6 +490,12 @@ class SearchService:
         hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
         results = [to_result(hit).as_dict() for hit in hits]
 
+        # Only when the index has nothing. Federation is a fallback, not a
+        # second opinion: mixing external results into a page that already has
+        # local ones would let a guess outrank a page we actually crawled.
+        if not results and page_number == 1:
+            results = await self._federated_fallback(query, size)
+
         if highlight:
             tokens = fts_tokens(query)
             for result in results:
@@ -483,6 +518,31 @@ class SearchService:
         }
         self.cache.set(key, payload)
         return payload
+
+    async def _federated_fallback(self, query: str, size: int) -> list[dict[str, Any]]:
+        """Ask the external fleet, with a hard ceiling on how long it may take.
+
+        A fallback that can hang is worse than no fallback: the reader waits for
+        a page that was already empty. 800 ms is enough for a provider that is
+        going to answer and short enough that one that is not costs a blink.
+        """
+        if not self._settings.federation_enabled:
+            return []
+
+        try:
+            cards = await asyncio.wait_for(
+                self._federation.search(query, limit=size),
+                timeout=FEDERATION_TIMEOUT_MS / 1000.0,
+            )
+        except asyncio.TimeoutError:
+            logger.info("federation timed out after %d ms", FEDERATION_TIMEOUT_MS)
+            return []
+        except Exception as error:  # noqa: BLE001 - a fallback must never 500
+            logger.warning("federation failed: %s", error)
+            return []
+
+        # Ephemeral by construction: `cards` are dataclasses, never rows.
+        return [card.as_dict() for card in cards or []][:size]
 
     async def search_flat(
         self,

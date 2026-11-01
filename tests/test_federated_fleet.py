@@ -169,10 +169,15 @@ def test_an_external_card_is_forced_into_our_shape():
     )
 
     assert card.url == "https://karnataka.gov.in/x"
-    # The ceiling the index uses, not a second number of its own.
-    assert len(card.snippet) <= 200
+    # The preview is the short field; the full one is what "More" reveals.
+    assert len(card.snippet_short) <= 180
+    assert len(card.snippet_full) <= 500
+    assert card.has_more is True
+    assert card.snippet == card.snippet_short
     assert "|" not in card.title
-    assert card.brand == "Karnataka"
+    # The tail is "Official Website", which names nothing, so the domain
+    # decides — and the derived name keeps the suffix so it reads as a site.
+    assert card.brand == "Karnataka Gov"
 
 
 # ---------------------------------------------------------------------------
