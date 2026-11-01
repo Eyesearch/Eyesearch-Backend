@@ -49,7 +49,14 @@ async def test_the_crawl_loop_survives_a_refill_failure(store, client):
 
     task = asyncio.create_task(orchestrator.run_forever())
     try:
-        await asyncio.sleep(0.2)
+        # Polled rather than a fixed sleep. run_forever's first round includes
+        # pool acquisition, which takes longer on a real PostgreSQL connection
+        # than the 0.2s a laptop needs — a fixed wait tests the machine, not the
+        # code. Bounded, so a genuine hang still fails.
+        for _ in range(40):
+            if calls["n"] >= 1:
+                break
+            await asyncio.sleep(0.05)
         assert not task.done(), "the loop must keep running after a refill error"
         assert calls["n"] >= 1
     finally:
@@ -227,5 +234,40 @@ def test_a_normal_boot_initialises_the_database(monkeypatch, tmp_path):
             assert body["db"] == "up", body
             assert client.get("/ready").status_code == 200
             assert main_module.app.state.database_ready is True
+    finally:
+        reset_settings_cache()
+
+
+def test_a_client_that_answers_does_not_make_a_failed_boot_look_healthy(monkeypatch, tmp_path):
+    """The distinction the endpoints got wrong.
+
+    A database the app failed to initialise can still answer a query. Reporting
+    "up" from that is how a broken deploy passes its healthcheck: the schema is
+    missing, and every search fails while the probe stays green.
+    """
+    from fastapi.testclient import TestClient
+
+    import app.main as main_module
+    from app.engine.config import reset_settings_cache
+
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ALLOW_LOCAL_DB", "true")
+    monkeypatch.setenv("LOCAL_DB_PATH", str(tmp_path / "answers.db"))
+    monkeypatch.setenv("CRAWLER_ENABLED", "false")
+    monkeypatch.setenv("REVALIDATION_ENABLED", "false")
+    reset_settings_cache()
+
+    async def boom(client, settings):
+        raise RuntimeError("schema not applied")
+
+    monkeypatch.setattr(main_module, "_bootstrap_database", boom)
+
+    try:
+        with TestClient(main_module.app) as client:
+            live = client.get("/health")
+            assert live.status_code == 200
+            assert live.json()["db"] == "down"
+            assert live.json()["status"] == "degraded"
+            assert client.get("/ready").status_code == 503
     finally:
         reset_settings_cache()

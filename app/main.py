@@ -365,6 +365,14 @@ async def health_payload(request: Request) -> dict[str, Any]:
         "workers": [],
     }
 
+    # Bootstrap success is the authority, not whether a query happens to work.
+    # A client that can still answer does not mean the schema was applied: the
+    # app can talk to a database it failed to initialise, and reporting "up"
+    # there hides a broken deploy behind a green healthcheck.
+    if not getattr(request.app.state, "database_ready", False):
+        payload.update({"status": "degraded", "db": "down"})
+        return payload
+
     try:
         client = getattr(request.app.state, "client", None)
         if client is None:
