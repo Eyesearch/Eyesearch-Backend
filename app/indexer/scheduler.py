@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.agents import load_agent
+from app.indexer.maintenance import sweep_and_requeue_legacy_pages
 from app.engine.config import Settings, get_settings
 from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
@@ -204,12 +205,30 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
     since_report = 0.0
     since_snapshot = 0.0
     autosuggest_built = False
+    # Self-healing runs on its own clock: the repair it queues is a re-crawl,
+    # and doing it every maintenance tick would keep the frontier permanently
+    # full of pages that have not had a chance to be fetched yet.
+    since_heal = 0.0
+    heal_every = max(3600.0, interval * 20)
 
     while True:
         try:
             report = await janitor.sweep(orchestrator.store.client)
             if report.collected:
                 logger.info("memory janitor: %s", report.as_dict())
+
+            # Rows written before the parser improved are short or open with
+            # navigation text. Nothing re-reads them on its own, so this is what
+            # notices and queues them for a clean fetch.
+            since_heal += interval
+            if since_heal >= heal_every:
+                since_heal = 0.0
+                try:
+                    healed = await sweep_and_requeue_legacy_pages(orchestrator.store.client)
+                    if healed:
+                        logger.info("self-heal: re-queued %d legacy pages", healed)
+                except Exception as error:  # noqa: BLE001 - never kill the loop
+                    logger.warning("self-heal sweep failed: %s", error)
 
             if not autosuggest_built:
                 # Built once from the index, then kept: the trie answers

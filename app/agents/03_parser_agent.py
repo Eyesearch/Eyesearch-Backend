@@ -104,6 +104,26 @@ OVERLAY_SELECTORS: tuple[str, ...] = (
     ".cookie-banner",
 )
 
+#: Phrases a site puts above its content for screen readers and crawlers:
+#: "Skip to main content", "Screen reader access", "Follow us on Twitter...".
+#: They are the first thing in the body and the last thing a reader wants.
+LEADING_BOILERPLATE = re.compile(
+    r"^(?:"
+    r"skip\s+to\s+(?:main\s+)?(?:content|navigation)\s*|"
+    r"screen\s+reader\s+access\s*|"
+    r"(?:follow|like)\s+us\s+on\s+[^.]{0,80}\.\s*|"
+    r"a-\s*a\s*a\+\s*|"
+    r"font\s+size\s*:?\s*[a-]\+?\s*|"
+    r"home\s*/\s*about\s+us\s*/\s*contact\s*/?\s*|"
+    r"jump\s+to\s+(?:main\s+)?content\s*"
+    r")+",
+    re.IGNORECASE,
+)
+
+#: How much text a <main> or <article> must hold before it is trusted as the
+#: content and the rest of the page is ignored.
+CONTENT_CONTAINER_MIN_CHARS = 100
+
 #: Decorative symbols, media controls and arrows. Stripped from text because
 #: "⏪ ⏸️ ▶️ ⏩" is a player, not a description.
 #:
@@ -135,6 +155,31 @@ def collapse(text: str) -> str:
     cleaned = CONTROL_CHARS.sub(" ", (text or "").replace("\u00a0", " "))
     cleaned = EMOJI_AND_SYMBOLS.sub(" ", cleaned)
     return WHITESPACE.sub(" ", cleaned).strip()
+
+
+def clean_leading_boilerplate(text: str) -> str:
+    """Drop the accessibility and navigation phrases a page opens with.
+
+    Only the front is touched. The same words later in the body are prose — a
+    notice that says "follow us on Twitter" in a paragraph is content, and
+    stripping it there would be vandalism.
+    """
+    return LEADING_BOILERPLATE.sub("", (text or "").lstrip()).strip()
+
+
+def content_container(soup):
+    """The element most likely to hold the page's prose.
+
+    A <main> or <article> with real text is the publisher telling us where the
+    content is. Without one, the body is the best guess. The length floor stops
+    an empty <article> wrapper — common on templated sites — from winning over a
+    body that actually has something in it.
+    """
+    for tag in ("main", "article"):
+        for element in soup.find_all(tag):
+            if len(collapse(element.get_text(" "))) >= CONTENT_CONTAINER_MIN_CHARS:
+                return element
+    return soup.body or soup
 
 
 def snippet_from(text: str, limit: int = DESCRIPTION_SNIPPET_CHARS) -> str:
@@ -284,8 +329,10 @@ class ParserAgent:
         # Read the body only: `soup.get_text()` also returns the contents of
         # <head>, so the keyword-stuffed <title> and every <meta> description
         # ended up at the front of body_text and showed up in snippets.
-        body_source = soup.body or soup
-        body_text = truncate_body(body_source.get_text(" "), self.body_char_cap)
+        body_source = content_container(soup)
+        body_text = truncate_body(
+            clean_leading_boilerplate(body_source.get_text(" ")), self.body_char_cap
+        )
         description = build_description(title, self._description(soup), body_text)
         links = self.extract_links(soup, url)
         action_title = action_title_from(
