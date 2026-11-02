@@ -153,6 +153,15 @@ class Settings(BaseSettings):
     #: crawling; defaulting to on means a fresh deploy starts fetching before
     #: anyone has decided it should, which is the expensive way to find out.
     crawler_enabled: bool = False
+
+    #: Repair mode. Fresh discovery is paused and the frontier is left to drain
+    #: down to the rows the self-heal sweep queued — the pages already in the
+    #: index that were stored short or with a navigation preamble.
+    #:
+    #: It is a mode rather than a one-off because the repair *is* a crawl: those
+    #: pages have to be fetched again, and while new links keep arriving the
+    #: repair rows compete with them and never finish.
+    crawler_drain_mode: bool = False
     #: Throughput is (batch_size / per-batch database floor), so this scales the
     #: crawl directly. It is also the memory ceiling: the fetcher holds every
     #: body in a batch before parsing, so peak ~= batch_size x max_body_bytes.
