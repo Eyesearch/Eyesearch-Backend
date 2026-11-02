@@ -143,6 +143,9 @@ class BatchOutcome:
     skipped: int = 0
     discovered: int = 0
     harvested: int = 0
+    #: Links found on a parsed page and deliberately not queued, because the
+    #: crawler is draining the repair backlog instead of growing the frontier.
+    drain_dropped: int = 0
     sitemap_domains_scheduled: int = 0
     paused: bool = False
     skip_reasons: dict[str, int] = field(default_factory=dict)
@@ -441,6 +444,14 @@ class Orchestrator:
                 outcome.paused = index_outcome.paused
                 logger.warning("batch not persisted: %s", index_outcome.reason)
 
+        # Drain mode: the frontier is being emptied on purpose, so a parsed page
+        # contributes nothing. Its links are dropped rather than queued — that is
+        # the whole point, and it is why the repair rows get fetched instead of
+        # competing with new discovery for the same single crawl slot.
+        if self._settings.crawler_drain_mode and discovered:
+            outcome.drain_dropped += len(discovered)
+            discovered = []
+
         if discovered and not outcome.paused:
             # Do not grow the frontier with URLs whose domain is already full.
             discovered = [
@@ -496,6 +507,10 @@ class Orchestrator:
 
     def _schedule_sitemap_harvest(self, domains: Sequence[str]) -> None:
         """Schedule sitemap work without making page indexing wait for it."""
+        if self._settings.crawler_drain_mode:
+            # A sitemap is the largest source of new URLs there is. Reading one
+            # while draining would refill the frontier we are trying to empty.
+            return
         self._pending_sitemap_domains.update(domain for domain in domains if domain)
         task = self._sitemap_harvest_task
         if task is None or task.done():
