@@ -168,13 +168,15 @@ def test_an_external_card_is_forced_into_our_shape():
     card = agent.card(
         title="District Health Notifications | Some Site | Official Website",
         url="https://karnataka.gov.in/x?utm_source=ddg&ref=abc",
-        snippet="y" * 300,
+        # Longer than the preview, so "More" has something to reveal. A source
+        # of exactly 300 characters has nothing beyond a 300-character preview.
+        snippet="word " * 200,
     )
 
     assert card.url == "https://karnataka.gov.in/x"
     # The preview is the short field; the full one is what "More" reveals.
-    assert len(card.snippet_short) <= 180
-    assert len(card.snippet_full) <= 500
+    assert len(card.snippet_short) <= 300
+    assert len(card.snippet_full) <= 600
     assert card.has_more is True
     assert card.snippet == card.snippet_short
     assert "|" not in card.title
