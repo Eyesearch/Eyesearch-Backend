@@ -8,7 +8,11 @@
 local.db*
 
 # Not needed at runtime.
-tests/
+#
+# `tests/` is NOT ignored. The image ships the suite on purpose: the deployment
+# check is `docker compose exec backend pytest`, and an image without the tests
+# cannot answer the one question it is most often asked. Excluding it here while
+# the Dockerfile copies it is what broke the build.
 .git/
 .github/
 __pycache__/
