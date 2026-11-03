@@ -76,9 +76,53 @@ async def sweep_and_requeue_legacy_pages(client, *, dry_run: bool = False) -> in
     return queued
 
 
+#: How many duplicate rows one sweep may retire. The statement is bounded so a
+#: backlog built up over days cannot lock the queue for minutes in one go; the
+#: next pass takes the next chunk.
+SWEEP_CHUNK = 5000
+
+
+async def purge_indexed_duplicates(client, *, dry_run: bool = False, chunk: int = SWEEP_CHUNK) -> int:
+    """Gate three: retire pending rows whose URL the index already has.
+
+    The first two gates stop new duplicates being made and stop existing ones
+    costing a fetch. This is the one that clears a backlog — the four thousand
+    rows that had built up before either gate existed.
+
+    Priority 0 is exempt. It marks a deliberate re-fetch — a repair, or a re-arm
+    for freshness — and those rows are in `pages` by definition. Retiring them
+    would silently end re-crawling.
+    """
+    candidates = (
+        "SELECT q.id FROM crawl_queue q "
+        "WHERE q.status = 'pending' AND q.priority > 0 "
+        "  AND EXISTS (SELECT 1 FROM pages p WHERE p.url = q.url) "
+        f"LIMIT {int(chunk)}"
+    )
+
+    counted = await client.execute(f"SELECT COUNT(*) FROM ({candidates}) rows_to_skip")
+    total = int(counted.scalar(0) or 0)
+    if not total:
+        return 0
+
+    if dry_run:
+        logger.info("dry run: %d duplicate queue rows would be retired", total)
+        return total
+
+    await client.execute(
+        "UPDATE crawl_queue SET status = 'skipped', "
+        "last_error = 'already indexed' WHERE id IN (" + candidates + ")"
+    )
+    logger.info("retired %d duplicate queue rows", total)
+    return total
+
+
 async def sweep(client, *, dry_run: bool = False) -> dict[str, int]:
     """Every self-healing pass, in one call."""
-    return {"requeued": await sweep_and_requeue_legacy_pages(client, dry_run=dry_run)}
+    return {
+        "requeued": await sweep_and_requeue_legacy_pages(client, dry_run=dry_run),
+        "deduplicated": await purge_indexed_duplicates(client, dry_run=dry_run),
+    }
 
 
 __all__ = [
