@@ -530,10 +530,13 @@ class IndexStore:
                     "indexed_at) "
                     "VALUES ((SELECT site_id FROM sites WHERE domain = ?), ?, ?, ?, ?, ?, ?, "
                     "?, ?, ?, ?, ?, CAST(? AS JSONB), CURRENT_TIMESTAMP) "
-                    # SQLite's INSERT OR IGNORE ignored any conflict; bare
-                    # ON CONFLICT DO NOTHING keeps that behaviour for both the
-                    # url and the digest unique index.
-                    "ON CONFLICT DO NOTHING",
+                    # Targeted at the URL. A bare DO NOTHING also swallowed the
+                    # digest unique index, so a page whose opening 200 characters
+                    # matched another page's — a shared template preamble — was
+                    # dropped as a duplicate even though its URL had never been
+                    # seen. That is the false-duplicate bug: accepted pages
+                    # vanishing with "0 pages written".
+                    "ON CONFLICT (url) DO NOTHING",
                     document.as_row(),
                 )
             )
@@ -601,6 +604,10 @@ class IndexStore:
 
         written = sum(1 for result in page_inserts if result.rows_affected > 0)
         closed = sum(1 for result in queue_updates if result.rows_affected > 0)
+
+        # Now that the conflict target is the URL, "not written" means exactly
+        # one thing: that URL is already in the table. The subtraction is honest
+        # rather than a catch-all that also swallowed digest collisions.
 
         outcome = PersistOutcome(
             pages_written=written,
