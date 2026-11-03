@@ -48,7 +48,11 @@ BRAND_CHAR_CAP = 50
 #: Title separators, in the order they are tried. The organisation is usually
 #: the side that is not the page name: "Karnataka Bank | Personal Banking" is the
 #: bank, not "Personal Banking".
-TITLE_SEPARATORS = ("|", "—", "–", "-", "::", ":", "»")
+TITLE_SEPARATORS = ("|", "—", "–", "-", "::", ":", "»", "•", "·", "•")
+
+#: Markup, control characters and zero-width joiners. A brand that arrives with
+#: any of these renders as a broken badge.
+BRAND_NOISE = re.compile(r"<[^>]{1,200}>|[\x00-\x1f\x7f\u200b-\u200d\ufeff]")
 
 #: Title segments that name nothing. "Official Website" is a description of a
 #: site, not the site, and a card that shows it is worse than one showing the
@@ -108,6 +112,22 @@ def derive_brand_from_domain(domain_or_url: str) -> str:
     if suffix:
         name = f"{name} {suffix.capitalize()}"
     return name[:BRAND_CHAR_CAP]
+
+
+def strip_noise(text: str) -> str:
+    """Markup and control characters out, whitespace collapsed. No length cap."""
+    value = BRAND_NOISE.sub(" ", str(text or ""))
+    return " ".join(value.split())
+
+
+def clean_brand(text: str) -> str:
+    """A brand: noise stripped, then capped at 50.
+
+    Kept separate from `strip_noise` because a title must not be capped before
+    it is split — truncating "… | Official Website" to 50 characters leaves
+    "Offici", and that becomes the brand.
+    """
+    return strip_noise(text)[:BRAND_CHAR_CAP].strip()
 
 
 def _domain_label(domain_or_url: str) -> str:
@@ -191,10 +211,12 @@ class LiveEntityExtractorAgent:
         shown raw: a card that says "karnataka.gov.in" where every other card
         says a name looks broken.
         """
-        found = brand_from_title(title, url)
+        # Clean first: a title carrying markup would defeat the separator
+        # search and the domain match, both of which compare raw text.
+        found = brand_from_title(strip_noise(title), url)
         if found.brand:
-            return found.brand
-        return derive_brand_from_domain(url)
+            return clean_brand(found.brand)
+        return clean_brand(derive_brand_from_domain(url))
 
     def extract(self, text: str) -> Entities:
         body = text or ""
