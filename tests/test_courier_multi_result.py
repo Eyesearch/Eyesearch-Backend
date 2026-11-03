@@ -45,7 +45,8 @@ async def test_both_sources_are_queried_concurrently():
     http = TwoSources()
     cards = await Agent(http=http).search("q")
 
-    assert sorted(http.seen) == ["ddg", "wiki"]
+    # Wikipedia and DuckDuckGo always; Wikidata too when a client is injected.
+    assert "wiki" in http.seen and "ddg" in http.seen
     assert {card.source for card in cards} == {"wikipedia", "duckduckgo"}
 
 
