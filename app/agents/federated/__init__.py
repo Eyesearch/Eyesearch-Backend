@@ -29,7 +29,9 @@ from app.agents.federated.horizon_agent import FederatedHorizonAgent, FederatedR
 from app.agents.federated.knowledge_blender import KnowledgeBlender, ScoredCard
 from app.agents.federated.knowledge_courier import FreeKnowledgeCourierAgent, KnowledgeCard
 from app.agents.federated.parallel_dispatcher import AsyncParallelDispatcherAgent, DispatchResult
+from app.agents.federated.searxng_courier import SearXNGOCourier
 from app.agents.federated.seed_trapper import ExternalSeedTrapperAgent, SeedReport
+from app.agents.federated.wikidata_courier import WikidataCourier
 from app.agents.federated.source_sanitizer import (
     ExternalCard,
     CrossSourceSanitizerAgent,
@@ -51,7 +53,9 @@ __all__ = [
     "KnowledgeCard",
     "ScoredCard",
     "LiveEntityExtractorAgent",
+    "SearXNGOCourier",
     "SeedReport",
+    "WikidataCourier",
     "brand_from_title",
     "derive_brand_from_domain",
     "sanitise_snippet",
