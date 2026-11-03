@@ -27,6 +27,16 @@ WIKIPEDIA_SUMMARY = "https://en.wikipedia.org/api/rest_v1/page/summary/{title}"
 #: DuckDuckGo's instant answer endpoint. Public, no key, JSON.
 DUCKDUCKGO_IA = "https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1"
 
+#: How long resolution may take before the request is abandoned. Separate from
+#: the request budget because a hung resolver is a different failure from a slow
+#: provider, and it blocks a thread rather than a socket.
+DNS_TIMEOUT_SECONDS = 0.3
+
+#: How many provider requests may be in flight at once. A burst of empty searches
+#: is the normal case — a thousand users all searching something we do not index —
+#: and unbounded fan-out is how an IP gets 429'd off a provider for a day.
+MAX_CONCURRENT_REQUESTS = 5
+
 #: The federated budget. A knowledge card that arrives late is worse than none,
 #: and 800 ms is enough for an endpoint that is going to answer at all.
 TIMEOUT_SECONDS = 0.8
@@ -174,6 +184,9 @@ class FreeKnowledgeCourierAgent:
         self._http = http
         self.timeout = float(timeout)
         self._client = None
+        #: Built lazily: a semaphore created at import time binds to whichever
+        #: event loop happened to be running then, and fails in every other one.
+        self._gate: asyncio.Semaphore | None = None
 
     def _ensure_client(self):
         """A pooled client, built once and reused.
@@ -194,7 +207,10 @@ class FreeKnowledgeCourierAgent:
                     max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
                     max_connections=MAX_CONNECTIONS,
                 ),
-                follow_redirects=True,
+                # Redirects are not followed. A 302 to 169.254.169.254 or
+                # 127.0.0.1 would otherwise sail past the guard, which only
+                # ever saw the URL it was given.
+                follow_redirects=False,
             )
         return self._client
 
@@ -204,9 +220,19 @@ class FreeKnowledgeCourierAgent:
         # every other request for the duration of a DNS lookup, so it runs in a
         # thread — and it is why this is the one guard that costs anything.
         loop = asyncio.get_running_loop()
-        allowed, reason = await loop.run_in_executor(
-            None, lambda: is_public_url(url, resolve=self._http is None)
-        )
+        try:
+            # Bounded separately from the request budget. A resolver that hangs
+            # would otherwise hold the thread and eat the whole 800 ms before the
+            # fetch even starts — and threads are a shared pool.
+            allowed, reason = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None, lambda: is_public_url(url, resolve=self._http is None)
+                ),
+                timeout=DNS_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.info("federation DNS lookup exceeded %.0f ms", DNS_TIMEOUT_SECONDS * 1000)
+            return {}
         if not allowed:
             logger.info("federation refused %s: %s", url, reason)
             return {}
@@ -229,8 +255,11 @@ class FreeKnowledgeCourierAgent:
         client = self._ensure_client()
         if client is None:
             return {}
+        if self._gate is None:
+            self._gate = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
         try:
-            return await asyncio.wait_for(self._fetch_json(client, url), timeout=self.timeout)
+            async with self._gate:
+                return await asyncio.wait_for(self._fetch_json(client, url), timeout=self.timeout)
         except asyncio.TimeoutError:
             logger.info("federation timed out after %.0f ms", self.timeout * 1000)
             return {}
