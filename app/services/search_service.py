@@ -483,27 +483,31 @@ class SearchService:
             cached["took_ms"] = 0
             return cached
 
+        # The federated leg starts before the index is queried, so the two run
+        # concurrently rather than one after the other. It is bounded by its own
+        # budget and may be cancelled; the store query is not.
+        federated_task = self._start_federation(query, size) if page_number == 1 else None
+
         # Fetch more than asked for, then keep at most a few per domain. Without
         # the over-fetch the cap would leave the page short whenever one site
         # dominated the matches — which is exactly when it is needed.
         over_fetch = size * DOMAIN_CLUSTER_OVERFETCH
-        hits = await self._store.search(
-            query,
-            limit=over_fetch,
-            offset=offset,
-            category=category,
-            language=language,
-        )
+        try:
+            hits = await self._store.search(
+                query,
+                limit=over_fetch,
+                offset=offset,
+                category=category,
+                language=language,
+            )
+        except Exception:
+            if federated_task is not None:
+                federated_task.cancel()
+            raise
         hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
         results = [to_result(hit).as_dict() for hit in hits]
 
-        # Only when the index has nothing. Federation is a fallback, not a
-        # second opinion: mixing external results into a page that already has
-        # local ones would let a guess outrank a page we actually crawled.
-        federated = False
-        if not results and page_number == 1:
-            results = await self._federated_fallback(query, size)
-            federated = bool(results)
+        blended = await self._blend(query, results, federated_task)
 
         if highlight:
             tokens = fts_tokens(query)
@@ -511,6 +515,13 @@ class SearchService:
                 result["snippet"] = highlight_terms(result["snippet"], tokens)
 
         took_ms = int((time.perf_counter() - started) * 1000)
+
+        # `results` stays the organic list. The frontend renders it today, and a
+        # card from a source we never crawled must not appear in the slot that
+        # means "we verified this page".
+        knowledge_cards = blended.get("knowledge_cards", [])
+        primary_card = blended.get("primary_card")
+        federated = bool(knowledge_cards)
 
         payload = {
             "query": query,
@@ -529,9 +540,40 @@ class SearchService:
             "failed_providers": [],
             "filters": {"category": category, "language": language},
             "results": results,
+            # The rich panel, additive: a consumer that ignores these keys sees
+            # exactly what it saw before.
+            "knowledge_cards": knowledge_cards,
+            "primary_card": primary_card,
+            "blend": blended.get("meta", {}),
         }
         self.cache.set(key, payload)
         return payload
+
+    def _start_federation(self, query: str, size: int):
+        """Kick off the federated leg without awaiting it.
+
+        Started before the index query so the two overlap. Returns None when
+        federation is off, which the blender reads as "no external leg at all"
+        rather than "an external leg that failed".
+        """
+        if not self._settings.federation_enabled:
+            return None
+        try:
+            return asyncio.ensure_future(self._federation.search(query, limit=size))
+        except Exception as error:  # noqa: BLE001 - a fault here costs a panel
+            logger.warning("federation could not start: %s", error)
+            return None
+
+    async def _blend(self, query: str, organic: list[dict[str, Any]], federated_task) -> dict[str, Any]:
+        """Merge the two legs. The organic list is passed through untouched."""
+        from app.agents.federated import KnowledgeBlender
+
+        blender = KnowledgeBlender(timeout_ms=FEDERATION_TIMEOUT_MS)
+        if federated_task is None:
+            return await blender.blend(query, organic, None)
+        # The task already exists, so the factory hands the blender the running
+        # one rather than starting a second.
+        return await blender.blend(query, organic, lambda: federated_task)
 
     async def _federated_fallback(self, query: str, size: int) -> list[dict[str, Any]]:
         """Ask the external fleet, with a hard ceiling on how long it may take.
