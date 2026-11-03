@@ -49,7 +49,7 @@ async def test_a_candidate_becomes_a_card_with_every_field():
         [{"title": "Karnataka Bank | Personal Banking", "url": "https://karnatakabank.com/a?utm_source=x", "snippet": LONG}]
     ).search("bank")
 
-    card = result.cards[0]
+    card = result.cards[0].as_dict()
     assert card["brand_name"] == "Karnataka Bank"
     assert card["url"] == "https://karnatakabank.com/a"
     assert card["source"] == "federated"
@@ -74,7 +74,7 @@ def test_the_dict_matches_the_local_result_schema():
 
 @pytest.mark.asyncio
 async def test_the_two_snippets_and_the_toggle():
-    card = (await agent([{"title": "T", "url": "https://a.in/x", "snippet": LONG}]).search("q")).cards[0]
+    card = (await agent([{"title": "T", "url": "https://a.in/x", "snippet": LONG}]).search("q")).cards[0].as_dict()
 
     assert len(card["snippet_short"]) <= SNIPPET_SHORT_CHARS == 180
     assert len(card["snippet_full"]) <= SNIPPET_FULL_CHARS == 500
@@ -85,7 +85,7 @@ async def test_the_two_snippets_and_the_toggle():
 async def test_a_short_snippet_offers_no_more():
     card = (
         await agent([{"title": "T", "url": "https://a.in/x", "snippet": "short notice"}]).search("q")
-    ).cards[0]
+    ).cards[0].as_dict()
 
     assert card["has_more"] is False
     assert card["snippet_full"] == card["snippet_short"]
@@ -116,7 +116,7 @@ async def test_one_bad_candidate_does_not_lose_the_others():
     result = await agent(candidates).search("q")
 
     assert len(result.cards) == 2
-    assert {card["url"] for card in result.cards} == {"https://a.in/1", "https://c.in/3"}
+    assert {card.url for card in result.cards} == {"https://a.in/1", "https://c.in/3"}
 
 
 @pytest.mark.asyncio
