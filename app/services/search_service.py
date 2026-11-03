@@ -425,21 +425,21 @@ class FederatedFallback:
         self._settings = settings
 
     async def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
-        """The external fleet, converted once at the boundary.
+        """The fleet: courier, then sanitizer, converted once at the boundary.
 
-        `horizon.search` yields `SearchCard` objects; this is the single place
-        they become dicts. Converting twice — here and again in the caller — is
-        how one of the two ends up calling `.as_dict()` on a dict and raising an
-        AttributeError outside the timeout guard.
+        This used to route through `FederatedHorizonAgent`, which carried its own
+        0.5-second budget and returned a single card. Both were superseded — the
+        courier now asks four sources and the sanitizer aggregates them — but the
+        horizon stayed in the path, so every query paid its shorter budget and
+        the log line `federation exceeded 0.50s` came from a component the
+        blender had already replaced.
         """
-        from app.agents.federated import FederatedHorizonAgent, FreeKnowledgeCourierAgent
+        from app.agents.federated import CrossSourceSanitizerAgent, FreeKnowledgeCourierAgent
 
-        horizon = FederatedHorizonAgent(
-            knowledge=FreeKnowledgeCourierAgent(),
-            settings=self._settings,
-        )
-        result = await horizon.search(query, limit=limit)
-        return [card.as_dict() for card in (result.cards or [])][:limit]
+        courier = FreeKnowledgeCourierAgent(settings=self._settings)
+        cards = await courier.search(query, limit=limit)
+        aggregated = CrossSourceSanitizerAgent().aggregate(cards, limit=limit)
+        return [card.as_dict() for card in aggregated]
 
 
 #: How long the external fleet gets before the fallback gives up. A reader who
