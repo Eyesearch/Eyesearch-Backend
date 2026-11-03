@@ -15,7 +15,10 @@ import logging
 from dataclasses import dataclass, field
 
 from app.agents import load_agent
-from app.indexer.maintenance import sweep_and_requeue_legacy_pages
+from app.indexer.maintenance import (
+    purge_indexed_duplicates,
+    sweep_and_requeue_legacy_pages,
+)
 from app.engine.config import Settings, get_settings
 from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
@@ -222,6 +225,11 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                     healed = await sweep_and_requeue_legacy_pages(orchestrator.store.client)
                     if healed:
                         logger.info("self-heal: re-queued %d legacy pages", healed)
+                    # Gate three, on the same clock: a queue that fills with
+                    # rows the index already has is a queue that stops moving.
+                    retired = await purge_indexed_duplicates(orchestrator.store.client)
+                    if retired:
+                        logger.info("queue hygiene: retired %d indexed duplicates", retired)
                 except Exception as error:  # noqa: BLE001 - never kill the loop
                     logger.warning("self-heal sweep failed: %s", error)
 
