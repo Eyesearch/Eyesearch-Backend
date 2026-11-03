@@ -36,16 +36,20 @@ action_title_from = _brand.action_title_from
 
 #: The collapsed preview. A card shows this and nothing else until the reader
 #: asks for more.
-SNIPPET_SHORT_CHARS = 180
+SNIPPET_SHORT_CHARS = 300
 
 #: What "More" reveals. Long enough to judge a page, short enough to read on a
 #: phone without scrolling a screenful.
-SNIPPET_FULL_CHARS = 500
+SNIPPET_FULL_CHARS = 600
 
 #: Titles are allowed to be longer than an indexed one, because an external
 #: result has no stored title to fall back on and a truncated one cannot be
 #: repaired later.
-TITLE_CHAR_CAP = 140
+TITLE_CHAR_CAP = 100
+
+#: The safety ceiling on one answer. Whatever survives is returned up to this;
+#: it is not a target to pad towards.
+MAX_CARDS = 20
 
 #: Promotional noise that arrives with syndicated results. Matched as whole
 #: phrases so "Ad" does not eat "Admission".
@@ -203,6 +207,64 @@ def sanitise_url(url: str) -> str | None:
     )
 
 
+#: Path segments that ask for a credential or a purchase rather than showing a
+#: page. Matched whole, so /administrative-reforms survives.
+REJECTED_SEGMENTS = frozenset(
+    {"login", "signin", "sign-in", "admin", "wp-admin", "cart", "checkout"}
+)
+
+#: Downloads rather than pages.
+REJECTED_EXTENSIONS = (
+    ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".dmg", ".apk",
+    ".mp4", ".mp3", ".wav", ".avi", ".mkv", ".png", ".jpg", ".jpeg", ".gif",
+    ".svg", ".webp",
+)
+
+
+def _is_cardable(url: str) -> bool:
+    """A page worth showing, as opposed to a file, a door, or an internal host.
+
+    The address check is the same one the courier makes. A card is rendered as a
+    link, and a link the reader can tap is a request the reader's browser makes —
+    so a private address is refused here too, not only at fetch time.
+    """
+    from app.agents.federated.knowledge_courier import is_public_url
+
+    if not is_public_url(url, resolve=False)[0]:
+        return False
+    try:
+        path = (urlsplit(url).path or "").lower()
+    except ValueError:
+        return False
+    if any(path.endswith(extension) for extension in REJECTED_EXTENSIONS):
+        return False
+    segments = {segment for segment in path.split("/") if segment}
+    return not (segments & REJECTED_SEGMENTS)
+
+
+def _canonical(url: str) -> str:
+    """The form two URLs are compared in: no fragment, no trailing slash."""
+    parts = urlsplit(url or "")
+    return f"{parts.scheme.lower()}://{(parts.hostname or '').lower()}{(parts.path or '/').rstrip('/') or '/'}"
+
+
+#: A title must be this distinctive before it is used to merge two cards. Many
+#: pages are called "Home", "Contact Us" or "Dashboard"; merging on those would
+#: collapse two different sites into one card, which is the same over-eager
+#: deduplication that was silently dropping crawled pages.
+TITLE_MERGE_MIN_WORDS = 4
+
+
+def _canonical_title(title: str) -> str:
+    """Titles compared as lower-case words, punctuation dropped.
+
+    Returns empty for a title too generic to identify a page, so the caller falls
+    back to the URL alone.
+    """
+    words = " ".join(re.sub(r"[^\w\s]", " ", (title or "").lower()).split())
+    return words if len(words.split()) >= TITLE_MERGE_MIN_WORDS else ""
+
+
 def _cap(text: str, limit: int) -> str:
     """Cut at a word boundary; never mid-word."""
     value = (text or "").strip()
@@ -255,6 +317,74 @@ class CrossSourceSanitizerAgent:
             brand=brand,
             source=source,
         )
+
+    def aggregate(self, cards, *, limit: int = MAX_CARDS) -> list[ExternalCard]:
+        """Sanitise a stream of cards and keep one per page.
+
+        Two sources answer the same query, so the same page arrives twice with
+        different framing. Deduplication runs on the canonical URL first, then on
+        the normalised title: two Wikipedia articles can point at the same place
+        under different URLs, and the reader does not need to be told twice.
+
+        The richer card wins — the one with more text to show — because that is
+        the one worth reading.
+        """
+        ceiling = max(1, min(int(limit), MAX_CARDS))
+        best: dict[str, tuple[int, ExternalCard]] = {}
+
+        for raw in cards or []:
+            try:
+                card = self._from_card(raw)
+            except Exception as error:  # noqa: BLE001 - one bad card is not a batch
+                logger.warning("skipping an unusable card: %s", error)
+                continue
+            if card is None:
+                continue
+
+            keys = [f"url:{_canonical(card.url)}"]
+            title_key = _canonical_title(card.title)
+            if title_key:
+                keys.append(f"title:{title_key}")
+
+            existing = next((best[key] for key in keys if key in best), None)
+            richness = len(card.snippet_full)
+            if existing is not None:
+                if richness <= existing[0]:
+                    continue
+                for key in keys:
+                    best.pop(key, None)
+
+            entry = (richness, card)
+            for key in keys:
+                best[key] = entry
+
+        seen: set[int] = set()
+        unique: list[ExternalCard] = []
+        for richness, card in sorted(best.values(), key=lambda item: -item[0]):
+            if id(card) in seen:
+                continue
+            seen.add(id(card))
+            unique.append(card)
+            if len(unique) >= ceiling:
+                break
+        return unique
+
+    def _from_card(self, raw) -> ExternalCard | None:
+        """A KnowledgeCard (or a dict) to a display card, or None."""
+        if isinstance(raw, dict):
+            title = str(raw.get("title") or "")
+            url = str(raw.get("url") or "")
+            snippet = str(raw.get("snippet") or raw.get("extract") or "")
+        else:
+            title = str(getattr(raw, "title", "") or "")
+            url = str(getattr(raw, "url", "") or "")
+            snippet = str(getattr(raw, "extract", "") or "")
+            snippet = str(getattr(raw, "snippet_full", "") or snippet)
+
+        clean_url = sanitise_url(url)
+        if not clean_url or not _is_cardable(clean_url):
+            return None
+        return self.card(title=title, url=clean_url, snippet=snippet)
 
     def cards(self, items) -> list[ExternalCard]:
         out: list[ExternalCard] = []
