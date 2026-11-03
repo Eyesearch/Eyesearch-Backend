@@ -26,6 +26,7 @@ from app.agents.federated.brand_extractor_agent import (
     derive_brand_from_domain,
 )
 from app.agents.federated.horizon_agent import FederatedHorizonAgent, FederatedResult
+from app.agents.federated.knowledge_blender import KnowledgeBlender, ScoredCard
 from app.agents.federated.knowledge_courier import FreeKnowledgeCourierAgent, KnowledgeCard
 from app.agents.federated.parallel_dispatcher import AsyncParallelDispatcherAgent, DispatchResult
 from app.agents.federated.seed_trapper import ExternalSeedTrapperAgent, SeedReport
@@ -46,7 +47,9 @@ __all__ = [
     "FederatedHorizonAgent",
     "FederatedResult",
     "FreeKnowledgeCourierAgent",
+    "KnowledgeBlender",
     "KnowledgeCard",
+    "ScoredCard",
     "LiveEntityExtractorAgent",
     "SeedReport",
     "brand_from_title",
