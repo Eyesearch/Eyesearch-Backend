@@ -15,6 +15,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from app.agents import load_agent
 
@@ -106,9 +107,100 @@ class ExternalCard:
         }
 
 
-def sanitise_url(url: str) -> str:
-    """The URL with its tracking parameters removed."""
-    return strip_tracking(url or "")
+#: Parameters that identify a campaign rather than a page. A superset of the
+#: enforcer's list: the index governs pages we chose to crawl, so its list stays
+#: conservative, while an external URL arrives with whatever a provider appended.
+TRACKING_PARAMS = frozenset(
+    {
+        "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+        "utm_id", "utm_name", "utm_reader", "utm_referrer", "utm_social",
+        "gclid", "gclsrc", "fbclid", "msclkid", "yclid", "dclid", "twclid",
+        "ved", "ei", "usg", "oq", "gs_lcrp", "si", "sprefix", "ref", "ref_src",
+        "ref_url", "ref_src", "s_kwcid", "igshid", "mc_cid", "mc_eid",
+        "_ga", "_gl", "_hsenc", "_hsmi", "spm", "share",
+    }
+)
+
+#: Redirect wrappers: the real destination is in one of these parameters. A card
+#: that links to google.com/url?q=... is a card that sends the reader to a
+#: redirect page, and shows a URL that has nothing to do with the result.
+REDIRECT_HOSTS = {
+    "www.google.com", "google.com", "www.google.co.in", "google.co.in",
+    "l.facebook.com", "lm.facebook.com", "out.reddit.com",
+    "duckduckgo.com", "html.duckduckgo.com", "www.bing.com", "bing.com",
+}
+#: `uddg` is DuckDuckGo's; `u` is Reddit's; `url` and `q` cover Google and Bing.
+REDIRECT_PARAMS = ("url", "q", "u", "uddg", "target", "dest", "redirect", "to")
+
+#: A URL longer than this is not a URL; it is a payload.
+MAX_URL_CHARS = 2048
+
+#: Only these two. `javascript:`, `data:` and `file:` are how a link becomes an
+#: execution vector, and no search result ever needs them.
+SAFE_SCHEMES = ("http", "https")
+
+#: Ports that add nothing: they are the defaults for their scheme.
+DEFAULT_PORTS = {"http": "80", "https": "443"}
+
+
+def unwrap_redirect(url: str) -> str:
+    """The destination inside a redirect wrapper, or the URL unchanged."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if host not in REDIRECT_HOSTS or not parts.query:
+        return url
+    params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    for key in REDIRECT_PARAMS:
+        target = params.get(key)
+        if target and target.lower().startswith(("http://", "https://")):
+            return unquote(target)
+    return url
+
+
+def sanitise_url(url: str) -> str | None:
+    """A clean, absolute, fetchable URL — or None when it is not one.
+
+    None rather than a guess. A caller that receives a half-cleaned string cannot
+    tell it apart from a good one, and a card linking to `javascript:...` is worse
+    than a card that was never built.
+    """
+    raw = str(url or "").strip()
+    if not raw or len(raw) > MAX_URL_CHARS:
+        return None
+
+    try:
+        raw = unwrap_redirect(unquote(raw) if "%3a%2f%2f" in raw.lower() else raw)
+        parts = urlsplit(raw)
+    except (ValueError, UnicodeError):
+        return None
+
+    scheme = (parts.scheme or "").lower()
+    if scheme not in SAFE_SCHEMES:
+        return None
+
+    host = (parts.hostname or "").lower()
+    if not host:
+        return None
+
+    # Rebuild rather than patch: a URL assembled from checked pieces cannot
+    # carry a fragment or a default port that survived by being forgotten.
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port is not None and str(port) == DEFAULT_PORTS.get(scheme):
+        port = None
+
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in TRACKING_PARAMS
+    ]
+    netloc = f"{host}:{port}" if port else host
+
+    return urlunsplit(
+        (scheme, netloc, parts.path or "/", urlencode(kept, doseq=True), "")
+    )
 
 
 def _cap(text: str, limit: int) -> str:
