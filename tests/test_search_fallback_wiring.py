@@ -47,13 +47,18 @@ async def test_the_ceiling_is_800_ms():
 
 
 @pytest.mark.asyncio
-async def test_an_empty_index_falls_back_to_the_fleet(store):
-    federation = StubFederation([SearchCard(title="External", url="https://a.in/x", snippet_short="text")])
+async def test_an_empty_index_is_filled_by_the_knowledge_panel(store):
+    """Cards go to `knowledge_cards`, not into `results`.
+
+    `results` means "pages we crawled and verified". An external card in that
+    slot would be a claim the index cannot back.
+    """
+    federation = StubFederation([SearchCard(title="External answer page", url="https://a.in/x", snippet_short="text")])
     payload = await service(store, federation).search("nothing-matches-this-xyzzy")
 
     assert federation.calls == 1
-    assert payload["results"][0]["title"] == "External"
-    assert payload["results"][0]["source"] == "federated"
+    assert payload["results"] == []
+    assert payload["knowledge_cards"][0]["title"] == "External answer page"
 
 
 @pytest.mark.asyncio
@@ -62,6 +67,7 @@ async def test_a_slow_fleet_is_abandoned_not_awaited(store):
     payload = await service(store, federation).search("nothing-matches-this-xyzzy")
 
     assert payload["results"] == []
+    assert payload["knowledge_cards"] == []
     assert payload["total_estimate"] == 0
 
 
@@ -91,7 +97,8 @@ async def test_the_conversion_happens_once(store):
     federation = StubFederation([SearchCard(title="X", url="https://a.in/x", snippet_short="s")])
     payload = await service(store, federation).search("nothing-matches-this-xyzzy")
 
-    result = payload["results"][0]
-    assert isinstance(result, dict)
-    assert result["snippet_short"] == "s"
-    assert "has_more" in result
+    card = payload["knowledge_cards"][0]
+    assert isinstance(card, dict)
+    assert card["snippet_short"] == "s"
+    assert "has_more" in card
+    assert "relevance" in card
