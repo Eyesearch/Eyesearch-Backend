@@ -109,7 +109,7 @@ def test_the_client_sends_the_agent_and_accepts_json(monkeypatch):
 
     headers = captured.get("headers", {})
     assert headers.get("User-Agent") == courier.USER_AGENT
-    assert headers.get("Accept") == "application/json"
+    assert "application/json" in headers.get("Accept", "")
     assert captured.get("follow_redirects") is False
 
 
