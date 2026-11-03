@@ -46,8 +46,9 @@ class FederatedResult:
 #: What a card shows before the reader asks for more, and what it shows after.
 #: These match the sanitizer's, because a card assembled here and a card
 #: assembled there must be the same size.
-SNIPPET_SHORT_CHARS = 180
-SNIPPET_FULL_CHARS = 500
+SNIPPET_SHORT_CHARS = 300
+SNIPPET_FULL_CHARS = 600
+TITLE_CHAR_CAP = 100
 BRAND_CHAR_CAP = 50
 
 #: How many cards may come from one domain. A provider that returns five pages
@@ -226,7 +227,7 @@ class FederatedHorizonAgent:
         full = _cut(clean_snippet, SNIPPET_FULL_CHARS)
 
         return SearchCard(
-            title=_cut(clean_title, 140) or brand,
+            title=_cut(clean_title, TITLE_CHAR_CAP) or brand,
             url=clean,
             brand_name=brand[:BRAND_CHAR_CAP],
             snippet=short,
