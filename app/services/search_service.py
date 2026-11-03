@@ -425,6 +425,13 @@ class FederatedFallback:
         self._settings = settings
 
     async def search(self, query: str, *, limit: int = 10) -> list[dict[str, Any]]:
+        """The external fleet, converted once at the boundary.
+
+        `horizon.search` yields `SearchCard` objects; this is the single place
+        they become dicts. Converting twice — here and again in the caller — is
+        how one of the two ends up calling `.as_dict()` on a dict and raising an
+        AttributeError outside the timeout guard.
+        """
         from app.agents.federated import FederatedHorizonAgent, FreeKnowledgeCourierAgent
 
         horizon = FederatedHorizonAgent(
@@ -432,7 +439,7 @@ class FederatedFallback:
             settings=self._settings,
         )
         result = await horizon.search(query, limit=limit)
-        return [card for card in result.cards or []][:limit]
+        return [card.as_dict() for card in (result.cards or [])][:limit]
 
 
 #: How long the external fleet gets before the fallback gives up. A reader who
@@ -541,8 +548,9 @@ class SearchService:
             logger.warning("federation failed: %s", error)
             return []
 
-        # Ephemeral by construction: `cards` are dataclasses, never rows.
-        return [card.as_dict() for card in cards or []][:size]
+        # Already dicts by now — `FederatedFallback` did the conversion. Doing
+        # it again here would be the second conversion, and the one that breaks.
+        return [dict(card) for card in cards or []][:size]
 
     async def search_flat(
         self,
