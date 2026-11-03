@@ -61,6 +61,18 @@ JUNK_MARKERS: tuple[str, ...] = (
 )
 
 
+def page_digest(url: str, body: str) -> str:
+    """A fingerprint of *this page*, not of its opening characters.
+
+    `digest_of(body)` alone was wrong once the body is capped at 200 characters:
+    two unrelated pages that share a template preamble — "Skip to main content.
+    Government of Karnataka." — produce the same digest, and the unique index on
+    `pages.digest` then drops the second one as a duplicate. The URL is part of
+    the identity of a page; identical prose at two addresses is two pages.
+    """
+    return hashlib.sha256(f"{url}\n{collapse(body)}".encode("utf-8")).hexdigest()
+
+
 def digest_of(text: str) -> str:
     """SHA-256 of the cleaned body text, hex encoded."""
     return hashlib.sha256(collapse(text).encode("utf-8")).hexdigest()
@@ -114,7 +126,10 @@ class QualityAgent:
         if len(TITLE_ALPHANUMERIC.findall(title)) < MIN_TITLE_ALPHANUMERIC:
             return QualityVerdict(ok=False, reason="title_not_a_word", score=0.0)
 
-        digest = digest_of(body)
+        # Keyed on the page, not on its first 200 characters. Within one batch
+        # the same URL twice is a duplicate; the same prose at another URL is a
+        # different page that happens to open the same way.
+        digest = page_digest(document.url, body)
         if digest in self._seen:
             return QualityVerdict(ok=False, reason="duplicate", digest=digest, score=0.0)
 
