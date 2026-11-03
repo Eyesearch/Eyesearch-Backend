@@ -8,6 +8,9 @@ import pytest
 
 from app.agents import load_agent
 
+sanitizer = load_agent("44_cross_source_sanitizer")
+brands = load_agent("45_live_entity_extractor")
+
 FLEET = (
     "41_federated_horizon_agent",
     "42_free_knowledge_courier",
@@ -313,3 +316,133 @@ def test_the_marshal_does_not_flap_at_the_boundary():
     assert agent.evaluate().frozen is True
     assert agent.evaluate().frozen is True   # 750 MB: still frozen
     assert agent.evaluate().frozen is False  # 620 MB: resumed
+
+
+# ---------------------------------------------------------------------------
+# URL sanitising: wrappers, trackers, schemes
+# ---------------------------------------------------------------------------
+
+
+def test_utm_parameters_are_removed():
+    clean = sanitizer.sanitise_url("https://a.in/x?utm_source=n&utm_medium=m&id=7")
+
+    assert clean == "https://a.in/x?id=7"
+
+
+def test_a_legitimate_parameter_survives():
+    assert sanitizer.sanitise_url("https://a.in/list?page=2") == "https://a.in/list?page=2"
+
+
+@pytest.mark.parametrize(
+    "param",
+    ["ved", "ei", "usg", "oq", "gs_lcrp", "si", "sprefix", "ref", "ref_src", "gclid", "fbclid"],
+)
+def test_every_listed_tracker_is_removed(param):
+    assert sanitizer.sanitise_url(f"https://a.in/x?{param}=1") == "https://a.in/x"
+
+
+def test_a_google_redirect_wrapper_is_unwrapped():
+    wrapped = "https://www.google.com/url?q=https%3A%2F%2Fkarnataka.gov.in%2Fnotice&sa=D"
+
+    assert sanitizer.sanitise_url(wrapped) == "https://karnataka.gov.in/notice"
+
+
+def test_a_duckduckgo_wrapper_is_unwrapped():
+    wrapped = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fnic.in%2Fx"
+
+    assert sanitizer.sanitise_url(wrapped) == "https://nic.in/x"
+
+
+def test_the_fragment_is_dropped():
+    assert sanitizer.sanitise_url("https://a.in/x#section") == "https://a.in/x"
+
+
+def test_the_default_port_is_dropped():
+    assert sanitizer.sanitise_url("https://a.in:443/x") == "https://a.in/x"
+    assert sanitizer.sanitise_url("http://a.in:80/x") == "http://a.in/x"
+
+
+def test_scheme_and_host_are_lowercased():
+    assert sanitizer.sanitise_url("HTTPS://Example.COM/Path") == "https://example.com/Path"
+
+
+@pytest.mark.parametrize(
+    "url", ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "not a url", ""]
+)
+def test_a_dangerous_or_broken_url_is_none(url):
+    assert sanitizer.sanitise_url(url) is None
+
+
+def test_an_over_long_url_is_refused():
+    assert sanitizer.sanitise_url("https://a.in/" + "x" * 2100) is None
+
+
+# ---------------------------------------------------------------------------
+# Brand names
+# ---------------------------------------------------------------------------
+
+
+def test_a_brand_is_never_longer_than_fifty():
+    brand = brands.LiveEntityExtractorAgent().brand(
+        title="y" * 200, url="https://a.in/x"
+    )
+
+    assert len(brand) <= 50
+
+
+def test_a_bullet_separator_is_understood():
+    brand = brands.LiveEntityExtractorAgent().brand(title="Results • KEA", url="https://kea.kar.nic.in/r")
+
+    assert brand == "KEA"
+
+
+def test_markup_is_stripped_from_a_brand():
+    brand = brands.LiveEntityExtractorAgent().brand(
+        title="<b>Karnataka</b> Bank | Personal", url="https://karnatakabank.com/x"
+    )
+
+    assert "<" not in brand
+    assert brand == "Karnataka Bank"
+
+
+def test_a_subdomain_falls_back_to_the_organisation():
+    brand = brands.LiveEntityExtractorAgent().brand(title="", url="https://api.karnataka.gov.in/x")
+
+    assert brand == "Karnataka Gov"
+
+
+# ---------------------------------------------------------------------------
+# The air gap, end to end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_full_fallback_run_writes_nothing(client, store):
+    from app.engine.config import Settings
+    from app.agents.federated import FederatedHorizonAgent
+
+    class Courier:
+        async def search(self, query, limit=10):
+            return [
+                {
+                    "title": "Karnataka Bank | Personal Banking",
+                    "url": "https://karnatakabank.com/a?utm_source=x&ref=y",
+                    "snippet": "text " * 100,
+                },
+                {"title": "NIC", "url": "https://nic.in/b", "snippet": "more"},
+            ]
+
+    horizon = FederatedHorizonAgent(
+        knowledge=Courier(),
+        settings=Settings(_env_file=None, environment="test", federation_enabled=True),
+    )
+    result = await horizon.search("bank")
+    await asyncio.sleep(0)
+
+    assert len(result.cards) == 2
+    assert all(len(card.as_dict()["brand_name"]) <= 50 for card in result.cards)
+
+    pages = await client.execute("SELECT COUNT(*) FROM pages")
+    queued = await client.execute("SELECT COUNT(*) FROM crawl_queue")
+    assert int(pages.scalar(0) or 0) == 0
+    assert int(queued.scalar(0) or 0) == 0
