@@ -38,7 +38,9 @@ def test_the_client_does_not_follow_redirects():
 
 
 def test_dns_has_its_own_shorter_budget():
-    assert courier.DNS_TIMEOUT_SECONDS == 0.3
+    """500 ms: 300 was tight enough to fail cold lookups on a cloud resolver,
+    and it still has to leave room inside the 800 ms request budget."""
+    assert courier.DNS_TIMEOUT_SECONDS == 0.5
     assert courier.DNS_TIMEOUT_SECONDS < courier.TIMEOUT_SECONDS
 
 
