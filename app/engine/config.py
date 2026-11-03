@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     #: network dependency inside the request path and sends the user's query to
     #: a third party. Turn it on deliberately, having read the endpoints' terms.
     federation_enabled: bool = False
+
+    #: A self-hosted SearXNG instance, e.g. http://searxng:8080. Empty means the
+    #: source is not configured, which is the normal state for a fresh install
+    #: and is not treated as a failure.
+    searxng_base_url: str = ""
     #: The whole federated path must finish inside this, or be dropped.
     federation_budget_seconds: float = 0.5
     estimated_kb_per_page: float = 12.0
