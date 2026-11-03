@@ -30,7 +30,7 @@ DUCKDUCKGO_IA = "https://api.duckduckgo.com/?q={query}&format=json&no_html=1&ski
 #: How long resolution may take before the request is abandoned. Separate from
 #: the request budget because a hung resolver is a different failure from a slow
 #: provider, and it blocks a thread rather than a socket.
-DNS_TIMEOUT_SECONDS = 0.3
+DNS_TIMEOUT_SECONDS = 0.5
 
 #: How many provider requests may be in flight at once. A burst of empty searches
 #: is the normal case — a thousand users all searching something we do not index —
@@ -54,7 +54,9 @@ ALLOWED_SCHEMES = ("http", "https")
 
 #: A bot that says who it is can be blocked politely; one that lies gets the
 #: whole IP banned. This is the honest header.
-USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in)"
+#: Wikimedia's policy requires a contact route in the User-Agent; a bare name is
+#: answered with 403. The URL alone is not enough, so the address is included.
+USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in; contact@eyesearch.in)"
 
 #: Pool sizes. Small on purpose: federation runs once per empty search, so a
 #: large pool would be sockets held open for a request that never comes.
@@ -174,6 +176,13 @@ class KnowledgeCard:
         }
 
     def __bool__(self) -> bool:
+        """A card is worth returning when it carries an extract.
+
+        Deliberately not `title and url`. Wikipedia sometimes omits
+        `content_urls`, and a card with a usable summary but no canonical link is
+        still an answer; requiring a URL would discard it, which is the silent
+        drop this class is meant to avoid.
+        """
         return bool(self.extract)
 
 
@@ -202,7 +211,7 @@ class FreeKnowledgeCourierAgent:
 
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
-                headers={"User-Agent": USER_AGENT},
+                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
                 limits=httpx.Limits(
                     max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
                     max_connections=MAX_CONNECTIONS,
