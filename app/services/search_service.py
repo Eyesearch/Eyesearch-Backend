@@ -500,8 +500,10 @@ class SearchService:
         # Only when the index has nothing. Federation is a fallback, not a
         # second opinion: mixing external results into a page that already has
         # local ones would let a guess outrank a page we actually crawled.
+        federated = False
         if not results and page_number == 1:
             results = await self._federated_fallback(query, size)
+            federated = bool(results)
 
         if highlight:
             tokens = fts_tokens(query)
@@ -515,6 +517,11 @@ class SearchService:
             "page": page_number,
             "limit": size,
             "total_estimate": len(results),
+            # The fallback only ever answers page one. Saying so in the envelope
+            # is what lets the frontend disable Next instead of offering a page
+            # that will always come back empty.
+            "total_pages": 1 if federated else max(1, -(-len(results) // max(1, size))),
+            "has_next_page": False if federated else len(results) >= size,
             "took_ms": took_ms,
             "degraded": False,
             "cache_hit": False,
@@ -536,13 +543,20 @@ class SearchService:
         if not self._settings.federation_enabled:
             return []
 
+        # An explicit task, so a timeout can cancel it. `wait_for` cancels the
+        # coroutine it wraps, but a task created inside the courier can survive
+        # the wait and keep its socket open; cancelling here is what actually
+        # releases it.
+        task = asyncio.ensure_future(self._federation.search(query, limit=size))
         try:
-            cards = await asyncio.wait_for(
-                self._federation.search(query, limit=size),
-                timeout=FEDERATION_TIMEOUT_MS / 1000.0,
-            )
+            cards = await asyncio.wait_for(task, timeout=FEDERATION_TIMEOUT_MS / 1000.0)
         except asyncio.TimeoutError:
-            logger.info("federation timed out after %d ms", FEDERATION_TIMEOUT_MS)
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            logger.info("federation timed out after %d ms; task cancelled", FEDERATION_TIMEOUT_MS)
             return []
         except Exception as error:  # noqa: BLE001 - a fallback must never 500
             logger.warning("federation failed: %s", error)
