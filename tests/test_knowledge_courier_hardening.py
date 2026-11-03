@@ -179,24 +179,44 @@ def test_the_bot_says_who_it_is():
 
 
 @pytest.mark.asyncio
-async def test_search_returns_raw_candidates():
+async def test_search_returns_cards_from_the_action_api():
+    """The search API, not the REST summary: it ranks, so it answers a query
+    rather than an exact title."""
+
     class Http:
         async def get_json(self, url, timeout=1.5):
-            return {
-                "title": "Bengaluru",
-                "extract": "Bengaluru is the capital of Karnataka.",
-                "content_urls": {"desktop": {"page": "https://en.wikipedia.org/wiki/Bengaluru"}},
-            }
+            if "api.php" in url:
+                return {
+                    "query": {
+                        "search": [
+                            {
+                                "title": "Bengaluru",
+                                "snippet": '<span class="searchmatch">Bengaluru</span> is the capital.',
+                            }
+                        ]
+                    }
+                }
+            return {}
 
-    candidates = await Agent(http=Http()).search("Bengaluru")
+    cards = await Agent(http=Http()).search("Bengaluru")
 
-    assert candidates == [
-        {
-            "title": "Bengaluru",
-            "url": "https://en.wikipedia.org/wiki/Bengaluru",
-            "snippet": "Bengaluru is the capital of Karnataka.",
-        }
-    ]
+    assert len(cards) == 1
+    assert cards[0].url == "https://en.wikipedia.org/wiki/Bengaluru"
+    assert cards[0].extract == "Bengaluru is the capital."
+    assert "<span" not in cards[0].extract
+
+
+@pytest.mark.asyncio
+async def test_candidates_returns_the_plain_shape():
+    class Http:
+        async def get_json(self, url, timeout=1.5):
+            if "api.php" in url:
+                return {"query": {"search": [{"title": "T", "snippet": "text"}]}}
+            return {}
+
+    candidates = await Agent(http=Http()).candidates("q")
+
+    assert candidates == [{"title": "T", "url": "https://en.wikipedia.org/wiki/T", "snippet": "text"}]
 
 
 @pytest.mark.asyncio
