@@ -38,9 +38,9 @@ def module_name(path: str) -> str:
     return relative[:-3].replace(os.sep, ".")
 
 
-def test_there_are_fifty_agents():
-    # 44 numbered local agents + 6 federated.
-    assert len(agent_files()) == 50
+def test_there_are_fifty_one_agents():
+    # 44 numbered local agents + 7 federated (the fleet gained the blender).
+    assert len(agent_files()) == 51
 
 
 @pytest.mark.parametrize("path", agent_files(), ids=os.path.basename)
