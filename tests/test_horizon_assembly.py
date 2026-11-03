@@ -76,8 +76,8 @@ def test_the_dict_matches_the_local_result_schema():
 async def test_the_two_snippets_and_the_toggle():
     card = (await agent([{"title": "T", "url": "https://a.in/x", "snippet": LONG}]).search("q")).cards[0].as_dict()
 
-    assert len(card["snippet_short"]) <= SNIPPET_SHORT_CHARS == 180
-    assert len(card["snippet_full"]) <= SNIPPET_FULL_CHARS == 500
+    assert len(card["snippet_short"]) <= SNIPPET_SHORT_CHARS == 300
+    assert len(card["snippet_full"]) <= SNIPPET_FULL_CHARS == 600
     assert card["has_more"] is True
 
 
