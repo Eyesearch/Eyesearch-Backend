@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 
 from app.agents import load_agent
+
+quality = load_agent("04_quality_agent")
 from tests.conftest import make_document
 
 quality_module = load_agent("04_quality_agent")
@@ -37,13 +39,18 @@ def test_body_text_at_the_floor_is_accepted():
     assert verdict.reason == ""
 
 
-def test_the_digest_is_sha256_of_the_collapsed_body():
+def test_the_digest_covers_the_page_not_only_its_body():
+    """It used to be sha256(body). Once the body is capped at 200 characters,
+    two unrelated pages sharing a template preamble produced one fingerprint and
+    the second was dropped as a duplicate. The URL is part of a page's identity.
+    """
     body = "Karnataka is a state in south western India, and its capital is Bengaluru, the largest city in the state."
-    document = make_document(body_text=body)
+    document = make_document(url="https://a.gov.in/x", body_text=body)
 
     verdict = QualityAgent().check(document)
 
-    assert verdict.digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
+    assert verdict.digest == quality.page_digest("https://a.gov.in/x", body)
+    assert verdict.digest != hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def test_whitespace_does_not_change_the_digest():
@@ -55,7 +62,20 @@ def test_whitespace_does_not_change_the_digest():
     assert gate.check(first).digest == gate.check(second).digest
 
 
-def test_a_repeated_digest_is_rejected_within_one_batch():
+def test_the_same_url_twice_in_a_batch_is_rejected():
+    body = "Karnataka is a state in south western India, and its capital is Bengaluru, the largest city in the state."
+    gate = QualityAgent()
+
+    first = gate.check(make_document(url="https://a.gov.in/", body_text=body))
+    second = gate.check(make_document(url="https://a.gov.in/", body_text=body))
+
+    assert first.ok is True
+    assert second.ok is False
+    assert second.reason == "duplicate"
+
+
+def test_the_same_body_at_another_url_is_a_different_page():
+    """Two sites sharing a template preamble are two pages, not a duplicate."""
     body = "Karnataka is a state in south western India, and its capital is Bengaluru, the largest city in the state."
     gate = QualityAgent()
 
@@ -63,8 +83,7 @@ def test_a_repeated_digest_is_rejected_within_one_batch():
     second = gate.check(make_document(url="https://b.gov.in/", body_text=body))
 
     assert first.ok is True
-    assert second.ok is False
-    assert second.reason == "duplicate"
+    assert second.ok is True
 
 
 def test_reset_clears_the_seen_digests():
