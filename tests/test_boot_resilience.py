@@ -136,3 +136,49 @@ async def test_boot_links_existing_rows_to_a_category(client):
     assert linked >= 1
     left = await client.execute("SELECT COUNT(*) FROM pages WHERE category_id IS NULL")
     assert int(left.scalar(0) or 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_boot_analyses_the_tables_the_planner_uses(client):
+    """Without statistics the planner guesses the row count, and a guess of a
+    hundred rows makes a sequential scan look cheaper than the GIN index."""
+    from app.database import initialize_database, refresh_statistics
+
+    await initialize_database(client)
+
+    assert await refresh_statistics(client) == []
+
+
+@pytest.mark.asyncio
+async def test_statistics_cover_pages(client):
+    from app.database import STATISTICS_TABLES
+
+    assert "pages" in STATISTICS_TABLES
+
+
+@pytest.mark.asyncio
+async def test_a_missing_table_does_not_stop_the_others():
+    """A first boot analyses tables that may not exist yet; that is not an error."""
+    client = Recorder(fail_on="ANALYZE pages")
+
+    await apply_schema_statements(client, ["ANALYZE pages", "ANALYZE sites"])
+
+    assert any("ANALYZE sites" in sql for sql in client.statements)
+
+
+@pytest.mark.asyncio
+async def test_the_ranked_query_uses_the_full_text_index_when_rows_are_many(client, store):
+    """With real statistics the planner may still choose a scan — that is correct
+    when a query matches every row. What must never happen is the index being
+    absent, which is what made this a sequential scan at all."""
+    from app.database import initialize_database
+
+    await initialize_database(client)
+
+    rows = await client.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'pages'")
+    assert "idx_pages_search" in {row[0] for row in rows.rows}
