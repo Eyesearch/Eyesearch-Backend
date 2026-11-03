@@ -94,6 +94,16 @@ ALLOWED_SCHEMES = ("http", "https")
 #: answered with 403. The URL alone is not enough, so the address is included.
 USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in; contact@eyesearch.in)"
 
+#: Sent on every outbound request in the fleet. `Accept` names JSON first and
+#: `*/*` after it, because a provider that only serves HTML still gets a usable
+#: response rather than a 406; `Accept-Language` stops an Indian query coming back
+#: answered in whatever locale the provider guesses.
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-IN,en;q=0.9",
+}
+
 #: Pool sizes. Small on purpose: federation runs once per empty search, so a
 #: large pool would be sockets held open for a request that never comes.
 MAX_KEEPALIVE_CONNECTIONS = 5
@@ -279,8 +289,9 @@ class KnowledgeCard:
 class FreeKnowledgeCourierAgent:
     """Fetch a public definition for a query, if one exists."""
 
-    def __init__(self, http=None, *, timeout: float = TIMEOUT_SECONDS) -> None:
+    def __init__(self, http=None, *, timeout: float = TIMEOUT_SECONDS, settings=None) -> None:
         self._http = http
+        self._settings = settings
         self.timeout = float(timeout)
         self._client = None
         #: Built lazily: a semaphore created at import time binds to whichever
@@ -301,7 +312,7 @@ class FreeKnowledgeCourierAgent:
 
             self._client = httpx.AsyncClient(
                 timeout=self.timeout,
-                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+                headers=dict(DEFAULT_HEADERS),
                 limits=httpx.Limits(
                     max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
                     max_connections=MAX_CONNECTIONS,
@@ -474,6 +485,26 @@ class FreeKnowledgeCourierAgent:
                     break
         return cards
 
+    def _extra_sources(self, query: str) -> list:
+        """The optional couriers, as coroutines, or nothing when unavailable.
+
+        Only added when a client exists to carry them. An injected test client
+        still exercises them, which is how their parsers get covered without a
+        network.
+        """
+        from app.agents.federated.searxng_courier import SearXNGOCourier
+        from app.agents.federated.wikidata_courier import WikidataCourier
+
+        pending = []
+        if self._http is not None:
+            pending.append(WikidataCourier(http=self._http).search(query))
+            base = str(getattr(self._settings, "searxng_base_url", "") or "")
+            if base:
+                pending.append(
+                    SearXNGOCourier(http=self._http, base_url=base).search(query)
+                )
+        return pending
+
     async def search(self, query: str, limit: int = MAX_CARDS) -> list[KnowledgeCard]:
         """Every pure card both sources can give, up to the safety ceiling.
 
@@ -481,11 +512,14 @@ class FreeKnowledgeCourierAgent:
         shared: run in sequence they would spend it twice.
         """
         ceiling = max(1, min(int(limit), MAX_CARDS))
-        results = await asyncio.gather(
-            self.search_wikipedia(query),
-            self.search_duckduckgo(query),
-            return_exceptions=True,
-        )
+        sources = [self.search_wikipedia(query), self.search_duckduckgo(query)]
+
+        # Wikidata and SearXNG are optional and each may be absent. Gathering a
+        # None would raise, so they are only added when they exist.
+        extra = self._extra_sources(query)
+        sources.extend(extra)
+
+        results = await asyncio.gather(*sources, return_exceptions=True)
         cards: list[KnowledgeCard] = []
         for result in results:
             if isinstance(result, list):
