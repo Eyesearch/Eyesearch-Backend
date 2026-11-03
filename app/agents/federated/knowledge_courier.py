@@ -13,12 +13,13 @@ its source — a card that hides where its text came from is worse than no card.
 from __future__ import annotations
 
 import asyncio
+import html
 import ipaddress
 import logging
 import re
 import socket
 from dataclasses import dataclass
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,41 @@ DNS_TIMEOUT_SECONDS = 0.5
 #: is the normal case — a thousand users all searching something we do not index —
 #: and unbounded fan-out is how an IP gets 429'd off a provider for a day.
 MAX_CONCURRENT_REQUESTS = 5
+
+#: How many candidates each source may contribute. Wikipedia's search API
+#: answers with as many as you ask for; DuckDuckGo's RelatedTopics is usually
+#: smaller and nested.
+WIKIPEDIA_RESULT_LIMIT = 15
+DUCKDUCKGO_RESULT_LIMIT = 10
+
+#: The safety ceiling on a whole answer. Not a target — whatever survives the
+#: filters is returned, up to this.
+MAX_CARDS = 20
+
+#: Card buffers. Wider than the index's because an external card has no stored
+#: row to fall back on: a title cut too short cannot be repaired later.
+TITLE_CHARS = 100
+SNIPPET_SHORT_CHARS = 300
+SNIPPET_FULL_CHARS = 600
+
+#: Downloads, not pages. A card that opens a 40 MB PDF is a card the reader
+#: regrets tapping.
+REJECTED_EXTENSIONS = (
+    ".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".exe", ".dmg", ".apk",
+    ".mp4", ".mp3", ".wav", ".avi", ".mkv", ".png", ".jpg", ".jpeg", ".gif",
+    ".svg", ".webp",
+)
+
+#: Routes that ask for a credential or a purchase rather than showing a page.
+#: Matched as whole path segments: a substring test would reject
+#: /administrative-reforms because it contains "admin".
+REJECTED_PATH_SEGMENTS = frozenset(
+    {"login", "signin", "sign-in", "admin", "wp-admin", "cart", "checkout"}
+)
+
+#: Wikipedia's search API, which returns many results where the REST summary
+#: endpoint returns one.
+WIKIPEDIA_SEARCH = "https://en.wikipedia.org/w/api.php"
 
 #: The federated budget. A knowledge card that arrives late is worse than none,
 #: and 800 ms is enough for an endpoint that is going to answer at all.
@@ -160,12 +196,66 @@ def is_public_url(url: str, *, resolve: bool = True) -> tuple[bool, str]:
     return True, ""
 
 
+#: Astral-plane characters and the pictographic blocks. Deliberately excludes
+#: \u2013-\u2014 and \u20B9: the en dash and the rupee sign are typography.
+EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27BF\uFE00-\uFE0F\u200D]+")
+HTML_TAG = re.compile(r"<[^>]{1,200}>")
+
+
+def sanitize_text(text: str) -> str:
+    """Entities decoded, tags stripped, emoji removed, space collapsed.
+
+    The order matters. `&lt;b&gt;` is not a tag until it is decoded, so unescape
+    runs first; and Wikipedia's search API returns its matches wrapped in
+    <span class="searchmatch">, which is markup rather than text.
+    """
+    value = html.unescape(str(text or ""))
+    value = HTML_TAG.sub(" ", value)
+    value = EMOJI.sub("", value)
+    return " ".join(value.split())
+
+
+def truncate_at_word(text: str, limit: int) -> str:
+    """Cut at a word boundary. No ellipsis: the card shows the whole field."""
+    value = " ".join((text or "").split())
+    if len(value) <= limit:
+        return value
+    window = value[:limit]
+    return window.rsplit(" ", 1)[0].rstrip(" ,;:-—") if " " in window else window
+
+
+def is_cardable_url(url: str) -> bool:
+    """Whether a URL is a page worth showing a reader.
+
+    Separate from `is_public_url`, which asks a different question: that one is
+    about safety, this one is about usefulness. A PDF is safe and is still not a
+    card; a login page is safe and is still not an answer.
+    """
+    if not is_public_url(url, resolve=False)[0]:
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+
+    path = (parts.path or "").lower()
+    if any(path.endswith(extension) for extension in REJECTED_EXTENSIONS):
+        return False
+
+    segments = {segment for segment in path.split("/") if segment}
+    if segments & REJECTED_PATH_SEGMENTS:
+        return False
+    return True
+
+
 @dataclass
 class KnowledgeCard:
     title: str = ""
     extract: str = ""
     url: str = ""
     source: str = ""
+    snippet_full: str = ""
+    brand_name: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -302,6 +392,118 @@ class FreeKnowledgeCourierAgent:
             await self._client.aclose()
             self._client = None
 
+    async def search_wikipedia(self, query: str, limit: int = WIKIPEDIA_RESULT_LIMIT) -> list[KnowledgeCard]:
+        """Many results from Wikipedia's search API.
+
+        The REST summary endpoint answers with one article — the one whose title
+        matches exactly — which is why a query phrased as a question usually got
+        nothing back. Search ranks instead of matching, so it answers the query
+        rather than the title.
+        """
+        safe = clean_query(query)
+        if not safe:
+            return []
+
+        params = {
+            "action": "query", "list": "search", "srsearch": safe,
+            "utf8": "1", "format": "json", "srlimit": str(int(limit)),
+        }
+        payload = await self._get_json(f"{WIKIPEDIA_SEARCH}?{urlencode(params)}")
+        items = (payload.get("query", {}) or {}).get("search", []) or []
+
+        cards: list[KnowledgeCard] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = sanitize_text(str(item.get("title") or ""))
+            if not title:
+                continue
+            url = f"https://en.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
+            if not is_cardable_url(url):
+                continue
+            body = sanitize_text(str(item.get("snippet") or ""))
+            cards.append(
+                KnowledgeCard(
+                    title=truncate_at_word(title, TITLE_CHARS),
+                    extract=truncate_at_word(body, SNIPPET_SHORT_CHARS),
+                    url=url,
+                    source="wikipedia",
+                    snippet_full=truncate_at_word(body, SNIPPET_FULL_CHARS),
+                    brand_name="Wikipedia",
+                )
+            )
+        return cards
+
+    async def search_duckduckgo(self, query: str, limit: int = DUCKDUCKGO_RESULT_LIMIT) -> list[KnowledgeCard]:
+        """DuckDuckGo's RelatedTopics, flattened.
+
+        The API nests: a topic may hold its own `Topics` list. Reading only the
+        top level silently loses the whole disambiguation branch.
+        """
+        safe = clean_query(query)
+        if not safe:
+            return []
+
+        payload = await self._get_json(DUCKDUCKGO_IA.format(query=quote(safe)))
+        related = payload.get("RelatedTopics", []) or []
+
+        cards: list[KnowledgeCard] = []
+        for topic in related:
+            if not isinstance(topic, dict):
+                continue
+            entries = topic.get("Topics") or [topic]
+            for entry in entries:
+                if not isinstance(entry, dict) or len(cards) >= limit:
+                    continue
+                url = str(entry.get("FirstURL") or "")
+                text = sanitize_text(str(entry.get("Text") or ""))
+                if not url or not text or not is_cardable_url(url):
+                    continue
+                title, _, body = text.partition(" - ")
+                cards.append(
+                    KnowledgeCard(
+                        title=truncate_at_word(title or text, TITLE_CHARS),
+                        extract=truncate_at_word(body or text, SNIPPET_SHORT_CHARS),
+                        url=url,
+                        source="duckduckgo",
+                        snippet_full=truncate_at_word(text, SNIPPET_FULL_CHARS),
+                        brand_name="DuckDuckGo",
+                    )
+                )
+                if len(cards) >= limit:
+                    break
+        return cards
+
+    async def search(self, query: str, limit: int = MAX_CARDS) -> list[KnowledgeCard]:
+        """Every pure card both sources can give, up to the safety ceiling.
+
+        Concurrent, because the two sources are independent and the budget is
+        shared: run in sequence they would spend it twice.
+        """
+        ceiling = max(1, min(int(limit), MAX_CARDS))
+        results = await asyncio.gather(
+            self.search_wikipedia(query),
+            self.search_duckduckgo(query),
+            return_exceptions=True,
+        )
+        cards: list[KnowledgeCard] = []
+        for result in results:
+            if isinstance(result, list):
+                cards.extend(result)
+            elif isinstance(result, BaseException):
+                logger.debug("a federated source failed: %s", result)
+
+        # A duplicate URL from both sources is one card, and the first wins:
+        # Wikipedia's is the more stable of the two.
+        seen: set[str] = set()
+        unique: list[KnowledgeCard] = []
+        for card in cards:
+            if card.url in seen:
+                continue
+            seen.add(card.url)
+            unique.append(card)
+        return unique[:ceiling]
+
     async def wikipedia(self, query: str) -> KnowledgeCard:
         safe = clean_query(query)
         if not safe:
@@ -341,18 +543,12 @@ class FreeKnowledgeCourierAgent:
             return card
         return await self.duckduckgo(query)
 
-    async def search(self, query: str, limit: int = 10) -> list[dict[str, str]]:
-        """Raw candidates in the shape the sanitizer expects.
-
-        Deliberately plain: title, url, snippet. Nothing here knows about cards,
-        brands or display rules — that is the sanitizer's job, and a courier that
-        pre-formats is a courier whose formatting drifts from everyone else's.
-        """
-        card = await self.lookup(query)
-        if not card:
-            return []
-        candidates = [{"title": card.title, "url": card.url, "snippet": card.extract}]
-        return candidates[: max(1, int(limit))]
+    async def candidates(self, query: str, limit: int = MAX_CARDS) -> list[dict[str, str]]:
+        """The same results in the plain shape the horizon also accepts."""
+        return [
+            {"title": card.title, "url": card.url, "snippet": card.extract}
+            for card in await self.search(query, limit=limit)
+        ]
 
 
 # ---------------------------------------------------------------------------
