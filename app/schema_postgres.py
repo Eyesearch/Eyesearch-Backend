@@ -180,8 +180,11 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
         BEFORE INSERT OR UPDATE OF category ON pages
         FOR EACH ROW EXECUTE FUNCTION pages_category_id_sync()
     """,
-    # Existing rows: derive the link from the text they already carry.
-    "UPDATE pages SET category = category WHERE category_id IS NULL",
+    # The trigger looks the category up by name on every row it touches, so the
+    # lookup needs an index before anything bulk-updates `pages`. Without one,
+    # each of 7,000 rows does a sequential scan of `categories` and the backfill
+    # below runs past the statement timeout at boot.
+    "CREATE INDEX IF NOT EXISTS idx_categories_name ON categories(name)",
     "CREATE INDEX IF NOT EXISTS idx_pages_category_id ON pages(category_id)",
     # Filtered search orders by quality within a category; the composite
     # lets PostgreSQL walk the index instead of sorting the matches.
