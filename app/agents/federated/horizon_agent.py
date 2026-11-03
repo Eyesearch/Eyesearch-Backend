@@ -33,7 +33,9 @@ FEDERATION_BUDGET_SECONDS = 0.5
 
 @dataclass
 class FederatedResult:
-    cards: list[dict[str, str]] = field(default_factory=list)
+    #: SearchCard objects, not dicts. One shape end to end means the caller
+    #: converts exactly once, with `as_dict()`, and cannot get it wrong.
+    cards: list[Any] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     timed_out: bool = False
 
@@ -155,7 +157,7 @@ class FederatedHorizonAgent:
         self._trap_in_background([card.url for card in cards])
 
         return FederatedResult(
-            cards=[card.as_dict() for card in cards],
+            cards=cards,
             sources=sorted({card.source for card in cards}),
         )
 
