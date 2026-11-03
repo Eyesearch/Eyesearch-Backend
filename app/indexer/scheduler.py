@@ -27,7 +27,6 @@ ChroniclerReporterAgent = load_agent("30_chronicler_reporter_agent").ChroniclerR
 TrieAutosuggestAgent = load_agent("39_autosuggest_trie_agent").TrieAutosuggestAgent
 DisasterSnapshotAgent = load_agent("38_disaster_snapshot_agent").DisasterSnapshotAgent
 SupremeMarshalAgent = load_agent("50_supreme_marshal_agent").SupremeMarshalAgent
-FederatedHorizonAgent = load_agent("41_federated_horizon_agent").FederatedHorizonAgent
 FreeKnowledgeCourierAgent = load_agent("42_free_knowledge_courier").FreeKnowledgeCourierAgent
 
 logger = logging.getLogger(__name__)
@@ -156,13 +155,9 @@ def start_workers(
     # the thing that decides whether any outbound call may happen at all.
     orchestrator.marshal = SupremeMarshalAgent()
 
-    if settings.federation_enabled:
-        orchestrator.federated = FederatedHorizonAgent(
-            knowledge=FreeKnowledgeCourierAgent(),
-            settings=settings,
-            budget=settings.federation_budget_seconds,
-        )
-        logger.info("federated fallback enabled")
+    # Federation is answered inside SearchService, where the blender has the
+    # organic results to compare against. Nothing is attached to the crawler:
+    # an external result never enters the crawl, so the worker has no use for it.
 
     if settings.maintenance_enabled:
         handles.add(
