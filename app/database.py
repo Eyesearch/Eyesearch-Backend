@@ -417,6 +417,73 @@ async def normalize_legacy_subdomains(client: LibsqlClient) -> int:
     return merged
 
 
+async def apply_schema_statements(client: LibsqlClient, statements) -> list[str]:
+    """Apply schema statements one at a time, and keep going when one fails.
+
+    They used to run as a single batch, which is one transaction: the first
+    failure rolled back everything after it. A slow backfill at boot therefore
+    also discarded the GIN index and every other index that came after it, and
+    the app then ran — degraded — with a sequential scan for every search. The
+    timeout was visible; the missing indexes were not.
+
+    Each statement is idempotent (`IF NOT EXISTS`), so applying the survivors of
+    a partial run costs nothing on the next boot.
+    """
+    failures: list[str] = []
+    for sql in statements:
+        try:
+            await client.execute(sql)
+        except LibsqlError as error:
+            failures.append(f"{sql.strip()[:60]}: {error}")
+            logger.warning("schema statement failed, continuing: %s", failures[-1])
+    if failures:
+        logger.error("%d schema statements failed; the rest were applied", len(failures))
+    return failures
+
+
+async def backfill_category_ids(client: LibsqlClient) -> int:
+    """Link rows that predate the trigger to their category.
+
+    Two set-based statements, not one row-at-a-time update. The old form —
+    `UPDATE pages SET category = category WHERE category_id IS NULL` — fired the
+    BEFORE trigger once per row, and each firing did three lookups on
+    `categories`. On a table of seven thousand pages that ran past the statement
+    timeout at boot and left the app degraded.
+
+    Updating `category_id` directly does not fire the trigger: it is declared
+    `UPDATE OF category`, and the column being written is a different one. So
+    this is a single join and a single fallback, both bounded by the rows that
+    are actually missing a link. On a healthy database the first statement
+    matches nothing and costs one index probe.
+    """
+    if _dialect(client) != "postgres":
+        return 0
+
+    try:
+        matched = await client.execute(
+            "UPDATE pages p SET category_id = c.id FROM categories c "
+            "WHERE p.category_id IS NULL AND c.name = p.category"
+        )
+        # Anything whose category text matches no row still links to something,
+        # rather than staying uncategorised for ever.
+        fallback = await client.execute(
+            "UPDATE pages p SET category_id = c.id FROM categories c "
+            "WHERE p.category_id IS NULL AND c.code = 'WEB'"
+        )
+    except LibsqlError as error:
+        # A backfill is a repair, not a precondition. Failing here must not stop
+        # the app from serving: the rows keep their text and are linked next boot.
+        logger.warning("category backfill skipped: %s", error)
+        return 0
+
+    linked = int(getattr(matched, "rows_affected", 0) or 0) + int(
+        getattr(fallback, "rows_affected", 0) or 0
+    )
+    if linked:
+        logger.info("linked %d pages to their category", linked)
+    return linked
+
+
 async def initialize_database(
     client: LibsqlClient,
     *,
@@ -428,8 +495,9 @@ async def initialize_database(
         await migrate_legacy_schema(client, allow_drop=allow_legacy_drop)
 
     if _dialect(client) == "postgres":
-        await client.batch([(sql, ()) for sql in POSTGRES_SCHEMA_STATEMENTS])
+        await apply_schema_statements(client, POSTGRES_SCHEMA_STATEMENTS)
         await ensure_columns(client)
+        await backfill_category_ids(client)
     else:
         await client.batch([(sql, ()) for sql in SCHEMA_STATEMENTS])
         await ensure_columns(client)
