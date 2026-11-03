@@ -808,9 +808,15 @@ class IndexStore:
             results = await self._client.batch(
                 [
                     (
+                        # Gate one. ON CONFLICT only dedupes against the queue;
+                        # a URL already in `pages` was queued again on every
+                        # crawl that linked to it, and the worker then spent its
+                        # batch on pages it had already indexed.
                         "INSERT INTO crawl_queue (url, domain, status) "
-                        "VALUES (?, ?, 'pending') ON CONFLICT (url) DO NOTHING",
-                        (url, domain),
+                        "SELECT ?, ?, 'pending' WHERE NOT EXISTS ("
+                        "  SELECT 1 FROM pages p WHERE p.url = ?"
+                        ") ON CONFLICT (url) DO NOTHING",
+                        (url, domain, url),
                     )
                     for url, domain in chunk
                 ]
@@ -847,7 +853,11 @@ class IndexStore:
             domain_args = list(domains)
 
         result = await self._client.execute(
-            "UPDATE crawl_queue SET status = 'pending', processed_at = NULL "
+            # Priority 0 marks this as a deliberate re-fetch. Without it the
+            # row is indistinguishable from a stale duplicate and gate two would
+            # skip it for ever.
+            "UPDATE crawl_queue SET status = 'pending', priority = 0, "
+            "processed_at = NULL "
             "WHERE id IN ("
             "  SELECT id FROM crawl_queue"
             "  WHERE status = 'processed'"
@@ -983,6 +993,12 @@ class IndexStore:
             "         ROW_NUMBER() OVER (PARTITION BY cq.domain "
             "ORDER BY cq.priority ASC, cq.id ASC) AS rn "
             "  FROM crawl_queue cq WHERE cq.status = 'pending'"
+            # Gate two. A row that is already indexed costs a fetch and writes
+            # nothing. Priority 0 marks a deliberate re-fetch — a repair, or a
+            # re-arm for freshness — and those must still run.
+            "    AND (cq.priority = 0 OR NOT EXISTS ("
+            "      SELECT 1 FROM pages p WHERE p.url = cq.url"
+            "    ))"
             "    AND cq.domain NOT IN ("
             "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
             "      GROUP BY s.domain HAVING COUNT(*) >= "
