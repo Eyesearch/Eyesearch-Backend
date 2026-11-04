@@ -174,12 +174,43 @@ class Settings(BaseSettings):
     #: Outbound links kept from one page before scope filtering. A page can
     #: carry thousands of hrefs; the batch holds every one of them at once.
     max_outbound_links_per_page: int = 100
-    crawl_batch_sleep_seconds: float = 10.0
+    #: No pause between batches. There used to be ten seconds here, on top of
+    #: the per-request work, and it was the largest single cost in the loop:
+    #: politeness belongs to a domain, not to the worker, and a delay that
+    #: applies between two unrelated hosts buys nothing and costs everything.
+    crawl_batch_sleep_seconds: float = 0.0
     crawl_empty_backoff_seconds: float = 20.0
-    # A batch waits for its slowest member, so this bounds the whole batch, not
-    # just one request. 4s fails fast on dead hosts; some Indian government
-    # portals legitimately take longer, so raise it if the failure rate climbs.
+    #: A batch waits for its slowest member, so this bounds the whole batch, not
+    #: just one request. 4s fails fast on dead hosts; some Indian government
+    #: portals legitimately take longer, so raise it if the failure rate climbs.
     crawl_timeout_seconds: float = 7.0
+
+    #: Phase timeouts, in seconds. The single value above is applied to every
+    #: phase by httpx, so a host that accepts the connection and then says
+    #: nothing costs connect + read — twice the number anyone intended. Split,
+    #: the total is bounded and stated.
+    crawl_connect_timeout_seconds: float = 3.0
+    crawl_read_timeout_seconds: float = 5.0
+    crawl_write_timeout_seconds: float = 3.0
+    crawl_pool_timeout_seconds: float = 3.0
+
+    #: Sockets the fetcher may hold at once. Unbounded, a batch of sixty dead
+    #: hosts opens sixty sockets and leaves them in TIME_WAIT; on a 1 GB
+    #: instance that is how the file-descriptor ceiling is reached and how the
+    #: next connect fails with an error that looks like a network fault.
+    crawl_max_connections: int = 20
+    crawl_max_keepalive_connections: int = 5
+
+    #: Pause before the same domain is asked again. Applied per domain, so two
+    #: URLs from different hosts proceed together.
+    crawl_domain_politeness_seconds: float = 1.0
+
+    #: Consecutive failures after which a domain is considered down. Five dead
+    #: hosts accounted for 540 failures: each of their URLs was retried, and a
+    #: domain with a hundred queued URLs spent hours proving the same point.
+    crawl_breaker_failure_threshold: int = 5
+    #: How long a domain stays open before one probe is allowed through.
+    crawl_breaker_cooldown_seconds: float = 86400.0
 
     # --- Turso HTTP timeouts ------------------------------------------------
     #: A cold TLS handshake to Turso can take longer than a warm read; keeping
@@ -187,10 +218,19 @@ class Settings(BaseSettings):
     turso_connect_timeout_seconds: float = 10.0
     turso_read_timeout_seconds: float = 20.0
     crawl_max_body_bytes: int = 512_000
-    #: Back to the stable baseline. Sixty concurrent fetches is what made the
-    #: search API starve and the target hosts throttle us; one at a time with a
-    #: real pause between batches is slower and does not fall over.
-    crawl_concurrency: int = 1
+    #: Six at a time. Sixty made the search API starve and the hosts throttle
+    #: us, and one made a batch take longer than the interval between them —
+    #: sixty URLs, each waiting on one slot, at up to two attempts and a
+    #: timeout each. Six with a bounded pool and split phase timeouts is the
+    #: middle: enough to keep the wire busy, few enough to stay polite.
+    crawl_concurrency: int = 6
+    #: Queue depth at which background discovery stops, and the depth it
+    #: resumes at. Harvesting sitemaps while eighteen thousand URLs already wait
+    #: costs requests and CPU to enlarge a backlog, and logs `urls_queued=0` —
+    #: which reads as a finished job rather than a pointless one.
+    crawl_frontier_pause_above: int = 5000
+    crawl_frontier_resume_below: int = 2000
+
     #: How many discovered URLs go into one pipeline request. A batch of 120
     #: pages can discover hundreds of links; sending them as one request
     #: overruns the HTTP response window and fails with a ReadTimeout.
