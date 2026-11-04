@@ -52,7 +52,11 @@ MAX_CARDS = 20
 #: row to fall back on: a title cut too short cannot be repaired later.
 TITLE_CHARS = 100
 SNIPPET_SHORT_CHARS = 300
-SNIPPET_FULL_CHARS = 600
+#: What "More" reveals. A Wikipedia lead paragraph runs to about a thousand
+#: characters; cutting at six hundred ended mid-thought and made the toggle
+#: reveal a fragment rather than an answer. Twenty cards at this width is about
+#: 24 KB, which is not a memory concern.
+SNIPPET_FULL_CHARS = 1200
 
 #: Downloads, not pages. A card that opens a 40 MB PDF is a card the reader
 #: regrets tapping.
