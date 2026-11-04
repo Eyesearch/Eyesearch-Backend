@@ -1079,6 +1079,19 @@ class FrontierAgent:
                 return 0
             return await self._rearm_authoritative()
 
+        # Discovery is for a thin frontier. With eighteen thousand URLs already
+        # waiting, asking domains what else they publish spends requests and CPU
+        # to make a backlog bigger — and the log line reads `urls_queued=0`,
+        # which is the work having been pointless rather than the work being
+        # finished.
+        if await self.depth() >= self._settings.crawl_frontier_pause_above:
+            logger.debug(
+                "frontier expansion paused: %d URLs already pending (resumes below %d)",
+                await self.depth(),
+                self._settings.crawl_frontier_resume_below,
+            )
+            return 0
+
         # A thin frontier is the moment to ask a domain what it publishes,
         # rather than waiting to rediscover it one link at a time.
         harvested = await self.harvest_sitemap()
