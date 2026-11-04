@@ -103,3 +103,39 @@ def test_secrets_are_still_excluded():
 
     assert is_excluded(".env", patterns)
     assert is_excluded("local.db", patterns)
+
+
+# ---------------------------------------------------------------------------
+# Network binding
+# ---------------------------------------------------------------------------
+
+
+def _read(name: str) -> str:
+    with open(os.path.join(ROOT, name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def test_the_container_uses_the_host_network():
+    """The crawler and the federation calls need the VM's own interface.
+
+    In a bridge network the container has its own address, so outbound calls
+    leave through a NAT the host's DNS64 does not describe, and the IPv6
+    interface the VM was given is never used.
+    """
+    compose = _read("docker-compose.yml")
+
+    assert "network_mode: host" in compose
+
+
+def test_uvicorn_binds_both_stacks():
+    """`0.0.0.0` is IPv4 only; the VM has an IPv6 interface and Nginx uses it."""
+    dockerfile = _read("Dockerfile")
+
+    assert '"--host", "::"' in dockerfile
+    assert '"0.0.0.0"' not in dockerfile
+
+
+def test_the_healthcheck_probes_the_stack_uvicorn_binds():
+    compose = _read("docker-compose.yml")
+
+    assert "[::1]:8000/health" in compose
