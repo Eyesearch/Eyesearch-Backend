@@ -145,14 +145,29 @@ async def test_a_card_pointing_at_a_crawled_page_is_dropped():
 @pytest.mark.asyncio
 async def test_cards_are_ordered_by_relevance():
     cards = [
-        card("Unrelated article", "https://a.in/x", "nothing to do with the query at all"),
-        card("Karnataka history", "https://b.in/y", "Karnataka history from the empires onward"),
+        card("Karnataka history overview", "https://b.in/y", "Karnataka history from the empires onward"),
+        card("Karnataka history notes", "https://a.in/x", "Karnataka history in brief"),
     ]
 
     out = await blender().blend("karnataka history", [], lambda: cards_now(cards))
 
-    assert out["knowledge_cards"][0]["title"] == "Karnataka history"
-    assert out["knowledge_cards"][0]["relevance"] > out["knowledge_cards"][1]["relevance"]
+    scores = [c["relevance"] for c in out["knowledge_cards"]]
+    assert scores == sorted(scores, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_never_names_the_query_is_dropped():
+    """A search for a payment app returned the actors who advertise it: the
+    words never appear, but the source ranked them and authority carried them
+    over the line."""
+    cards = [
+        card("PhonePe", "https://a.in/x", "PhonePe is an Indian payments company."),
+        card("Dulquer Salmaan", "https://b.in/y", "An Indian actor who endorsed the app."),
+    ]
+
+    out = await blender().blend("phonepe", [], lambda: cards_now(cards))
+
+    assert [c["title"] for c in out["knowledge_cards"]] == ["PhonePe"]
 
 
 @pytest.mark.asyncio
@@ -168,11 +183,21 @@ async def test_a_duplicate_card_url_appears_once():
 
 
 def test_the_ceiling_is_respected():
-    cards = [card(f"Article number {i}", f"https://a{i}.in/x", "body") for i in range(30)]
+    cards = [
+        card(f"Article number {i} about articles", f"https://a{i}.in/x", "an article about article number")
+        for i in range(30)
+    ]
 
     ranked = blender(ceiling=5).rank("article", cards)
 
     assert len(ranked) == 5
+
+
+def test_the_default_ceiling_is_small():
+    """A row of twenty chips under an answer is clutter, not an answer."""
+    from app.agents.federated.knowledge_blender import DEFAULT_CARD_CEILING
+
+    assert DEFAULT_CARD_CEILING <= 5
 
 
 def test_question_words_do_not_dilute_the_score():
@@ -198,13 +223,25 @@ async def test_a_confident_card_becomes_the_hero():
 
 
 @pytest.mark.asyncio
-async def test_a_weak_card_is_not_a_hero_but_is_still_listed():
-    cards = [card("Something", "https://a.in/x", "barely related")]
+async def test_a_card_that_only_half_matches_is_not_a_hero():
+    """It mentions one of the words; that is not an answer to the question."""
+    cards = [card("Karnataka", "https://a.in/x", "Karnataka")]
 
-    out = await blender().blend("karnataka history", [], lambda: cards_now(cards))
+    out = await blender().blend("karnataka history geography culture", [], lambda: cards_now(cards))
 
     assert out["primary_card"] is None
-    assert len(out["knowledge_cards"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_card_below_the_floor_is_not_shown():
+    """One word out of five, in a snippet that says nothing else."""
+    cards = [card("Karnataka", "https://a.in/x", "Karnataka")]
+
+    out = await blender().blend(
+        "karnataka history geography culture language", [], lambda: cards_now(cards)
+    )
+
+    assert out["knowledge_cards"] == []
 
 
 def test_an_informational_query_is_recognised():
