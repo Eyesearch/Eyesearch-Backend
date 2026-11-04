@@ -167,4 +167,9 @@ def test_the_ceilings_are_unchanged():
 
     # The flat cap is gone; the frontier owns the per-host ceiling now.
     assert not hasattr(settings, "max_pages_per_domain")
-    assert settings.page_body_char_ceiling == 200
+    # Two kilobytes: a snippet drawn from a 200 character body is the opening
+    # clause of a sentence, not a summary of the page.
+    assert settings.page_body_char_ceiling == 2048
+    # The budget must still clear the ceiling, or it clamps every page back
+    # down and the ceiling above is a lie.
+    assert settings.domain_body_budget_chars >= settings.page_body_char_ceiling * 25
