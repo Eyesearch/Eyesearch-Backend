@@ -107,7 +107,9 @@ async def test_one_source_failing_does_not_lose_the_other():
 def test_the_buffers_are_the_agreed_widths():
     assert courier.TITLE_CHARS == 100
     assert courier.SNIPPET_SHORT_CHARS == 300
-    assert courier.SNIPPET_FULL_CHARS == 600
+    # Wide enough to hold a Wikipedia lead paragraph whole, so the toggle
+    # reveals an answer rather than a fragment.
+    assert courier.SNIPPET_FULL_CHARS == 1200
 
 
 @pytest.mark.asyncio
