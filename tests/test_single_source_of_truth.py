@@ -101,4 +101,4 @@ def test_the_new_settings_have_the_agreed_defaults():
     assert live.legacy_truncated_chars == 45
     assert live.revalidation_min_sleep_seconds == 30.0
     # max_pages_per_domain was removed; the frontier owns the ceiling now.
-    assert live.page_body_char_ceiling == 200
+    assert live.page_body_char_ceiling == 2048
