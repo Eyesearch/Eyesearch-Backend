@@ -37,4 +37,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
     CMD python -c "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# `::` binds dual-stack: IPv6 on the VM's own address and IPv4-mapped on the
+# same socket. `0.0.0.0` is IPv4 only, so a host with an IPv6 interface answered
+# on one stack and not the other — and DNS64/NAT64 resolution hands back IPv6.
+# Nginx in front listens on both, so a backend on one is half a service.
+CMD ["uvicorn", "app.main:app", "--host", "::", "--port", "8000"]
