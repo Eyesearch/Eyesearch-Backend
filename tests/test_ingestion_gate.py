@@ -145,12 +145,21 @@ def test_a_site_may_use_its_own_brand_in_a_title():
 # ---------------------------------------------------------------------------
 
 
-def test_the_crawl_is_back_to_one_at_a_time():
+def test_the_crawl_runs_at_a_bounded_concurrency():
+    """Six, not sixty and not one.
+
+    Sixty starved the search API and got us throttled; one meant a batch of
+    sixty URLs took longer than the interval between batches, because every URL
+    queued behind a single slot while each was allowed two attempts and a
+    timeout. Politeness is now per domain, so the worker does not need to be
+    slow to stay polite.
+    """
     settings = Settings(_env_file=None)
 
-    assert settings.crawl_concurrency == 1
-    assert settings.crawl_batch_sleep_seconds == 10.0
+    assert settings.crawl_concurrency == 6
+    assert settings.crawl_batch_sleep_seconds == 0.0
     assert settings.crawl_empty_backoff_seconds == 20.0
+    assert settings.crawl_domain_politeness_seconds > 0
 
 
 def test_the_ceilings_are_unchanged():
