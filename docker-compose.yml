@@ -49,7 +49,10 @@ services:
     cpus: "1.5"
 
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      # Probes the IPv6 loopback, because that is what uvicorn binds. Asking
+      # 127.0.0.1 works through the IPv4-mapped socket on most hosts, but a
+      # healthcheck that depends on a mapping is a healthcheck that lies once.
+      test: ["CMD", "python", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://[::1]:8000/health', timeout=4).status == 200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 25s
