@@ -277,3 +277,102 @@ def test_the_blender_never_touches_the_database():
     source = open(module.__file__, encoding="utf-8").read()
     for forbidden in ("app.engine.store", "app.postgres", "crawl_queue", "INSERT INTO"):
         assert forbidden not in source
+
+
+# ---------------------------------------------------------------------------
+# Exact title promotion
+# ---------------------------------------------------------------------------
+
+
+def test_an_exact_title_match_scores_full_marks():
+    """Relevance measures how much a page talks about a subject; a title match
+    is the subject itself."""
+    from app.agents.federated.knowledge_blender import EXACT_MATCH_SCORE
+
+    ranked = blender().rank("karnataka", [card("Karnataka", "https://a.in/x", "a state")])
+
+    assert EXACT_MATCH_SCORE == 1.0
+    assert ranked[0].score == EXACT_MATCH_SCORE
+
+
+def test_an_exact_title_outranks_a_denser_article():
+    cards = [
+        card(
+            "Architecture of Karnataka",
+            "https://en.wikipedia.org/wiki/Architecture_of_Karnataka",
+            "The antiquity of architecture of Karnataka is traced to its southern Neolithic and beyond.",
+        ),
+        card(
+            "Karnataka",
+            "https://en.wikipedia.org/wiki/Karnataka",
+            "Karnataka is a state in south western India.",
+        ),
+    ]
+
+    ranked = blender().rank("karnataka", cards)
+
+    assert ranked[0].card.title == "Karnataka"
+    assert ranked[0].score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_an_exact_title_becomes_the_primary_card():
+    cards = [
+        card("Architecture of Karnataka", "https://a.in/arch", "architecture of Karnataka traced"),
+        card("Karnataka", "https://b.in/ka", "Karnataka is a state in south western India."),
+    ]
+
+    out = await blender().blend("karnataka", [], lambda: cards_now(cards))
+
+    assert out["primary_card"]["title"] == "Karnataka"
+    assert out["knowledge_cards"][0]["title"] == "Karnataka"
+
+
+@pytest.mark.asyncio
+async def test_the_match_ignores_question_words():
+    cards = [card("Karnataka", "https://b.in/ka", "Karnataka is a state in south western India.")]
+
+    out = await blender().blend("what is karnataka", [], lambda: cards_now(cards))
+
+    assert out["primary_card"]["title"] == "Karnataka"
+
+
+@pytest.mark.asyncio
+async def test_the_match_ignores_case_and_spacing():
+    cards = [card("  KARNATAKA  ", "https://b.in/ka", "Karnataka is a state in south western India.")]
+
+    out = await blender().blend("karnataka", [], lambda: cards_now(cards))
+
+    assert out["knowledge_cards"][0]["relevance"] == 1.0
+
+
+def test_without_an_exact_match_the_best_card_wins():
+    cards = [
+        card("Economy of Karnataka", "https://a.in/e", "Karnataka economy in brief"),
+        card("History of Karnataka", "https://b.in/h", "Karnataka history from the empires onward"),
+    ]
+
+    ranked = blender().rank("karnataka history", cards)
+
+    assert ranked[0].card.title == "History of Karnataka"
+
+
+def test_the_ceiling_is_three():
+    from app.agents.federated.knowledge_blender import DEFAULT_CARD_CEILING
+
+    assert DEFAULT_CARD_CEILING == 3
+
+
+@pytest.mark.asyncio
+async def test_never_more_than_three_cards():
+    cards = [card(f"Karnataka topic {i}", f"https://a{i}.in/x", "Karnataka topic text") for i in range(10)]
+
+    out = await blender().blend("karnataka", [], lambda: cards_now(cards))
+
+    assert len(out["knowledge_cards"]) <= 3
+
+
+def test_the_full_snippet_buffer_holds_a_paragraph():
+    from app.agents.federated.knowledge_courier import SNIPPET_FULL_CHARS
+
+    assert SNIPPET_FULL_CHARS >= 1000
