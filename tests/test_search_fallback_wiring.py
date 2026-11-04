@@ -53,12 +53,16 @@ async def test_an_empty_index_is_filled_by_the_knowledge_panel(store):
     `results` means "pages we crawled and verified". An external card in that
     slot would be a claim the index cannot back.
     """
-    federation = StubFederation([SearchCard(title="External answer page", url="https://a.in/x", snippet_short="text")])
-    payload = await service(store, federation).search("nothing-matches-this-xyzzy")
+    # The card has to name the query: one that shares no word with it is an
+    # answer to a different question and is dropped.
+    federation = StubFederation(
+        [SearchCard(title="KSRTC bus timings", url="https://a.in/x", snippet_short="KSRTC bus timings and routes")]
+    )
+    payload = await service(store, federation).search("ksrtc bus timings")
 
     assert federation.calls == 1
     assert payload["results"] == []
-    assert payload["knowledge_cards"][0]["title"] == "External answer page"
+    assert payload["knowledge_cards"][0]["title"] == "KSRTC bus timings"
 
 
 @pytest.mark.asyncio
@@ -94,11 +98,13 @@ async def test_federation_off_makes_no_call(store):
 @pytest.mark.asyncio
 async def test_the_conversion_happens_once(store):
     """A card that is already a dict must not be handed to `.as_dict()` again."""
-    federation = StubFederation([SearchCard(title="X", url="https://a.in/x", snippet_short="s")])
-    payload = await service(store, federation).search("nothing-matches-this-xyzzy")
+    federation = StubFederation(
+        [SearchCard(title="KSRTC bus", url="https://a.in/x", snippet_short="KSRTC bus timings")]
+    )
+    payload = await service(store, federation).search("ksrtc bus timings")
 
     card = payload["knowledge_cards"][0]
     assert isinstance(card, dict)
-    assert card["snippet_short"] == "s"
+    assert card["snippet_short"] == "KSRTC bus timings"
     assert "has_more" in card
     assert "relevance" in card
