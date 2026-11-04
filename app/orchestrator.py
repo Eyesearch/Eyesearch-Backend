@@ -20,6 +20,7 @@ from typing import Sequence
 import httpx
 
 from app.agents import load_agent
+from app.crawler.breaker import DomainCircuitBreaker
 from app.engine.config import Settings, get_settings
 from app.engine.store import IndexStore, PageDocument, QueuedUrl
 from app.indexer.guard import StorageGuard
@@ -221,6 +222,14 @@ class Orchestrator:
         )
         self.batches = 0
         self.pages_indexed = 0
+        # Domains that stopped answering during this run. Per-run state on
+        # purpose: a restart should get to form its own opinion.
+        self._breaker = DomainCircuitBreaker(
+            threshold=self._settings.crawl_breaker_failure_threshold,
+            cooldown=self._settings.crawl_breaker_cooldown_seconds,
+        )
+        # When each domain was last asked, for per-domain politeness.
+        self._last_request: dict[str, float] = {}
         self._pending_sitemap_domains: set[str] = set()
         self._sitemap_harvest_task: asyncio.Task[None] | None = None
 
@@ -301,6 +310,25 @@ class Orchestrator:
             else:
                 eligible.append(item)
 
+        # A domain whose breaker is open is not asked again. Its queued rows are
+        # parked rather than fetched: a hundred URLs on a dead host used to cost
+        # a hundred timeouts to learn one fact.
+        still_eligible: list[QueuedUrl] = []
+        for item in eligible:
+            if self._breaker.is_open(item.domain):
+                outcome.skipped += 1
+                self._tally(outcome.skip_reasons, "circuit_open")
+                skipped_ids.append(item.rowid)
+                if self._breaker.should_report(item.domain):
+                    logger.warning(
+                        "domain %s is not answering; parking its queued URLs for %.0fs",
+                        item.domain,
+                        self._breaker.cooldown,
+                    )
+            else:
+                still_eligible.append(item)
+        eligible = still_eligible
+
         # robots.txt is checked per host, cached for an hour, and fetched
         # concurrently: a batch of 120 URLs across 100 hosts would otherwise
         # serialise at up to 2s each. A refusal parks the URL like a cap skip.
@@ -332,6 +360,17 @@ class Orchestrator:
             if not result.ok:
                 outcome.rejected += 1
                 reason = result.reason or "fetch_failed"
+                # Only a transport failure counts against a domain. A 404 is
+                # the server answering; it says the page is gone, not that the
+                # host is down, and opening the breaker on it would park a
+                # healthy domain.
+                if reason in ("timeout", "connect_error", "connection_error") or reason.startswith("gather_error"):
+                    if self._breaker.record_failure(item.domain):
+                        logger.warning(
+                            "domain %s failed %d times in a row; opening its breaker",
+                            item.domain,
+                            self._breaker.threshold,
+                        )
                 self._tally(outcome.skip_reasons, reason)
                 if (
                     reason == "timeout"
@@ -344,6 +383,7 @@ class Orchestrator:
                 continue
 
             outcome.fetched += 1
+            self._breaker.record_success(item.domain)
             parsed = self._parser.parse(item.url, result.html)
             if not parsed.ok:
                 outcome.rejected += 1
