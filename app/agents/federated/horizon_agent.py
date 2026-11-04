@@ -47,7 +47,11 @@ class FederatedResult:
 #: These match the sanitizer's, because a card assembled here and a card
 #: assembled there must be the same size.
 SNIPPET_SHORT_CHARS = 300
-SNIPPET_FULL_CHARS = 600
+#: What "More" reveals. A Wikipedia lead paragraph runs to about a thousand
+#: characters; cutting at six hundred ended mid-thought and made the toggle
+#: reveal a fragment rather than an answer. Twenty cards at this width is about
+#: 24 KB, which is not a memory concern.
+SNIPPET_FULL_CHARS = 1200
 TITLE_CHAR_CAP = 100
 BRAND_CHAR_CAP = 50
 
