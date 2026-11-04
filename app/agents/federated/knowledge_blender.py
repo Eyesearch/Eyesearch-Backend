@@ -37,6 +37,11 @@ DEFAULT_TIMEOUT_MS = 850
 #: question and the panel is a footnote to it, not a second set of results.
 DEFAULT_CARD_CEILING = 3
 
+#: The score an exact title match is given. It is not a measurement — it is a
+#: statement that this card is the thing that was asked for, and no amount of
+#: word overlap elsewhere should outrank it.
+EXACT_MATCH_SCORE = 1.0
+
 #: A card must reach this to be shown at all. Below it the card is present
 #: because a source returned it, not because it answers anything.
 MIN_CARD_RELEVANCE = 0.30
@@ -213,6 +218,22 @@ class KnowledgeBlender:
         )
         return bool(wanted & haystack)
 
+    @staticmethod
+    def _is_exact_title(query: str, payload: dict) -> bool:
+        """Whether a card's title *is* what was asked for.
+
+        Compared against the query as typed and against its content words, so
+        "what is karnataka" still recognises a card titled "Karnataka". The
+        stopwords are the ones that frame a question without naming anything.
+        """
+        title = str(payload.get("title") or "").strip().lower()
+        if not title:
+            return False
+        if title == " ".join((query or "").split()).strip().lower():
+            return True
+        content = " ".join(sorted(_content_tokens(query)))
+        return bool(content) and title == content
+
     def rank(self, query: str, cards: Sequence[Any], organic: Sequence[dict] = ()) -> list[ScoredCard]:
         """Score, drop what the index already has, and sort.
 
@@ -230,13 +251,21 @@ class KnowledgeBlender:
                 continue
             seen.add(key)
             scored_card = self.score(query, card)
+            # An exact title match takes the top slot outright. Relevance
+            # measures how much a page talks about a subject; a title match is
+            # the subject itself, and the reader who typed "karnataka" wants
+            # Karnataka before an article about its architecture.
+            if self._is_exact_title(query, payload):
+                scored_card.score = EXACT_MATCH_SCORE
+                scored_card.signals["exact_title"] = 1.0
             # A card must name something the query named. Without this a search
             # for a payment app returned the actors who advertise it: the words
             # never appear, but the source ranked them and the authority term
             # carried them over the line.
-            if not self._names_the_query(query, payload):
+            exact = self._is_exact_title(query, payload)
+            if not exact and not self._names_the_query(query, payload):
                 continue
-            if scored_card.score < MIN_CARD_RELEVANCE:
+            if not exact and scored_card.score < MIN_CARD_RELEVANCE:
                 continue
             scored.append(scored_card)
 
