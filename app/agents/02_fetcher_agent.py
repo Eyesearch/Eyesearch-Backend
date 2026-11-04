@@ -148,8 +148,27 @@ class FetcherAgent:
     ) -> None:
         self._settings = settings or get_settings()
         self._owns_client = client is None
+        # Phase timeouts rather than one scalar. httpx applies a scalar to
+        # every phase, so `timeout=7` allowed seven seconds to connect *and*
+        # seven to read: a host that accepts and then says nothing cost twice
+        # the number anyone wrote down. Stated separately, the total is bounded.
+        timeout = httpx.Timeout(
+            connect=self._settings.crawl_connect_timeout_seconds,
+            read=self._settings.crawl_read_timeout_seconds,
+            write=self._settings.crawl_write_timeout_seconds,
+            pool=self._settings.crawl_pool_timeout_seconds,
+        )
+        # A bounded pool. Left at the default of a hundred, a batch of dead
+        # hosts opens a socket for each and leaves them in TIME_WAIT; on a small
+        # instance the descriptor ceiling is reached and the next connect fails
+        # with an error that reads like a network fault rather than a leak.
+        limits = httpx.Limits(
+            max_connections=self._settings.crawl_max_connections,
+            max_keepalive_connections=self._settings.crawl_max_keepalive_connections,
+        )
         self._client = client or httpx.AsyncClient(
-            timeout=self._settings.crawl_timeout_seconds,
+            timeout=timeout,
+            limits=limits,
             follow_redirects=True,
             max_redirects=MAX_REDIRECTS,
             transport=transport,
@@ -160,10 +179,36 @@ class FetcherAgent:
         )
         self._semaphore = asyncio.Semaphore(max(1, self._settings.crawl_concurrency))
         self.fetches = 0
+        # Politeness is a property of a domain, not of the worker. One lock per
+        # host spaces that host's requests and lets every other host proceed at
+        # the same time — which is what the global pause between batches was
+        # standing in for, at the cost of the whole pipeline.
+        self._politeness = max(0.0, float(self._settings.crawl_domain_politeness_seconds))
+        self._domain_locks: dict[str, asyncio.Lock] = {}
+        self._last_request: dict[str, float] = {}
 
     @property
     def client(self) -> httpx.AsyncClient:
         return self._client
+
+    async def _respect_politeness(self, url: str) -> None:
+        """Space requests to the same host; leave other hosts alone."""
+        if self._politeness <= 0:
+            return
+        try:
+            domain = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            return
+        if not domain:
+            return
+        lock = self._domain_locks.setdefault(domain, asyncio.Lock())
+        async with lock:
+            last = self._last_request.get(domain)
+            if last is not None:
+                wait = self._politeness - (time.monotonic() - last)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            self._last_request[domain] = time.monotonic()
 
     async def fetch(self, url: str, *, attempts: int = 1) -> FetchResult:
         """Fetch one URL, single pass by default.
@@ -194,6 +239,9 @@ class FetcherAgent:
 
         for attempt in range(1, max(1, attempts) + 1):
             async with self._semaphore:
+                # Inside the semaphore, so a wait for politeness does not hold a
+                # slot that another host could be using.
+                await self._respect_politeness(target)
                 try:
                     self.fetches += 1
                     response, html, content_type = await self._stream_get(target)
