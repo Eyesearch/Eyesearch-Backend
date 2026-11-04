@@ -225,13 +225,12 @@ def sanitize_text(text: str) -> str:
     return " ".join(value.split())
 
 
-def truncate_at_word(text: str, limit: int) -> str:
-    """Cut at a word boundary. No ellipsis: the card shows the whole field."""
-    value = " ".join((text or "").split())
-    if len(value) <= limit:
-        return value
-    window = value[:limit]
-    return window.rsplit(" ", 1)[0].rstrip(" ,;:-—") if " " in window else window
+from app.engine.text import truncate_at_word as _truncate_at_word
+
+#: The shared helper, re-exported. There used to be two implementations with
+#: different behaviour, so whether a reader saw a cut word depended on which
+#: module produced the text.
+truncate_at_word = _truncate_at_word
 
 
 def is_cardable_url(url: str) -> bool:
