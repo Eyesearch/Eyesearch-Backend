@@ -297,12 +297,25 @@ class Settings(BaseSettings):
     #: count. 200 is about two lines of card text: enough for a sentence a reader
     #: can judge, and enough that the "More" toggle has something to expand.
     #: It was 40, which is six words — a fragment, not a snippet.
-    page_body_char_ceiling: int = 200
+    #: Two kilobytes of body text per page. It was 200, which was enough to
+    #: rank on and not enough to read: a search snippet drawn from a 200
+    #: character body is the opening clause of a sentence.
+    #:
+    #: This ceiling is only half the limit. `domain_body_budget_chars` below
+    #: divides its total across the domain's pages, so with a 5000 budget and 25
+    #: pages the effective per-page limit is 200 — the budget wins and raising
+    #: this alone changes nothing. The two move together.
+    page_body_char_ceiling: int = 2048
     #: Total body text one domain may hold across all its pages: the page
     #: ceiling times the page cap, 200 x 25. It has to clear that, or it silently
     #: undoes the ceiling — a 1,000-character budget clamped every page back to 40
     #: and made the per-page setting a lie.
-    domain_body_budget_chars: int = 5000
+    #: The domain's total body budget, divided across its pages. Raised from
+    #: 5000 in step with the per-page ceiling: at 25 pages a 5000 budget allows
+    #: 200 characters each, which would have quietly undone the ceiling above.
+    #: 51200 is 25 pages at the full 2048, so the ceiling binds first and the
+    #: budget remains the backstop it was meant to be.
+    domain_body_budget_chars: int = 51200
 
     search_default_limit: int = 10
     #: How many results one domain may contribute to a single page. A search
