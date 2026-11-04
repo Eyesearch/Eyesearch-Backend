@@ -15,6 +15,7 @@ import unicodedata
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
 
+from app.engine.text import truncate_at_word
 from app.engine.urls import safe_urljoin
 
 from app.agents import load_agent
@@ -346,15 +347,18 @@ class ParserAgent:
         return ParsedPage(
             url=url,
             ok=True,
-            title=title[:TITLE_CHAR_CAP],
-            description=description[:DESCRIPTION_CHAR_CAP],
+            # Word boundaries, not character indices: a fifty-character slice
+            # turns "Recharge" into "Rech", which is a different word rather
+            # than an abbreviation of one.
+            title=truncate_at_word(title, TITLE_CHAR_CAP),
+            description=truncate_at_word(description, DESCRIPTION_CHAR_CAP),
             body_text=body_text,
             links=links,
             schema_types=schema_types,
             sitelinks=sitelinks,
-            brand_name=brand_name[:BRAND_CHAR_CAP],
+            brand_name=truncate_at_word(brand_name, BRAND_CHAR_CAP),
             clean_url=clean_url[:CLEAN_URL_CHAR_CAP],
-            action_title=(action_title or title)[:ACTION_TITLE_CHAR_CAP],
+            action_title=truncate_at_word(action_title or title, ACTION_TITLE_CHAR_CAP),
         )
 
     @staticmethod
