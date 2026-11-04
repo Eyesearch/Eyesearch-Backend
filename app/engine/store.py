@@ -1124,11 +1124,34 @@ class IndexStore:
             # hardcoded per language beyond the ISO mapping.
             "CASE WHEN p.language = ? THEN 1 ELSE 0 END AS lang_hit, "
             # Navigational: the query is the brand, or the domain's own name.
-            "CASE WHEN lower(coalesce(p.brand_name, '')) = lower(?) "
-            "  OR lower(split_part(coalesce(s.domain, ''), '.', 1)) = lower(?) "
+            #
+            # `split_part(domain,'.',1)` returns the *first* label, which is the
+            # subdomain when there is one: `www.phonepe.com` gave "www" and
+            # `ir.phonepe.com` gave "ir", so neither matched a query of
+            # "phonepe" on the name. Stripping `www.` first makes the label the
+            # brand for an apex domain and leaves a real subdomain unmatched,
+            # which is the distinction that matters.
+            "CASE WHEN lower(split_part("
+            "       regexp_replace(lower(coalesce(s.domain, '')), '^www\\.', ''), '.', 1)) "
+            "     = lower(?) "
+            "  OR (lower(coalesce(p.brand_name, '')) = lower(?) "
+            "      AND ("
+            "        array_length(string_to_array("
+            "          regexp_replace(lower(coalesce(s.domain, '')), '^www\\.', ''), '.'), 1) = 2"
+            "        OR lower(coalesce(s.domain, '')) ~ "
+            "           '\\.(co|gov|ac|org|net|nic|res|edu|firm|gen|ind)\\.in$'"
+            "      )) "
             "THEN 1 ELSE 0 END AS nav_hit, "
-            # The site's front door, not one of its articles.
-            "CASE WHEN coalesce(s.domain, '') <> '' AND rtrim(p.url, '/') IN ("
+            # The site's front door, not one of its articles — and the *apex*
+            # front door. A subdomain's own root was also matching here, so
+            # `ir.phonepe.com` collected the root pin meant for the homepage.
+            "CASE WHEN coalesce(s.domain, '') <> '' "
+            "  AND ("
+            "    array_length(string_to_array("
+            "      regexp_replace(lower(s.domain), '^www\\.', ''), '.'), 1) = 2"
+            "    OR lower(s.domain) ~ '\\.(co|gov|ac|org|net|nic|res|edu|firm|gen|ind)\\.in$'"
+            "  ) "
+            "  AND rtrim(p.url, '/') IN ("
             "  'https://' || s.domain, 'http://' || s.domain, "
             "  'https://www.' || s.domain, 'http://www.' || s.domain) "
             "THEN 1 ELSE 0 END AS root_hit, "
