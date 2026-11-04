@@ -127,7 +127,7 @@ def test_the_production_defaults_leave_room_for_the_ceiling():
     from app.engine.config import Settings as RealSettings
 
     default = RealSettings(_env_file=None)
-    assert default.page_body_char_ceiling == 200
+    assert default.page_body_char_ceiling == 2048
     # The domain total must clear ceiling x page cap, or it clamps every page
     # back down and the ceiling above is a lie.
     assert default.domain_body_budget_chars >= (
@@ -160,3 +160,43 @@ async def test_a_stored_body_never_ends_mid_word(client):
 
     assert len(text) <= 200
     assert text.split()[-1] in body.split(), f"ended mid-word: {text!r}"
+
+
+def test_the_ceiling_binds_before_the_budget():
+    """Raising the ceiling without the budget would be a no-op.
+
+    The budget divides its total across a domain's pages, so a 5000 budget over
+    25 pages allows 200 characters each — the budget wins and the ceiling above
+    it never applies.
+    """
+    live = Settings(_env_file=None)
+
+    for pages in (1, 5, 25):
+        effective = min(
+            live.page_body_char_ceiling, live.domain_body_budget_chars // pages
+        )
+        assert effective == live.page_body_char_ceiling, (
+            f"at {pages} pages the budget clamps the page to {effective}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_page_stores_two_kilobytes(client):
+    """The shared `store` fixture turns the ceiling off; this test sets it."""
+    from app.engine.store import IndexStore
+
+    live = Settings(_env_file=None, environment="test")
+    store = IndexStore(client, live)
+    body = "Karnataka is a state in south western India with Bengaluru as its capital. " * 60
+    await store.persist_batch(
+        [
+            PageDocument(
+                url="https://kb.gov.in/x", domain="kb.gov.in", title="T", description="d",
+                body_text=body, digest="kb-ceiling-1", brand_name="A",
+            )
+        ]
+    )
+
+    row = await client.execute("SELECT length(body_text) FROM pages WHERE digest = 'kb-ceiling-1'")
+    stored = int(row.rows[0][0])
+    assert 1900 <= stored <= 2048, stored
