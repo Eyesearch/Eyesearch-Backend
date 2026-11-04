@@ -33,7 +33,13 @@ DEFAULT_TIMEOUT_MS = 850
 
 #: How many federated cards may appear. The courier and sanitizer already cap at
 #: twenty; this is the display ceiling, which is about the page, not the source.
-DEFAULT_CARD_CEILING = 20
+#: A row of twenty chips under an answer is clutter: the reader asked one
+#: question and the panel is a footnote to it, not a second set of results.
+DEFAULT_CARD_CEILING = 3
+
+#: A card must reach this to be shown at all. Below it the card is present
+#: because a source returned it, not because it answers anything.
+MIN_CARD_RELEVANCE = 0.30
 
 #: A card must beat this to be shown as the hero. Below it the panel still lists
 #: it among others, because "probably relevant" is not "the answer".
@@ -191,6 +197,22 @@ class KnowledgeBlender:
             },
         )
 
+    @staticmethod
+    def _names_the_query(query: str, payload: dict) -> bool:
+        """Whether a card actually mentions what was asked.
+
+        Compared on the title and the snippet, against the query's content
+        words. A card that shares no word with the query is not a weaker answer
+        — it is an answer to a different question.
+        """
+        wanted = _content_tokens(query)
+        if not wanted:
+            return True
+        haystack = _content_tokens(
+            f"{payload.get('title') or ''} {payload.get('snippet') or payload.get('snippet_short') or ''}"
+        )
+        return bool(wanted & haystack)
+
     def rank(self, query: str, cards: Sequence[Any], organic: Sequence[dict] = ()) -> list[ScoredCard]:
         """Score, drop what the index already has, and sort.
 
@@ -207,7 +229,16 @@ class KnowledgeBlender:
             if not key or key in indexed or key in seen:
                 continue
             seen.add(key)
-            scored.append(self.score(query, card))
+            scored_card = self.score(query, card)
+            # A card must name something the query named. Without this a search
+            # for a payment app returned the actors who advertise it: the words
+            # never appear, but the source ranked them and the authority term
+            # carried them over the line.
+            if not self._names_the_query(query, payload):
+                continue
+            if scored_card.score < MIN_CARD_RELEVANCE:
+                continue
+            scored.append(scored_card)
 
         scored.sort(key=lambda item: -item.score)
         return scored[: self.ceiling]
@@ -271,7 +302,15 @@ class KnowledgeBlender:
                 "intent": "navigational" if navigational else ("informational" if informational else "general"),
                 "organic_count": len(organic_results),
                 "knowledge_count": len(payloads),
-                "sources": sorted({str((card.get("source") or "")) for card in payloads}),
+                # A card without a source is not a source named "". The empty
+                # string reached the client, which rendered an empty chip.
+                "sources": sorted(
+                    {
+                        str(card.get("source") or "").strip()
+                        for card in payloads
+                        if str(card.get("source") or "").strip()
+                    }
+                ) or ["eyesearch_index"],
                 "took_ms": took_ms,
                 "degraded": degraded,
                 "timeout_ms": int(budget * 1000),
