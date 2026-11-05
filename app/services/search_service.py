@@ -442,9 +442,15 @@ class FederatedFallback:
         return [card.as_dict() for card in aggregated]
 
 
-#: How long the external fleet gets before the fallback gives up. A reader who
-#: searched and found nothing should see an empty page quickly, not a spinner.
-FEDERATION_TIMEOUT_MS = 800
+#: How long the external fleet gets before the blender gives up and answers from
+#: the index alone.
+#:
+#: It was 800 ms. A live Wikipedia call measured 835-850 ms, so the task was
+#: cancelled just before it would have answered and the panel vanished — the log
+#: said "exceeded 800 ms" and nothing said the margin was the whole problem. The
+#: budget is a setting now, defaulting to 1500, so it can be tuned on the VM
+#: without a rebuild.
+FEDERATION_TIMEOUT_MS = get_settings().federation_timeout_ms
 
 
 class SearchService:
