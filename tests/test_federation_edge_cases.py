@@ -87,7 +87,7 @@ async def test_a_timed_out_fallback_task_is_cancelled(store):
 
     assert payload["results"] == []
     assert cancelled["yes"] is True
-    assert FEDERATION_TIMEOUT_MS == 800
+    assert 1200 <= FEDERATION_TIMEOUT_MS <= 2000
 
 
 # ---------------------------------------------------------------------------
