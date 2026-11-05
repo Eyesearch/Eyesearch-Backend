@@ -19,12 +19,19 @@ class TwoSources:
     async def get_json(self, url, timeout=1.5):
         self.seen.append("wiki" if "api.php" in url else "ddg")
         if "api.php" in url:
+            # `generator=search` answers with pages keyed by id, each carrying
+            # the article's lead rather than a search blurb.
             return {
                 "query": {
-                    "search": [
-                        {"title": f"Article {i}", "snippet": f"<span>snippet</span> {i}"}
+                    "pages": {
+                        str(i + 1): {
+                            "pageid": i + 1,
+                            "index": i + 1,
+                            "title": f"Article {i}",
+                            "extract": f"<span>snippet</span> {i}",
+                        }
                         for i in range(self.wiki)
-                    ]
+                    }
                 }
             }
         return {
@@ -77,7 +84,7 @@ async def test_a_duplicate_url_appears_once():
     class Dupes:
         async def get_json(self, url, timeout=1.5):
             if "api.php" in url:
-                return {"query": {"search": [{"title": "A", "snippet": "x"}]}}
+                return {"query": {"pages": {"1": {"pageid": 1, "index": 1, "title": "A", "extract": "x"}}}}
             return {"RelatedTopics": [{"FirstURL": "https://en.wikipedia.org/wiki/A", "Text": "A - y"}]}
 
     cards = await Agent(http=Dupes()).search("q")
@@ -117,7 +124,7 @@ async def test_a_long_snippet_is_cut_at_a_word_boundary():
     class Long:
         async def get_json(self, url, timeout=1.5):
             if "api.php" in url:
-                return {"query": {"search": [{"title": "T", "snippet": "word " * 200}]}}
+                return {"query": {"pages": {"1": {"pageid": 1, "index": 1, "title": "T", "extract": "word " * 200}}}}
             return {}
 
     card = (await Agent(http=Long()).search("q"))[0]
