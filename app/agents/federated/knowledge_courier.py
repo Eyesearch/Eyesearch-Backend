@@ -42,6 +42,11 @@ MAX_CONCURRENT_REQUESTS = 5
 #: answers with as many as you ask for; DuckDuckGo's RelatedTopics is usually
 #: smaller and nested.
 WIKIPEDIA_RESULT_LIMIT = 15
+
+#: How many *extracts* to ask for. An extract is the expensive part: the search
+#: itself is cheap, but serialising a full lead paragraph per result is not. Two
+#: covers the hero and one alternate, which is all the panel can show.
+WIKIPEDIA_EXTRACT_LIMIT = 2
 DUCKDUCKGO_RESULT_LIMIT = 10
 
 #: The safety ceiling on a whole answer. Not a target — whatever survives the
@@ -426,9 +431,16 @@ class FreeKnowledgeCourierAgent:
         # The REST summary endpoint returns the same lead for one title, so the
         # alternative was one request per result. This is one request for all of
         # them, and it is the same endpoint already being called.
+        # Two results, not fifteen. Every extra article is another extract for
+        # Wikipedia to serialise before it can answer, and the client only ever
+        # shows one card: the ceiling in the blender is three and the hero is
+        # the first. Asking for fifteen cost the whole request its budget —
+        # measured at 835-850 ms, which was outside the federated window — to
+        # fetch thirteen leads nobody would read.
+        fetch_limit = max(1, min(int(limit), WIKIPEDIA_EXTRACT_LIMIT))
         params = {
             "action": "query", "generator": "search", "gsrsearch": safe,
-            "gsrlimit": str(int(limit)),
+            "gsrlimit": str(fetch_limit),
             "prop": "extracts", "exintro": "1", "explaintext": "1", "exlimit": "max",
             "utf8": "1", "format": "json",
         }
