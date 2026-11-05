@@ -112,7 +112,7 @@ def test_a_javascript_url_is_not_a_card():
 def test_the_buffers_are_the_agreed_widths():
     assert sanitizer.TITLE_CHAR_CAP == 100
     assert sanitizer.SNIPPET_SHORT_CHARS == 300
-    assert sanitizer.SNIPPET_FULL_CHARS == 600
+    assert sanitizer.SNIPPET_FULL_CHARS == 1200
     assert brands.BRAND_CHAR_CAP == 50
 
 
