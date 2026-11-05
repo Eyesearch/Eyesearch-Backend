@@ -42,8 +42,10 @@ def service(store, federation) -> SearchService:
 
 
 @pytest.mark.asyncio
-async def test_the_ceiling_is_800_ms():
-    assert FEDERATION_TIMEOUT_MS == 800
+async def test_the_ceiling_clears_a_live_provider():
+    """800 was inside the measured 835-850 ms of a live Wikipedia call, so the
+    panel vanished on most queries."""
+    assert 1200 <= FEDERATION_TIMEOUT_MS <= 2000
 
 
 @pytest.mark.asyncio
