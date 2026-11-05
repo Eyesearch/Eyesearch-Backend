@@ -28,9 +28,13 @@ _enforcer = load_agent("11_rule_enforcer_agent")
 #: Read from the same setting the index uses, so a federated card is the same
 #: length as an indexed one. A second hardcoded number here is how the two
 #: drift apart.
-from app.engine.config import get_settings as _get_settings
 
-SNIPPET_CHARS = _get_settings().page_body_char_ceiling
+#: The default width for a sanitised snippet. It used to be the *page body*
+#: ceiling, which tied how much of an external article we show to how much of a
+#: crawled page we store — two unrelated policies, so raising the storage
+#: ceiling silently widened every external card. It is now the card's own full
+#: width, declared below.
+SNIPPET_CHARS = 1200
 strip_tracking = _enforcer.strip_tracking
 action_title_from = _brand.action_title_from
 
@@ -40,7 +44,10 @@ SNIPPET_SHORT_CHARS = 300
 
 #: What "More" reveals. Long enough to judge a page, short enough to read on a
 #: phone without scrolling a screenful.
-SNIPPET_FULL_CHARS = 600
+#: A Wikipedia lead paragraph runs to about a thousand characters. Six hundred
+#: ended it mid-thought, which made the "More" toggle reveal a fragment rather
+#: than an answer. Kept in step with the courier's buffer.
+SNIPPET_FULL_CHARS = 1200
 
 #: Titles are allowed to be longer than an indexed one, because an external
 #: result has no stored title to fall back on and a truncated one cannot be
@@ -288,21 +295,62 @@ def clean_text(text: str) -> str:
     return " ".join(value.split())
 
 
+#: Words that cannot end a sentence. A cut that stops on one of these reads as
+#: a transmission that dropped, not as an excerpt — "traced to its southern
+#: Neolithic and" is the failure this exists to prevent.
+DANGLING_WORDS = frozenset(
+    {
+        "a", "an", "the", "of", "in", "to", "for", "with", "and", "or", "but",
+        "by", "on", "at", "from", "as", "that", "which", "is", "was", "were",
+        "are", "its", "his", "her", "their", "this", "these", "those", "into",
+        "over", "under", "between", "during", "after", "before", "than", "also",
+    }
+)
+
+
 def sanitise_snippet(text: str, limit: int = SNIPPET_CHARS) -> str:
-    """Collapse whitespace and cut at a word boundary within the ceiling."""
+    """Collapse whitespace and cut at a word boundary within the ceiling.
+
+    The cut also backs off any trailing word that cannot end a sentence, so an
+    excerpt stops where a reader would expect rather than mid-phrase.
+    """
     collapsed = clean_text(text)
     if len(collapsed) <= limit:
         return collapsed
     cut = collapsed[:limit]
-    return cut.rsplit(" ", 1)[0] if " " in cut else cut
+    if " " not in cut:
+        return cut
+
+    words = cut.rsplit(" ", 1)[0].split()
+    while words and words[-1].strip(",;:.-—").lower() in DANGLING_WORDS:
+        words.pop()
+    # Every word was a dangling one — vanishingly unlikely, and the window is
+    # still a better answer than nothing.
+    return " ".join(words) if words else cut.rsplit(" ", 1)[0]
 
 
 class CrossSourceSanitizerAgent:
     """Enforce our own rules on results we did not produce."""
 
+    #: How a source names itself in the badge. A card from Wikipedia is *from
+    #: Wikipedia*; deriving a brand from the article title put the title in the
+    #: badge, so a reader saw "Architecture of Karnataka" twice, once in
+    #: capitals.
+    SOURCE_LABELS = {
+        "wikipedia": "Wikipedia",
+        "wikidata": "Wikidata",
+        "searxng": "Web",
+        "duckduckgo": "DuckDuckGo",
+    }
+
     def card(self, *, title: str, url: str, snippet: str, source: str = "") -> ExternalCard:
         clean_url = sanitise_url(url)
-        brand = _extractor.LiveEntityExtractorAgent().brand(title=title, url=clean_url)
+        # A known source names itself. Anything else falls back to the derived
+        # brand, which is what an unrecognised host can honestly offer.
+        brand = self.SOURCE_LABELS.get(
+            (source or "").strip().lower(),
+            _extractor.LiveEntityExtractorAgent().brand(title=title, url=clean_url),
+        )
         clean_title = clean_text(title)
         short = sanitise_snippet(snippet, SNIPPET_SHORT_CHARS)
         full = sanitise_snippet(snippet, SNIPPET_FULL_CHARS)
