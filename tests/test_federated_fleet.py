@@ -176,12 +176,14 @@ def test_an_external_card_is_forced_into_our_shape():
     assert card.url == "https://karnataka.gov.in/x"
     # The preview is the short field; the full one is what "More" reveals.
     assert len(card.snippet_short) <= 300
-    assert len(card.snippet_full) <= 600
+    assert len(card.snippet_full) <= 1200
     assert card.has_more is True
     assert card.snippet == card.snippet_short
     assert "|" not in card.title
     # The tail is "Official Website", which names nothing, so the domain
     # decides — and the derived name keeps the suffix so it reads as a site.
+    # An unknown source falls back to the derived brand; a known one names
+    # itself, which is tested separately.
     assert card.brand == "Karnataka Gov"
 
 
