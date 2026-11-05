@@ -75,8 +75,12 @@ async def test_an_empty_courier_answer_is_not_an_error():
 # ---------------------------------------------------------------------------
 
 
-def test_the_default_budget_is_850_ms():
-    assert DEFAULT_TIMEOUT_MS == 850
+def test_the_default_budget_clears_a_live_provider():
+    """850 sat inside the noise of a live Wikipedia call, which measures
+    835-850 ms: the same query answered on one attempt and lost its card on the
+    next. A budget a healthy provider can only just meet is a coin toss."""
+    assert DEFAULT_TIMEOUT_MS >= 1200
+    assert DEFAULT_TIMEOUT_MS <= 2000
 
 
 @pytest.mark.asyncio
