@@ -188,12 +188,14 @@ async def test_search_returns_cards_from_the_action_api():
             if "api.php" in url:
                 return {
                     "query": {
-                        "search": [
-                            {
+                        "pages": {
+                            "1": {
+                                "pageid": 1,
+                                "index": 1,
                                 "title": "Bengaluru",
-                                "snippet": '<span class="searchmatch">Bengaluru</span> is the capital.',
+                                "extract": '<span class="searchmatch">Bengaluru</span> is the capital.',
                             }
-                        ]
+                        }
                     }
                 }
             return {}
@@ -211,7 +213,7 @@ async def test_candidates_returns_the_plain_shape():
     class Http:
         async def get_json(self, url, timeout=1.5):
             if "api.php" in url:
-                return {"query": {"search": [{"title": "T", "snippet": "text"}]}}
+                return {"query": {"pages": {"1": {"pageid": 1, "index": 1, "title": "T", "extract": "text"}}}}
             return {}
 
     candidates = await Agent(http=Http()).candidates("q")
