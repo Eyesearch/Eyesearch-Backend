@@ -224,3 +224,110 @@ def test_the_new_couriers_keep_the_air_gap():
         source = open(module.__file__, encoding="utf-8").read()
         for forbidden in ("app.engine.store", "app.postgres", "crawl_queue", "INSERT INTO"):
             assert forbidden not in source
+
+
+# ---------------------------------------------------------------------------
+# The badge, the link and the width
+# ---------------------------------------------------------------------------
+
+
+def test_a_wikipedia_card_is_badged_with_its_source():
+    """Deriving a brand from the article title put the title in the badge, so a
+    reader saw "Architecture of Karnataka" twice, once in capitals."""
+    from app.agents.federated.source_sanitizer import CrossSourceSanitizerAgent
+
+    card = CrossSourceSanitizerAgent().card(
+        title="Architecture of Karnataka",
+        url="https://en.wikipedia.org/wiki/Architecture_of_Karnataka",
+        snippet="The antiquity of architecture of Karnataka is traced to its southern Neolithic.",
+        source="wikipedia",
+    )
+
+    assert card.brand == "Wikipedia"
+    assert card.brand.lower() != card.title.lower()
+
+
+def test_every_known_source_names_itself():
+    from app.agents.federated.source_sanitizer import CrossSourceSanitizerAgent
+
+    agent = CrossSourceSanitizerAgent()
+    for source, label in agent.SOURCE_LABELS.items():
+        card = agent.card(
+            title="Something Else Entirely",
+            url="https://example.in/x",
+            snippet="text",
+            source=source,
+        )
+        assert card.brand == label, source
+
+
+def test_an_unknown_source_still_derives_a_brand():
+    from app.agents.federated.source_sanitizer import CrossSourceSanitizerAgent
+
+    card = CrossSourceSanitizerAgent().card(
+        title="Karnataka Bank", url="https://karnatakabank.com/", snippet="text", source=""
+    )
+
+    assert card.brand
+
+
+def test_the_article_link_keeps_its_path():
+    """The card must link to the article, not to the domain."""
+    from app.agents.federated.source_sanitizer import CrossSourceSanitizerAgent
+
+    url = "https://en.wikipedia.org/wiki/Great_Indian_Railway_Journeys"
+    card = CrossSourceSanitizerAgent().card(title="T", url=url, snippet="s", source="wikipedia")
+
+    assert card.url == url
+    assert "/wiki/" in card.url
+
+
+def test_the_full_snippet_holds_a_lead_paragraph():
+    from app.agents.federated.source_sanitizer import SNIPPET_FULL_CHARS
+
+    assert SNIPPET_FULL_CHARS >= 1000
+
+
+def test_a_long_lead_is_not_cut_at_six_hundred():
+    from app.agents.federated.source_sanitizer import CrossSourceSanitizerAgent
+
+    lead = (
+        "Karnataka is a state in the south western region of India. It was formed "
+        "on 1 November 1956, with the passing of the States Reorganisation Act, and "
+        "it was originally known as the State of Mysore. It was renamed in 1973. "
+    ) * 3
+    card = CrossSourceSanitizerAgent().card(
+        title="Karnataka", url="https://en.wikipedia.org/wiki/Karnataka",
+        snippet=lead, source="wikipedia",
+    )
+
+    assert len(card.snippet_full) > 600
+    assert len(card.snippet_full) <= 1200
+
+
+def test_a_cut_never_ends_on_a_word_that_cannot_end_a_sentence():
+    from app.agents.federated.source_sanitizer import sanitise_snippet
+
+    text = (
+        "The antiquity of architecture of Karnataka is traced to its southern "
+        "Neolithic and beyond the recorded history of the region"
+    )
+    cut = sanitise_snippet(text, 80)
+
+    assert not cut.lower().endswith((" and", " of", " in", " to", " for", " with"))
+    assert cut.lower().endswith("neolithic"), cut
+
+
+def test_a_short_snippet_is_untouched():
+    from app.agents.federated.source_sanitizer import sanitise_snippet
+
+    assert sanitise_snippet("A short line.", 1200) == "A short line."
+
+
+def test_the_snippet_width_is_not_the_storage_ceiling():
+    """Two unrelated policies: how much of an external article we show, and how
+    much of a crawled page we store. Raising one must not move the other."""
+    from app.agents.federated import source_sanitizer
+
+    assert source_sanitizer.SNIPPET_CHARS != 2048
+    assert source_sanitizer.SNIPPET_CHARS >= 1000
