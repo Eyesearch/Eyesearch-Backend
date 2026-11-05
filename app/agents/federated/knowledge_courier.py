@@ -418,24 +418,47 @@ class FreeKnowledgeCourierAgent:
         if not safe:
             return []
 
+        # `generator=search` with `prop=extracts` in one request. Search alone
+        # returns a SERP blurb of about a hundred and fifty characters — the
+        # opening clause of the article, not its lead — which is what every
+        # Wikipedia card used to show, however wide our own buffer was.
+        #
+        # The REST summary endpoint returns the same lead for one title, so the
+        # alternative was one request per result. This is one request for all of
+        # them, and it is the same endpoint already being called.
         params = {
-            "action": "query", "list": "search", "srsearch": safe,
-            "utf8": "1", "format": "json", "srlimit": str(int(limit)),
+            "action": "query", "generator": "search", "gsrsearch": safe,
+            "gsrlimit": str(int(limit)),
+            "prop": "extracts", "exintro": "1", "explaintext": "1", "exlimit": "max",
+            "utf8": "1", "format": "json",
         }
         payload = await self._get_json(f"{WIKIPEDIA_SEARCH}?{urlencode(params)}")
-        items = (payload.get("query", {}) or {}).get("search", []) or []
+        pages = (payload.get("query", {}) or {}).get("pages", {}) or {}
+        # The generator returns a mapping keyed by page id, ordered by the
+        # search ranking in `index`. A dict keeps insertion order but not the
+        # ranking, so it is restored here rather than trusted.
+        ordered = sorted(
+            (page for page in pages.values() if isinstance(page, dict)),
+            key=lambda page: int(page.get("index") or 0),
+        )
 
         cards: list[KnowledgeCard] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
+        for item in ordered:
             title = sanitize_text(str(item.get("title") or ""))
             if not title:
                 continue
             url = f"https://en.wikipedia.org/wiki/{quote(title.replace(' ', '_'))}"
             if not is_cardable_url(url):
                 continue
-            body = sanitize_text(str(item.get("snippet") or ""))
+
+            # The article's own lead. The search blurb is the fallback, and it
+            # is only used when the extract is missing — a page with no lead is
+            # rare, but it is not impossible.
+            lead = sanitize_text(str(item.get("extract") or ""))
+            blurb = sanitize_text(str(item.get("snippet") or ""))
+            body = lead or blurb
+            if not body:
+                continue
             cards.append(
                 KnowledgeCard(
                     title=truncate_at_word(title, TITLE_CHARS),
