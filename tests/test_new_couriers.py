@@ -187,7 +187,20 @@ async def test_all_four_sources_are_gathered():
             # Wikidata's endpoint is also an `api.php`; it is matched first so
             # the stub does not answer it with Wikipedia's payload.
             "wikidata": {"search": [{"id": "Q1185", "label": "Karnataka", "description": "state"}]},
-            "api.php": {"query": {"search": [{"title": "Karnataka", "snippet": "state"}]}},
+            # `generator=search` answers with pages keyed by id, each carrying
+            # the article's own lead rather than a search blurb.
+            "api.php": {
+                "query": {
+                    "pages": {
+                        "1": {
+                            "pageid": 1,
+                            "index": 1,
+                            "title": "Karnataka",
+                            "extract": "Karnataka is a state in south western India.",
+                        }
+                    }
+                }
+            },
             "searxng": {"results": [{"url": "https://ksrtc.in/", "title": "KSRTC", "content": "bus"}]},
         }
     )
@@ -205,7 +218,20 @@ async def test_without_searxng_configured_only_three_sources_run():
     http = Http(
         {
             "wikidata": {"search": [{"id": "Q1185", "label": "Karnataka", "description": "state"}]},
-            "api.php": {"query": {"search": [{"title": "Karnataka", "snippet": "state"}]}},
+            # `generator=search` answers with pages keyed by id, each carrying
+            # the article's own lead rather than a search blurb.
+            "api.php": {
+                "query": {
+                    "pages": {
+                        "1": {
+                            "pageid": 1,
+                            "index": 1,
+                            "title": "Karnataka",
+                            "extract": "Karnataka is a state in south western India.",
+                        }
+                    }
+                }
+            },
         }
     )
     agent = courier.FreeKnowledgeCourierAgent(http=http, settings=settings())
@@ -331,3 +357,104 @@ def test_the_snippet_width_is_not_the_storage_ceiling():
 
     assert source_sanitizer.SNIPPET_CHARS != 2048
     assert source_sanitizer.SNIPPET_CHARS >= 1000
+
+
+# ---------------------------------------------------------------------------
+# The Wikipedia lead paragraph
+# ---------------------------------------------------------------------------
+
+LEAD = (
+    "Mysore Palace, also known as Amba Vilas Palace, is a historical palace and a "
+    "royal residence at Mysore in the Indian State of Karnataka. It is the official "
+    "residence of the Wadiyar dynasty and the seat of the Kingdom of Mysore. The "
+    "palace is in the centre of Mysore, and faces the Chamundi Hills eastward."
+)
+
+
+class Wikipedia:
+    """Answers the generator query the way the real endpoint does."""
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.urls: list[str] = []
+
+    async def get_json(self, url, timeout=1.5):
+        self.urls.append(url)
+        return {"query": {"pages": self.pages}}
+
+
+@pytest.mark.asyncio
+async def test_the_card_carries_the_article_lead_not_the_search_blurb():
+    """`list=search` returns a hundred and fifty character blurb; the article's
+    lead is what a reader needs, and it is a different field."""
+    http = Wikipedia(
+        {
+            "1": {
+                "pageid": 1, "index": 1, "title": "Mysore Palace",
+                "extract": LEAD, "snippet": "a palace in Mysore",
+            }
+        }
+    )
+
+    cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("Mysore Palace")
+
+    assert len(cards) == 1
+    assert len(cards[0].snippet_full) > 220, len(cards[0].snippet_full)
+    assert cards[0].snippet_full.startswith("Mysore Palace, also known as")
+
+
+@pytest.mark.asyncio
+async def test_the_lead_is_fetched_in_one_request():
+    """The REST summary returns the same lead for one title, so using it per
+    result would be one request each."""
+    http = Wikipedia({"1": {"pageid": 1, "index": 1, "title": "T", "extract": LEAD}})
+
+    await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("t")
+
+    assert len(http.urls) == 1
+    assert "prop=extracts" in http.urls[0]
+    assert "generator=search" in http.urls[0]
+
+
+@pytest.mark.asyncio
+async def test_the_brand_and_source_are_named():
+    http = Wikipedia({"1": {"pageid": 1, "index": 1, "title": "Mysore Palace", "extract": LEAD}})
+
+    cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("Mysore Palace")
+
+    assert cards[0].brand_name == "Wikipedia"
+    assert cards[0].source == "wikipedia"
+
+
+@pytest.mark.asyncio
+async def test_the_link_is_the_article_not_the_domain():
+    http = Wikipedia({"1": {"pageid": 1, "index": 1, "title": "Mysore Palace", "extract": LEAD}})
+
+    cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("Mysore Palace")
+
+    assert cards[0].url == "https://en.wikipedia.org/wiki/Mysore_Palace"
+
+
+@pytest.mark.asyncio
+async def test_a_page_without_a_lead_falls_back_to_the_blurb():
+    http = Wikipedia({"1": {"pageid": 1, "index": 1, "title": "Thin", "snippet": "a short blurb"}})
+
+    cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("thin")
+
+    assert cards[0].snippet_full == "a short blurb"
+
+
+@pytest.mark.asyncio
+async def test_the_search_ranking_order_is_restored():
+    """The generator answers with a mapping keyed by page id, which does not
+    preserve the ranking. `index` does."""
+    http = Wikipedia(
+        {
+            "2": {"pageid": 2, "index": 2, "title": "Second", "extract": "second lead"},
+            "1": {"pageid": 1, "index": 1, "title": "First", "extract": "first lead"},
+        }
+    )
+
+    cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("q")
+
+    assert [c.title for c in cards] == ["First", "Second"]
