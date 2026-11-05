@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     #: source is not configured, which is the normal state for a fresh install
     #: and is not treated as a failure.
     searxng_base_url: str = ""
+
+    #: How long the federated leg may take before the blender gives up and
+    #: answers from the index alone. It was 800 ms, and a live Wikipedia call
+    #: takes 835-850 — close enough that the panel vanished on most queries
+    #: while the log said only "exceeded 800 ms". Fifteen hundred leaves room
+    #: for a provider having a slow moment without letting one hang the page.
+    #:
+    #: Env: FEDERATION_TIMEOUT_MS.
+    federation_timeout_ms: int = 1500
     #: The whole federated path must finish inside this, or be dropped.
     federation_budget_seconds: float = 0.5
     estimated_kb_per_page: float = 12.0
