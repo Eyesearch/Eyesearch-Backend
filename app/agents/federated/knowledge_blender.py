@@ -29,7 +29,12 @@ logger = logging.getLogger(__name__)
 
 #: The whole federated leg gets this long. Above it the page is answered from the
 #: index alone: a reader who searched deserves an answer more than a panel.
-DEFAULT_TIMEOUT_MS = 850
+#:
+#: It was 850, which sat inside the noise of a live Wikipedia call: the measured
+#: 835-850 ms range straddled it, so the same query answered on one attempt and
+#: lost its card on the next. A budget that a healthy provider can only just
+#: meet is not a budget, it is a coin toss.
+DEFAULT_TIMEOUT_MS = 1500
 
 #: How many federated cards may appear. The courier and sanitizer already cap at
 #: twenty; this is the display ceiling, which is about the page, not the source.
@@ -375,10 +380,11 @@ CONTRACT = {
             "a threshold at 0 makes every card a hero; one at 1 makes none",
         ),
         _contract_rules.Rule(
-            "the_budget_is_under_a_second",
-            0 < DEFAULT_TIMEOUT_MS < 1000,
+            "the_budget_is_bounded",
+            0 < DEFAULT_TIMEOUT_MS <= 2000,
             True,
-            "a federated leg that may take a second is a leg the reader waits for",
+            "the federated leg must be bounded: two seconds is the ceiling past which "
+            "the reader is waiting on a panel rather than a search",
         ),
     ],
 }
