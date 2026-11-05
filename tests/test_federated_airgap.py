@@ -141,7 +141,7 @@ def test_the_two_snippets_and_the_flag():
     )
 
     assert len(card.snippet_short) <= sanitizer.SNIPPET_SHORT_CHARS == 300
-    assert len(card.snippet_full) <= sanitizer.SNIPPET_FULL_CHARS == 600
+    assert len(card.snippet_full) <= sanitizer.SNIPPET_FULL_CHARS == 1200
     assert card.has_more is True
 
 
