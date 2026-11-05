@@ -458,3 +458,57 @@ async def test_the_search_ranking_order_is_restored():
     cards = await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("q")
 
     assert [c.title for c in cards] == ["First", "Second"]
+
+
+# ---------------------------------------------------------------------------
+# The extract budget
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_only_two_extracts_are_requested():
+    """Every extra article is another lead for Wikipedia to serialise before it
+    can answer, and the panel shows one."""
+    from app.agents.federated.knowledge_courier import WIKIPEDIA_EXTRACT_LIMIT
+
+    http = Wikipedia({})
+    await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("Mysore Palace", limit=15)
+
+    assert "gsrlimit=2" in http.urls[0]
+    assert WIKIPEDIA_EXTRACT_LIMIT == 2
+
+
+@pytest.mark.asyncio
+async def test_a_smaller_limit_is_honoured():
+    http = Wikipedia({})
+    await courier.FreeKnowledgeCourierAgent(http=http).search_wikipedia("q", limit=1)
+
+    assert "gsrlimit=1" in http.urls[0]
+
+
+def test_the_federation_budget_is_a_setting():
+    from app.engine.config import Settings
+
+    assert Settings(_env_file=None).federation_timeout_ms == 1500
+
+
+def test_the_federation_budget_can_be_tuned_from_the_environment(monkeypatch):
+    from app.engine.config import Settings
+
+    monkeypatch.setenv("FEDERATION_TIMEOUT_MS", "2000")
+
+    assert Settings(_env_file=None).federation_timeout_ms == 2000
+
+
+def test_the_search_service_reads_the_setting():
+    from app.services import search_service
+
+    assert search_service.FEDERATION_TIMEOUT_MS >= 1200
+
+
+def test_the_blender_and_the_service_agree():
+    """Two constants for one budget is how they drift apart."""
+    from app.agents.federated.knowledge_blender import DEFAULT_TIMEOUT_MS
+    from app.services import search_service
+
+    assert DEFAULT_TIMEOUT_MS == search_service.FEDERATION_TIMEOUT_MS
