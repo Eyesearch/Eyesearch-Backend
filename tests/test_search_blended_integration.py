@@ -123,7 +123,10 @@ async def test_a_failing_fleet_never_raises(store):
 
 @pytest.mark.asyncio
 async def test_the_budget_is_the_blenders(store):
-    assert DEFAULT_TIMEOUT_MS == 850
+    """One budget, two places that name it. They must agree."""
+    from app.services import search_service
+
+    assert DEFAULT_TIMEOUT_MS == search_service.FEDERATION_TIMEOUT_MS
 
 
 @pytest.mark.asyncio
