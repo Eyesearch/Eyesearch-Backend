@@ -31,7 +31,9 @@ FetcherAgent = fetcher_module.FetcherAgent
         # Private-site cart and auth walls.
         "https://paiinternational.in/checkout/cart",
         "https://example.com/login?redirect=https://example.com/login",
-        "https://example.com/signin",
+        # `/signin` on its own is now a canonical landing page — a destination
+        # a reader searches for. With a query it is still a redirect surface,
+        # which the line above covers.
         "https://example.com/my-account/orders",
         # Directory recursion.
         "https://example.in/category/books/books/books/item",
