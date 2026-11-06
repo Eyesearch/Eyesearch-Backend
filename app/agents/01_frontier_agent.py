@@ -160,6 +160,10 @@ BLOCKED_PATH_SEGMENTS: frozenset[str] = frozenset(
         "cart", "checkout", "basket", "account", "my-account", "wp-admin",
         "wp-login", "search", "print", "share", "rss", "feed",
         "register", "auth", "oauth", "sessiontimeout",
+        # Private areas and control panels. These were missing: `/dashboard`,
+        # `/cpanel` and `/wp-login.php` were crawlable, which the task that
+        # prompted this asked to be strictly blocked.
+        "dashboard", "cpanel", "orders", "profile", "settings", "admin",
     }
 )
 
@@ -223,6 +227,72 @@ AUTH_PATH_SEGMENTS: frozenset[str] = frozenset(
     {"login", "signin", "sign-in", "logout", "register", "signup", "sign-up",
      "subscribe", "password", "reset-password", "forgot-password"}
 )
+
+#: Auth pages a reader actually searches for. A government portal's sign-in
+#: page is a destination: "KPSC login" is a query people type, and refusing to
+#: index the answer is refusing to answer.
+#:
+#: Only the landing page, and only when nothing else is attached to it — see
+#: `is_canonical_auth_landing_page` for why the conditions matter.
+AUTH_LANDING_STEMS: frozenset[str] = frozenset(
+    {"login", "signin", "signup", "register"}
+)
+
+#: Path segments that turn an auth page into something else. `/login` is a
+#: destination; `/admin/login` is a door into the back office, and
+#: `/api/login` is an endpoint that expects a POST.
+AUTH_LANDING_FORBIDDEN_PARENTS: frozenset[str] = frozenset(
+    {
+        "admin", "wp-admin", "wp-login", "cpanel", "api", "v1", "v2",
+        "dashboard", "account", "my-account", "profile", "cart", "checkout",
+        "orders", "auth", "oauth", "wp-login.php",
+    }
+)
+
+
+#: Extensions that name the technology rather than the page. Stripped before a
+#: segment is compared with the blocklist, so `wp-login.php` is `wp-login`.
+_PAGE_EXTENSIONS = (".php", ".html", ".htm", ".asp", ".aspx", ".jsp", ".cgi")
+
+
+def _strip_page_extension(segment: str) -> str:
+    for extension in _PAGE_EXTENSIONS:
+        if segment.endswith(extension):
+            return segment[: -len(extension)]
+    return segment
+
+
+def is_canonical_auth_landing_page(url: str) -> bool:
+    """Whether a URL is a public sign-in page worth indexing.
+
+    Three conditions, all of which have to hold:
+
+    * The last path segment is exactly a landing stem — `/login`, `/signin`,
+      `/signup`, `/register`, optionally with an `.html` suffix. A stem buried
+      earlier in the path (`/login/help`) is not a landing page.
+    * There is no query string at all. `?return_to=`, `?next=` and `?callback=`
+      are open redirects: the crawler follows them and the frontier follows the
+      redirect, which is how a spider loop starts. An auth page with a query is
+      also, by construction, a page mid-flow rather than a page on arrival.
+    * No parent segment makes it something else — an admin console, an API
+      endpoint, or a private area.
+    """
+    parts = urlsplit(url)
+    if parts.query or parts.fragment:
+        return False
+
+    segments = [segment for segment in parts.path.lower().split("/") if segment]
+    if not segments:
+        return False
+
+    last = segments[-1]
+    if last.endswith(".html"):
+        last = last[: -len(".html")]
+    if last not in AUTH_LANDING_STEMS:
+        return False
+
+    return not any(parent in AUTH_LANDING_FORBIDDEN_PARENTS for parent in segments[:-1])
+
 
 #: A path carrying year/month/day is a calendar. One is a date; three in a row
 #: is an infinite archive that will happily generate a page per day for ever.
@@ -441,8 +511,16 @@ def is_crawlable(url: str) -> bool:
     if depth > MAX_PATH_DEPTH:
         return False
 
-    if any(segment in BLOCKED_PATH_SEGMENTS for segment in segments):
-        return False
+    # The auth words are in the blocklist because most pages carrying them are
+    # forms or doors. A canonical landing page is neither, and it is the one a
+    # reader searches for by name.
+    # A page extension is not part of what a path segment means: `wp-login.php`
+    # is `wp-login`, and without this it slipped through the blocklist that
+    # already names `wp-login`.
+    bare_segments = [_strip_page_extension(segment) for segment in segments]
+    if any(segment in BLOCKED_PATH_SEGMENTS for segment in bare_segments):
+        if not is_canonical_auth_landing_page(url):
+            return False
 
     # Matched against the whole URL, not just the path: `aspxerrorpath` and
     # friends arrive in the query string, where a path-only test misses them.
@@ -468,9 +546,11 @@ def is_crawlable(url: str) -> bool:
             if int(value) > MAX_PAGINATION:
                 return False
 
-    # A form, not a page.
+    # A form, not a page — unless it is the landing page itself, which the
+    # blocklist above already let through.
     if any(segment in AUTH_PATH_SEGMENTS for segment in segments):
-        return False
+        if not is_canonical_auth_landing_page(url):
+            return False
 
     # A repeated segment (`/books/books/books`) is a recursion trap.
     for previous, current in zip(segments, segments[1:]):
