@@ -108,3 +108,112 @@ def test_the_store_truncates_no_matter_what_it_is_handed():
     assert len(row[3]) == 300    # description
     assert len(row[9]) == 35     # brand
     assert len(row[11]) == 50    # action title
+
+
+# ---------------------------------------------------------------------------
+# Canonical auth landing pages
+#
+# A government portal's sign-in page is a destination: "KPSC login" is a query
+# people type. Refusing to index the answer is refusing to answer. The rules
+# that made auth URLs uncrawlable were written for forms and doors, and a
+# landing page is neither.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://kpsc.kar.nic.in/login",
+        "https://serviceonline.gov.in/register",
+        "https://example.com/signin",
+        "https://example.com/signup",
+        "https://example.com/login.html",
+        "https://example.com/register.html",
+        "https://example.com/LOGIN",
+    ],
+)
+def test_a_canonical_auth_landing_page_is_crawlable(url):
+    from app.agents import load_agent
+
+    assert load_agent("01_frontier_agent").is_crawlable(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # A query string on an auth page is a redirect surface.
+        "https://example.com/login?next=/checkout",
+        "https://example.com/login?return_to=/dashboard",
+        "https://example.com/register?callback=/admin",
+        # An admin console with a sign-in door in front of it.
+        "https://example.com/admin/login",
+        "https://example.com/wp-admin/login",
+        "https://example.com/cpanel/login",
+        # An endpoint that expects a POST.
+        "https://example.com/api/login",
+        "https://example.com/v1/register",
+        # A stem buried in the path is not a landing page.
+        "https://example.com/login/help",
+    ],
+)
+def test_an_auth_page_that_is_a_door_stays_blocked(url):
+    from app.agents import load_agent
+
+    assert load_agent("01_frontier_agent").is_crawlable(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/dashboard",
+        "https://example.com/account/settings",
+        "https://example.com/profile/edit",
+        "https://example.com/cart",
+        "https://example.com/checkout",
+        "https://example.com/orders",
+        "https://example.com/my-account",
+        "https://example.com/admin",
+        "https://example.com/wp-admin",
+        "https://example.com/wp-login.php",
+        "https://example.com/cpanel",
+    ],
+)
+def test_private_areas_and_control_panels_stay_blocked(url):
+    from app.agents import load_agent
+
+    assert load_agent("01_frontier_agent").is_crawlable(url) is False
+
+
+def test_a_page_extension_does_not_hide_a_blocked_segment():
+    """`wp-login.php` was crawlable because the blocklist names `wp-login`."""
+    from app.agents import load_agent
+
+    frontier = load_agent("01_frontier_agent")
+
+    assert frontier.is_crawlable("https://example.com/wp-login.php") is False
+    assert frontier.is_crawlable("https://example.com/admin.aspx") is False
+
+
+def test_the_trap_shield_delegates_the_same_answer():
+    from app.agents import load_agent
+
+    shield = load_agent("18_trap_shield_agent")
+
+    assert shield.is_canonical_auth_landing_page("https://kpsc.kar.nic.in/login") is True
+    assert shield.is_crawlable("https://example.com/login?next=/x") is False
+    assert shield.is_crawlable("https://example.com/dashboard") is False
+
+
+def test_a_logout_or_password_page_is_still_blocked():
+    """Only the landing stems are allowed. The rest of the flow is not a page."""
+    from app.agents import load_agent
+
+    frontier = load_agent("01_frontier_agent")
+
+    for url in (
+        "https://example.com/logout",
+        "https://example.com/forgot-password",
+        "https://example.com/reset-password",
+        "https://example.com/subscribe",
+    ):
+        assert frontier.is_crawlable(url) is False, url
