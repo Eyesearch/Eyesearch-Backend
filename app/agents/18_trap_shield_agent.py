@@ -26,6 +26,8 @@ is_crawlable = _frontier.is_crawlable
 TRAP_PATH_SUBSTRINGS = _frontier.TRAP_PATH_SUBSTRINGS
 TRACKING_PARAMS = _frontier.TRACKING_PARAMS
 AUTH_PATH_SEGMENTS = _frontier.AUTH_PATH_SEGMENTS
+#: The one auth page shape that is a destination rather than a door.
+is_canonical_auth_landing_page = _frontier.is_canonical_auth_landing_page
 
 
 @dataclass
