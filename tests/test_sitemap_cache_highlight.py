@@ -46,7 +46,7 @@ SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
   <url><loc>https://karnataka.gov.in/about</loc></url>
   <url><loc>https://karnataka.gov.in/departments/health</loc></url>
   <url><loc>https://karnataka.gov.in/logo.png</loc></url>
-  <url><loc>https://karnataka.gov.in/login</loc></url>
+  <url><loc>https://karnataka.gov.in/login?next=/dashboard</loc></url>
   <url><loc>https://elsewhere.xyz/page</loc></url>
 </urlset>"""
 
@@ -61,7 +61,7 @@ def test_locs_are_extracted_from_a_sitemap():
         "https://karnataka.gov.in/about",
         "https://karnataka.gov.in/departments/health",
         "https://karnataka.gov.in/logo.png",
-        "https://karnataka.gov.in/login",
+        "https://karnataka.gov.in/login?next=/dashboard",
         "https://elsewhere.xyz/page",
     ]
 
