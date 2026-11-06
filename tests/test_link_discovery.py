@@ -44,7 +44,7 @@ PAGE = """
   <a href="https://india.gov.in/services">National services</a>
   <a href="/logo.png">Logo</a>
   <a href="/a/b/c/d/e">Too deep</a>
-  <a href="/login">Sign in</a>
+  <a href="/login?next=/dashboard">Sign in</a>
   <a href="https://bbc.com/karnataka">BBC</a>
   <a href="#top">Top</a>
   <a href="mailto:info@karnataka.gov.in">Mail</a>
@@ -70,7 +70,8 @@ def test_the_parser_extracts_absolute_links_and_drops_non_navigable_hrefs():
     # ...and the frontier is what removes the rest.
     kept = FrontierAgent.filter_links(None, parsed.links, SEED)
     assert SEED + "logo.png" not in kept
-    assert SEED + "login" not in kept
+    # `/login` is a landing page; the query-bearing variant is not.
+    assert SEED + "login?next=/dashboard" not in kept
     assert SEED + "a/b/c/d/e/f/g/h" not in kept
 
     # The crawl is India-only: a foreign host has a hard ceiling of zero, so it
@@ -112,7 +113,10 @@ def test_is_crawlable_rejects_junk_extensions_and_deep_paths():
 
     assert is_crawlable("https://karnataka.gov.in/logo.png") is False
     assert is_crawlable("https://karnataka.gov.in/report.pdf") is False
-    assert is_crawlable("https://karnataka.gov.in/login") is False
+    # A bare `/login` is a canonical landing page now: it is a destination a
+    # reader searches for. A login with a query is still a redirect surface.
+    assert is_crawlable("https://karnataka.gov.in/login") is True
+    assert is_crawlable("https://karnataka.gov.in/login?next=/dashboard") is False
     # Deeper than MAX_PATH_DEPTH (6) is still out of scope.
     assert is_crawlable("https://karnataka.gov.in/a/b/c/d/e/f/g/h") is False
 
@@ -151,7 +155,7 @@ def test_filter_links_keeps_only_what_is_in_scope():
         SEED + "about#history",
         SEED + "logo.png",
         SEED + "a/b/c/d/e/f/g/h",
-        SEED + "login",
+        SEED + "login?next=/dashboard",
         "https://india.gov.in/services",
         "https://bbc.com/karnataka",
     ]
@@ -207,7 +211,7 @@ async def test_a_fetched_page_queues_its_own_links(store, client):
         assert SEED + "about" in queued
         assert SEED + "departments/health" in queued
         assert SEED + "logo.png" not in queued
-        assert SEED + "login" not in queued
+        assert SEED + "login?next=/dashboard" not in queued
 
         # And the next batch consumes them, so the crawl keeps moving.
         second = await orchestrator.run_batch()
