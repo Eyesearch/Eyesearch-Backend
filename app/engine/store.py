@@ -90,6 +90,17 @@ AUTHORITY_DOMAIN_BOOST = 1.5
 #: How many query terms are checked against the title.
 MAX_TITLE_TOKENS = 5
 
+#: How many lexical matches survive to be scored with the full boost expression.
+#:
+#: The boosts are six CASE expressions per row, several of them with regex and
+#: string surgery over the domain. Measured on a 25k-page index, running them
+#: over every match (25,164 rows for a common word) cost 1.6 s, almost all of it
+#: in that expression. Ranking lexically first and boosting only the survivors
+#: makes the cost the candidate window, not the corpus. The window is generous:
+#: a page has to be outside the lexical top 500 to be lost, and the caller only
+#: ever shows fifty.
+RANK_CANDIDATE_LIMIT = 500
+
 #: Width of the passage returned as a match snippet, in characters.
 SNIPPET_CHAR_CAP = 320
 
@@ -1057,10 +1068,13 @@ class IndexStore:
         filters = ""
         extra: list[Any] = []
         if category:
-            filters += " AND p.category = ?"
+            # The filters sit inside the candidate window, so they narrow what
+            # is ranked rather than only what is returned: a filtered search
+            # must not spend its 500 candidates on rows it will then discard.
+            filters += " AND p0.category = ?"
             extra.append(category)
         if language:
-            filters += " AND p.language = ?"
+            filters += " AND p0.language = ?"
             extra.append(language)
 
         # Title boost. Bound parameters appear in SQL order, so the rank query
@@ -1160,10 +1174,27 @@ class IndexStore:
             # Appended last on purpose: the row mapper reads by position, and
             # inserting them earlier would shift every index after it.
             "p.category, c.code AS category_code, p.sitelinks "
-            "FROM pages p "
+            # Two-stage ranking. The inner select is the only one that reads
+            # the whole match set, and it carries nothing but the lexically best
+            # rows forward; the six boost expressions are then evaluated once
+            # per candidate instead of once per match.
+            # Only the id comes out of the window: selecting `p0.*` made the
+            # scan detoast 25k bodies to hand 500 of them on, which cost more
+            # than the boost expression it was meant to save. The row is
+            # fetched again by primary key for the survivors.
+            f"FROM (SELECT p0.page_id, "
+            # ts_rank rather than ts_rank_cd here: the cover-density variant is
+            # the more expensive of the two and this stage only decides which
+            # rows reach the boost pass, not their final order — the outer sort
+            # still scores with ts_rank_cd. Measured on 25k matches: 456 ms
+            # against 324 ms.
+            f"ts_rank(p0.search_vector, to_tsquery('{SEARCH_CONFIG}', ?)) AS lex "
+            f"FROM pages p0 "
+            f"WHERE p0.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters} "
+            "ORDER BY lex DESC LIMIT ?) cand "
+            "JOIN pages p ON p.page_id = cand.page_id "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
             "LEFT JOIN categories c ON c.id = p.category_id "
-            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters}"
             ") base"
             ") ranked "
             "ORDER BY (lexical_score "
@@ -1192,8 +1223,10 @@ class IndexStore:
             query_language,
             navigational_term,
             navigational_term,
+            rank_query,
             match_query,
             *extra,
+            RANK_CANDIDATE_LIMIT,
             TITLE_MATCH_BOOST,
             AUTHORITY_DOMAIN_BOOST,
             LANGUAGE_MATCH_BOOST,
