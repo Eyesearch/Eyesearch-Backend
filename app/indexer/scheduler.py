@@ -146,11 +146,17 @@ def start_workers(
         logger.info("storage watchdog started")
 
     if settings.revalidation_enabled:
+        # The worker sleeps for an hour between passes, and the King restarts
+        # anything silent for 30 s. Without this wiring the King read the sleep
+        # as a stall and restarted revalidation every 30 s, so the interval was
+        # never honoured and a pass could be cancelled halfway through.
+        revalidation = orchestrator.revalidation
+        king = getattr(orchestrator, "king", None)
+        if king is not None and hasattr(revalidation, "beat"):
+            revalidation.heartbeat = lambda: king.beat("revalidation")
         handles.add(
             "revalidation",
-            _start(
-                orchestrator, "revalidation", orchestrator.revalidation.run_forever, handles
-            ),
+            _start(orchestrator, "revalidation", revalidation.run_forever, handles),
         )
         logger.info("revalidation worker started")
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from typing import Callable
 
 from app.agents import load_agent
 from app.engine.config import Settings, get_settings
@@ -39,6 +40,16 @@ logger = logging.getLogger(__name__)
 #: Fallback only. The agent reads `settings.revalidation_min_sleep_seconds` at
 #: run time; this is what it uses when constructed without settings.
 MIN_SLEEP_SECONDS = 30.0
+
+#: The longest one sleep slice may run before the worker beats again.
+#:
+#: The supervisor restarts a worker that has been silent for 30 s, and this
+#: worker's interval is an hour. Sleeping the interval in one go meant every
+#: pass was followed by an hour of silence, the King read that as a stall 30 s
+#: in and restarted the worker, so the configured interval never took effect and
+#: a pass could be cancelled halfway through. Slicing the sleep keeps the
+#: heartbeat alive without shortening the wait between passes.
+MAX_SLEEP_SLICE_SECONDS = 10.0
 
 _frontier_module = load_agent("01_frontier_agent")
 _parser_module = load_agent("03_parser_agent")
@@ -66,6 +77,25 @@ class RevalidationAgent:
         self._quality = quality or QualityAgent()
         self.refreshed = 0
         self.failed = 0
+        #: Set by the scheduler to the supervisor's `beat`, so a worker that is
+        #: asleep rather than working still reports that it is alive.
+        self.heartbeat: Callable[[], None] | None = None
+        self.beats = 0
+
+    def beat(self) -> None:
+        """Report that this worker is alive.
+
+        Called before every pass and between the slices of the sleep, because
+        neither the pass nor the interval is guaranteed to finish inside the
+        supervisor's 30-second window.
+        """
+        self.beats += 1
+        if self.heartbeat is None:
+            return
+        try:
+            self.heartbeat()
+        except Exception:  # a heartbeat must never end the worker
+            logger.debug("revalidation heartbeat failed", exc_info=True)
 
     async def run_once(self) -> int:
         """One revalidation pass. Returns how many rows were refreshed."""
@@ -138,6 +168,7 @@ class RevalidationAgent:
     async def run_forever(self) -> None:
         """Loop until cancelled, sleeping a jittered, never-short interval."""
         while True:
+            self.beat()
             try:
                 await self.run_once()
             except asyncio.CancelledError:
@@ -151,7 +182,16 @@ class RevalidationAgent:
                 self._settings.revalidation_interval_seconds + jitter,
             )
             logger.debug("revalidation worker sleeping %.1fs", delay)
-            await asyncio.sleep(delay)
+            await self.sleep_between_passes(delay)
+
+    async def sleep_between_passes(self, delay: float) -> None:
+        """Wait out the interval in slices, beating between them."""
+        remaining = float(delay)
+        while remaining > 0:
+            slice_seconds = min(remaining, MAX_SLEEP_SLICE_SECONDS)
+            await asyncio.sleep(slice_seconds)
+            remaining -= slice_seconds
+            self.beat()
 
     @staticmethod
     def _domain(url: str) -> str:
@@ -159,7 +199,7 @@ class RevalidationAgent:
         return _frontier_module.domain_of(url)
 
 
-__all__ = ["MIN_SLEEP_SECONDS", "RevalidationAgent"]
+__all__ = ["MAX_SLEEP_SLICE_SECONDS", "MIN_SLEEP_SECONDS", "RevalidationAgent"]
 
 
 # ---------------------------------------------------------------------------

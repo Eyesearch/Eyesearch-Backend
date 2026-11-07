@@ -7,6 +7,7 @@ import asyncio
 import pytest
 
 from app.agents import load_agent
+from app.engine.config import Settings
 
 KINGDOM = (
     "14_king_orchestrator_agent",
@@ -73,6 +74,69 @@ async def test_a_worker_that_raises_is_restarted_by_its_factory():
     king.register("flaky", flaky)
     await asyncio.sleep(0.05)
     assert len(runs) >= 1
+    await king.stop()
+
+
+# ---------------------------------------------------------------------------
+# 06 — revalidation, which sleeps for an hour and must still beat
+# ---------------------------------------------------------------------------
+
+
+def _revalidation_agent(interval_seconds: float):
+    """An agent whose pass is a no-op, so only the loop is under test."""
+    module = load_agent("06_revalidation_agent")
+    agent = module.RevalidationAgent(
+        store=None,
+        fetcher=None,
+        settings=Settings(
+            revalidation_interval_seconds=interval_seconds,
+            revalidation_jitter_seconds=0,
+        ),
+    )
+
+    async def one_pass() -> int:
+        return 0
+
+    agent.run_once = one_pass
+    return module, agent
+
+
+@pytest.mark.asyncio
+async def test_revalidation_beats_while_it_sleeps(monkeypatch):
+    """The interval is an hour; the supervisor's window is 30 s.
+
+    A worker that only beat once per pass was declared stalled mid-sleep and
+    restarted every 30 seconds, which is the bug this covers.
+    """
+    module, agent = _revalidation_agent(interval_seconds=1)
+    monkeypatch.setattr(module, "MAX_SLEEP_SLICE_SECONDS", 0.02)
+    beats = []
+    agent.heartbeat = lambda: beats.append(1)
+
+    task = asyncio.create_task(agent.run_forever())
+    await asyncio.sleep(0.15)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(beats) >= 2
+
+
+@pytest.mark.asyncio
+async def test_the_king_does_not_restart_a_sleeping_revalidation_worker(monkeypatch):
+    module, agent = _revalidation_agent(interval_seconds=1)
+    monkeypatch.setattr(module, "MAX_SLEEP_SLICE_SECONDS", 0.02)
+    king = load_agent("14_king_orchestrator_agent").KingOrchestratorAgent(
+        stale_after=0.1, interval=0.01
+    )
+    agent.heartbeat = lambda: king.beat("revalidation")
+
+    king.register("revalidation", agent.run_forever)
+    await asyncio.sleep(0.3)
+    report = await king.check_once()
+
+    assert "revalidation" not in report.stalled
+    assert king.beats > 2
     await king.stop()
 
 
