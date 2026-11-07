@@ -61,8 +61,10 @@ class Settings(BaseSettings):
     #: Tighter than the crawler's 4s: a person is waiting on this one. 1.5s was
     #: the ceiling and it was too tight — a ranked full-text scan over a larger
     #: index can legitimately take two seconds, and killing it produced the
-    #: "no response" the user saw rather than a slow answer.
-    search_statement_timeout_ms: int = 3000
+    #: "no response" the user saw rather than a slow answer. Raised again to 6s:
+    #: at 3s a three-word query on the 25k-page index was cancelled and the
+    #: reader got a database error instead of the results that were seconds away.
+    search_statement_timeout_ms: int = 6000
     search_acquire_timeout_seconds: float = 1.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
