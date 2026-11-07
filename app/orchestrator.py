@@ -59,6 +59,17 @@ LOOP_ERROR_BACKOFF_SECONDS = 5.0
 #: to see a real stall before the storage guard has to pause.
 FRONTIER_STALL_WINDOW = 10
 
+#: Empty batches in a row that mean the queue holds no work this run can do.
+#: `FrontierGrowthWatch` needs discovery to outpace closure to notice a stall;
+#: a queue full of rows whose hosts are all at their ceiling discovers nothing
+#: and closes nothing, so it looks idle rather than stuck.
+IDLE_QUEUE_STALL_BATCHES = 10
+
+#: How often the crawl re-checks the queue for rows it may never fetch. Capped
+#: and out-of-scope hosts accumulate during a run, not only at startup, and an
+#: unparked backlog makes `/v1/stats` report work that will never happen.
+QUEUE_RECONCILE_EVERY_BATCHES = 20
+
 
 class FrontierGrowthWatch:
     """Warns when the frontier grows while indexing makes no progress.
@@ -102,6 +113,32 @@ class FrontierGrowthWatch:
 
         self._reset()
         return message
+
+
+class IdleQueueWatch:
+    """Decides when an empty frontier is a stall rather than a quiet moment.
+
+    `run_batch()` returns an empty outcome when the queue holds no row this run
+    may fetch: every host is at its page ceiling, or the rows are out of crawl
+    scope. The crawler then spins, the queue depth stays high, and nothing in
+    the log says why — the index simply stops growing while `/health` reports a
+    healthy worker. This is the alarm for exactly that state.
+    """
+
+    def __init__(self, window: int = IDLE_QUEUE_STALL_BATCHES) -> None:
+        self._window = max(1, window)
+        self._empty = 0
+
+    def observe(self, *, empty_batch: bool) -> bool:
+        """Record one batch; return True once per window of empty batches."""
+        if not empty_batch:
+            self._empty = 0
+            return False
+        self._empty += 1
+        if self._empty < self._window:
+            return False
+        self._empty = 0
+        return True
 
 
 #: How often the loop prunes terminal queue rows. Every batch would spend a
@@ -605,6 +642,8 @@ class Orchestrator:
             logger.exception("startup frontier repair failed; crawler will continue")
 
         batches_since_prune = 0
+        batches_since_reconcile = 0
+        idle_watch = IdleQueueWatch()
 
         while True:
             if self.king is not None:
@@ -647,6 +686,33 @@ class Orchestrator:
                 added = await self._frontier.refill(minimum=1)
                 if added:
                     logger.info("crawler frontier refilled with %d URLs", added)
+
+                # An empty batch while the queue still holds rows means the rows
+                # are not work: their host is at its ceiling or out of scope.
+                # Park them so the depth tells the truth, and say why the crawl
+                # has gone quiet instead of leaving it to be discovered days
+                # later from a page count that stopped moving.
+                batches_since_reconcile += 1
+                stalled = idle_watch.observe(empty_batch=outcome is not None and outcome.empty)
+                if stalled or batches_since_reconcile >= QUEUE_RECONCILE_EVERY_BATCHES:
+                    batches_since_reconcile = 0
+                    parked = await self._store.skip_pending_for_capped_domains()
+                    depth = await self._store.queue_depth()
+                    if parked:
+                        logger.warning(
+                            "parked %d pending URLs whose host is at its page ceiling "
+                            "(queue depth %d)",
+                            parked,
+                            depth,
+                        )
+                    if stalled and depth:
+                        logger.warning(
+                            "crawl idle for %d empty batches with %d pending URLs: none of "
+                            "them is eligible — every host is at its ceiling or the rows are "
+                            "out of crawl scope. Queue new domains to grow the index.",
+                            IDLE_QUEUE_STALL_BATCHES,
+                            depth,
+                        )
 
                 # Early warning, before the storage guard has to pause anything.
                 if outcome is not None:
