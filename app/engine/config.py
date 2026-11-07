@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     #: The port only opens after this, so an unbounded wait here is a failed
     #: deploy rather than a slow one.
     boot_db_timeout_seconds: float = 20.0
+    #: How long to wait before trying the bootstrap again after it timed out.
+    #: Doubles on each failure, capped at five minutes.
+    boot_db_retry_seconds: float = 15.0
 
     #: The storage ceiling, expressed in megabytes. Turso's tier is 5 GB and
     #: the index must stop short of it, so the cap is stated in MB and derived

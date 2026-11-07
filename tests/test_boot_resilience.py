@@ -182,3 +182,47 @@ async def test_the_ranked_query_uses_the_full_text_index_when_rows_are_many(clie
 
     rows = await client.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'pages'")
     assert "idx_pages_search" in {row[0] for row in rows.rows}
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_bootstrap_is_retried_in_the_background(monkeypatch):
+    """A slow database at boot must not leave the process degraded for ever.
+
+    The bootstrap runs before the port binds, so it is bounded; a timeout used
+    to set `database_ready` False and never look again, and `/health` reported
+    `db: down` while every query worked.
+    """
+    import asyncio
+    import types
+
+    from app import main as main_module
+    from app.engine.config import Settings
+
+    attempts = []
+
+    async def fake_bootstrap(client, settings):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise asyncio.TimeoutError
+
+    monkeypatch.setattr(main_module, "_bootstrap_database", fake_bootstrap)
+    app = types.SimpleNamespace(state=types.SimpleNamespace(database_ready=False))
+    settings = Settings(
+        _env_file=None,
+        boot_db_timeout_seconds=1.0,
+        boot_db_retry_seconds=0.01,
+    )
+
+    task = asyncio.create_task(main_module._retry_bootstrap(app, None, settings))
+    for _ in range(800):
+        if app.state.database_ready:
+            break
+        await asyncio.sleep(0.01)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert app.state.database_ready is True
+    assert len(attempts) >= 2
