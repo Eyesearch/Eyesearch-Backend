@@ -35,6 +35,28 @@ services:
       CRAWLER_DRAIN_MODE: "${CRAWLER_DRAIN_MODE:-false}"
       REVALIDATION_ENABLED: "${REVALIDATION_ENABLED:-true}"
 
+      # The VM this runs on has one vCPU and under a gigabyte of RAM, and the
+      # crawler shares it with the search API. These are the values that box was
+      # tuned to: they live here rather than in someone's .env so a fresh clone
+      # and a redeploy start correct instead of rediscovering the same limits.
+      # Every one is still overridable from .env.
+      CRAWL_BATCH_SIZE: "${CRAWL_BATCH_SIZE:-30}"
+      CRAWL_CONCURRENCY: "${CRAWL_CONCURRENCY:-3}"
+      CRAWL_TIMEOUT_SECONDS: "${CRAWL_TIMEOUT_SECONDS:-15}"
+      CRAWL_CONNECT_TIMEOUT_SECONDS: "${CRAWL_CONNECT_TIMEOUT_SECONDS:-8}"
+      CRAWL_READ_TIMEOUT_SECONDS: "${CRAWL_READ_TIMEOUT_SECONDS:-12}"
+      # 4 s was tight enough that the queue repair and pending_batch() were
+      # cancelled mid-statement under crawl load, which stopped the crawl.
+      DB_STATEMENT_TIMEOUT_MS: "${DB_STATEMENT_TIMEOUT_MS:-20000}"
+      # A search that needs longer than this is slow, not broken: answer it.
+      SEARCH_STATEMENT_TIMEOUT_MS: "${SEARCH_STATEMENT_TIMEOUT_MS:-6000}"
+      # India only. The global ring is the largest spider-trap surface there is.
+      ALLOW_GLOBAL_DOMAINS: "${ALLOW_GLOBAL_DOMAINS:-false}"
+      # 24 h benched a domain for a burst of timeouts; an hour is enough.
+      CRAWL_BREAKER_COOLDOWN_SECONDS: "${CRAWL_BREAKER_COOLDOWN_SECONDS:-3600}"
+      # Freshness re-arms outranked never-fetched URLs and starved them.
+      REARM_COOLDOWN_SECONDS: "${REARM_COOLDOWN_SECONDS:-2592000}"
+
     # Cap the log growth: the crawler is chatty and this VM's disk is also
     # holding the database.
     logging:
