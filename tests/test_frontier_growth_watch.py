@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from app.orchestrator import FRONTIER_STALL_WINDOW, FrontierGrowthWatch
+from app.orchestrator import (
+    FRONTIER_STALL_WINDOW,
+    IDLE_QUEUE_STALL_BATCHES,
+    FrontierGrowthWatch,
+    IdleQueueWatch,
+)
 
 
 def _run(watch, batches):
@@ -62,3 +67,41 @@ def test_the_window_defaults_to_the_module_constant():
     watch = FrontierGrowthWatch()
     assert _run(watch, [(0, 10, 0)] * (FRONTIER_STALL_WINDOW - 1)) == []
     assert len(_run(watch, [(0, 10, 0)])) == 1
+
+
+# ---------------------------------------------------------------------------
+# An empty frontier with a full queue is a stall, not an idle crawler
+# ---------------------------------------------------------------------------
+
+
+def _idle(watch, empty_batches):
+    """Feed booleans; return how many times the watch raised the alarm."""
+    return sum(1 for empty in empty_batches if watch.observe(empty_batch=empty))
+
+
+def test_an_empty_queue_is_not_reported_before_the_window():
+    watch = IdleQueueWatch(window=5)
+    assert _idle(watch, [True] * 4) == 0
+
+
+def test_a_full_window_of_empty_batches_is_a_stall():
+    watch = IdleQueueWatch(window=5)
+    assert _idle(watch, [True] * 5) == 1
+
+
+def test_a_batch_with_work_resets_the_count():
+    watch = IdleQueueWatch(window=3)
+    # Two empty batches, then real work: the run is not stuck, it was quiet.
+    assert _idle(watch, [True, True, False, True, True]) == 0
+
+
+def test_the_alarm_repeats_once_per_window():
+    watch = IdleQueueWatch(window=2)
+    assert _idle(watch, [True] * 6) == 3
+
+
+def test_the_idle_window_defaults_to_the_module_constant():
+    assert IDLE_QUEUE_STALL_BATCHES >= 5
+    watch = IdleQueueWatch()
+    assert _idle(watch, [True] * (IDLE_QUEUE_STALL_BATCHES - 1)) == 0
+    assert _idle(watch, [True]) == 1
