@@ -65,10 +65,10 @@ FRONTIER_STALL_WINDOW = 10
 #: and closes nothing, so it looks idle rather than stuck.
 IDLE_QUEUE_STALL_BATCHES = 10
 
-#: How often the crawl re-checks the queue for rows it may never fetch. Capped
-#: and out-of-scope hosts accumulate during a run, not only at startup, and an
-#: unparked backlog makes `/v1/stats` report work that will never happen.
-QUEUE_RECONCILE_EVERY_BATCHES = 20
+#: Note on frequency: the reconcile is an UPDATE over the pending backlog, and
+#: on a small VM it competes with `pending_batch()` for the same rows. Running
+#: it on a timer made both queries hit the statement timeout, so it is triggered
+#: by idleness only — the state it exists to repair.
 
 
 class FrontierGrowthWatch:
@@ -642,7 +642,6 @@ class Orchestrator:
             logger.exception("startup frontier repair failed; crawler will continue")
 
         batches_since_prune = 0
-        batches_since_reconcile = 0
         idle_watch = IdleQueueWatch()
 
         while True:
@@ -692,10 +691,8 @@ class Orchestrator:
                 # Park them so the depth tells the truth, and say why the crawl
                 # has gone quiet instead of leaving it to be discovered days
                 # later from a page count that stopped moving.
-                batches_since_reconcile += 1
                 stalled = idle_watch.observe(empty_batch=outcome is not None and outcome.empty)
-                if stalled or batches_since_reconcile >= QUEUE_RECONCILE_EVERY_BATCHES:
-                    batches_since_reconcile = 0
+                if stalled:
                     parked = await self._store.skip_pending_for_capped_domains()
                     depth = await self._store.queue_depth()
                     if parked:
