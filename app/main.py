@@ -175,6 +175,13 @@ async def lifespan(app: FastAPI):
     except Exception as error:  # a broken database must not stop the app booting
         logger.exception("database bootstrap failed; serving degraded: %s", error)
 
+    # A bootstrap that timed out is not a verdict: the database was busy, and
+    # the process then served `db: down` for ever while every query worked. The
+    # retry is what makes a slow start a late one instead of a permanent fault.
+    bootstrap_retry: asyncio.Task | None = None
+    if not app.state.database_ready:
+        bootstrap_retry = asyncio.create_task(_retry_bootstrap(app, client, settings))
+
     # The read path gets its own pool, so a crawl burst cannot starve search.
     # On SQLite there is no pool and this is the same object, hence the
     # identity check at shutdown.
@@ -208,12 +215,40 @@ async def lifespan(app: FastAPI):
     finally:
         bootstrap.cancel()
         warmup.cancel()
+        if bootstrap_retry is not None:
+            bootstrap_retry.cancel()
         await stop_workers(app.state.workers)
         await orchestrator.close()
         await client.close()
         if search_client is not client:
             await search_client.close()
         logger.info("shutdown complete")
+
+
+async def _retry_bootstrap(app: FastAPI, client: LibsqlClient, settings: Settings) -> None:
+    """Finish a database bootstrap that timed out or failed at boot.
+
+    Bounded by a doubling delay so a database that is genuinely unreachable is
+    asked politely rather than hammered, and it stops as soon as the schema is
+    confirmed — at which point `/health` can report the truth.
+    """
+    delay = max(1.0, float(settings.boot_db_retry_seconds))
+    while True:
+        await asyncio.sleep(delay)
+        try:
+            await asyncio.wait_for(
+                _bootstrap_database(client, settings),
+                timeout=settings.boot_db_timeout_seconds,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - keep trying, quietly
+            logger.warning("database bootstrap retry failed (%s); next in %.0fs", error, delay)
+            delay = min(delay * 2, 300.0)
+            continue
+        app.state.database_ready = True
+        logger.info("database bootstrap completed on retry; /health reports the real status")
+        return
 
 
 async def _warm_autosuggest(service: "SearchService", orchestrator: Orchestrator) -> None:
