@@ -20,10 +20,10 @@ import logging
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Sequence
+from urllib.parse import urlparse, urlsplit
 
 from app.engine.config import Settings, get_settings
 from app.agents import load_agent
@@ -368,7 +368,47 @@ def _strip_tags(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text or "").strip()
 
 
-def to_result(hit: SearchHit) -> SearchResult:
+#: Below this a stored description is too short to be a sentence.
+WEAK_DESCRIPTION_CHARS = 20
+
+#: Separators that turn a description into a navigation bar: "Home | About |
+#: Contact" is what the site's menu says, not what the page is about.
+MENU_SEPARATORS = (" | ", " › ", " / ", " » ", " - ")
+
+
+def _looks_like_a_menu(text: str) -> bool:
+    body = (text or "").strip()
+    if len(body) < WEAK_DESCRIPTION_CHARS:
+        return True
+    if len(body) > 80:
+        return False
+    return any(separator in body for separator in MENU_SEPARATORS)
+
+
+def _host_of(url: str) -> str:
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _consistent_brands(hits: Sequence[SearchHit]) -> dict[str, str]:
+    """The name a site is called by, chosen once per host in this result page.
+
+    Whichever brand the host's own pages repeat most wins, so one page whose
+    `og:site_name` says "www.ksrtc" cannot rename the site on its own.
+    """
+    tally: dict[str, Counter[str]] = {}
+    for hit in hits:
+        host = _host_of(getattr(hit, "url", "") or "")
+        brand = (getattr(hit, "brand_name", "") or "").strip()
+        if host and brand:
+            tally.setdefault(host, Counter())[brand] += 1
+    return {host: counts.most_common(1)[0][0] for host, counts in tally.items()}
+
+
+def to_result(hit: SearchHit, *, brand: str | None = None) -> SearchResult:
     """Map an index row onto the card contract.
 
     The card shows the action title — the parser's short statement of what the
@@ -382,7 +422,11 @@ def to_result(hit: SearchHit) -> SearchResult:
     # render a snippet as plain text and do their own highlighting.
     snippet_source = hit.description
     headline = _strip_tags(getattr(hit, "dynamic_headline", "") or "")
-    if not getattr(hit, "nav_hit", 0) and headline:
+    # A navigational hit shows what the site says about itself — unless what it
+    # says is "Home | About | Contact", which tells the reader nothing. A
+    # description this short is a menu, not a sentence.
+    weak_description = _looks_like_a_menu(hit.description or "")
+    if headline and (not getattr(hit, "nav_hit", 0) or weak_description):
         snippet_source = headline
 
     raw_title = hit.title or hit.url
@@ -390,7 +434,7 @@ def to_result(hit: SearchHit) -> SearchResult:
     # authoritative display title. The four-word action title is retired as a
     # display string; where it exists it is only the context it contributes.
     context = (hit.action_title or "").strip() or raw_title
-    brand = (getattr(hit, "brand_name", "") or "").strip()
+    brand = (brand or getattr(hit, "brand_name", "") or "").strip()
     title = format_company_bounded_title(context, brand) if brand else context
     return SearchResult(
         id=f"eyesearch:{hit.page_id}",
@@ -403,7 +447,9 @@ def to_result(hit: SearchHit) -> SearchResult:
         # Never empty: a card with a blank line where the publisher goes reads
         # as broken. Rows indexed before brand extraction ran have nothing
         # stored, so the domain is used as the last resort here too.
-        brand_name=(hit.brand_name or brand_from_domain(hit.url or "") or ""),
+        # The resolved name for this host, not this row: the card must not
+        # disagree with its neighbours about what the site is called.
+        brand_name=(brand or brand_from_domain(hit.url or "") or ""),
         clean_url=hit.clean_url or "",
         # The join already knows the code; the Python map is the fallback for a
         # row whose category_id was never set.
@@ -511,7 +557,13 @@ class SearchService:
                 federated_task.cancel()
             raise
         hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
-        results = [to_result(hit).as_dict() for hit in hits]
+        # One brand per site, not per page: a result page that calls one site
+        # two names reads as two sites.
+        brand_by_host = _consistent_brands(hits)
+        results = [
+            to_result(hit, brand=brand_by_host.get(_host_of(hit.url))).as_dict()
+            for hit in hits
+        ]
 
         blended = await self._blend(query, results, federated_task)
 
