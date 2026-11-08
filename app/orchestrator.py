@@ -336,6 +336,31 @@ class Orchestrator:
         skipped_ids: list[int] = []
         discovered: list[str] = []
 
+        # Admission: a URL whose canonical form is already indexed is not work.
+        # `www.ksrtc.in/fare` and `ksrtc.in/fare` are one page; fetching the
+        # second costs a fetch, a parse and one page of the host's quota, and
+        # then lands in the index as a duplicate the reader sees twice.
+        canonical_of = {
+            item.rowid: _frontier_module.normalise_url(item.url) for item in queue
+        }
+        already_indexed = await self._store.indexed_urls(
+            [canonical for canonical in canonical_of.values() if canonical]
+        )
+        if already_indexed:
+            kept: list[QueuedUrl] = []
+            for item in queue:
+                canonical = canonical_of.get(item.rowid)
+                if canonical and canonical in already_indexed:
+                    outcome.skipped += 1
+                    self._tally(outcome.skip_reasons, "already_indexed")
+                    skipped_ids.append(item.rowid)
+                else:
+                    kept.append(item)
+            queue = kept
+            if not queue:
+                await self._indexer.park(failed_ids, skipped_ids)
+                return outcome
+
         # Per-host ceiling: one count query for the whole batch, and URLs on a
         # host that has reached its tier's limit are parked before any fetch
         # happens. The ceiling is a stop, not a quota to fill — a host with three

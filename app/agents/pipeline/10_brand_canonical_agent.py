@@ -308,6 +308,11 @@ LOCAL_DEV_PREFIX = re.compile(r"(?i)\blocal\s+dev\b")
 def sanitize_brand(brand: str) -> str:
     """A brand with its scars removed, cut to the limit."""
     cleaned = LOCAL_DEV_PREFIX.sub("", brand or "")
+    # A card that says "www.ksrtc" is showing a hostname, not a brand. The
+    # parser can pick `www.ksrtc.in` out of og:site_name, and rows stored
+    # before this ran still carry it.
+    if cleaned.lower().startswith("www."):
+        cleaned = cleaned[4:]
     cleaned = EDGE_PUNCTUATION.sub("", cleaned.strip()).strip()
     cleaned = _collapse(cleaned)
     return cleaned[:MAX_BRAND_LENGTH]
