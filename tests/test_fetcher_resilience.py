@@ -249,3 +249,17 @@ async def test_a_normal_page_still_parses():
 
     assert result.ok is True
     assert "<title>Portal</title>" in result.html
+
+
+def test_the_contract_audits_the_real_body_cap():
+    """`MAX_BODY_BYTES` used to be named by the contract and defined nowhere.
+
+    The audit then reported `ok=True` for a rule it could not check, and the
+    fetcher's streaming cap was invisible to it.
+    """
+    module = load_agent("02_fetcher_agent")
+    report = module.audit_contract()
+
+    values = {rule.name: rule.value for rule in report.rules}
+    assert values["MAX_BODY_BYTES"] == module.MAX_BODY_BYTES > 0
+    assert values["FETCH_TIMEOUT_SECONDS"] == module.FETCH_TIMEOUT_SECONDS >= 1
