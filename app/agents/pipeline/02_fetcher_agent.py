@@ -87,6 +87,14 @@ SOFT_404_MARKERS: tuple[str, ...] = (
 #: A redirect chain longer than this is a loop, not a move.
 MAX_REDIRECTS = 5
 
+#: The two numbers the contract audits, read from the settings model rather
+#: than restated: the live cap is `settings.crawl_max_body_bytes`, and a
+#: constant written here by hand would drift from it. The contract's job is to
+#: fail an edit that makes either unusable, and it can only do that against the
+#: real default.
+MAX_BODY_BYTES: int = int(Settings.model_fields["crawl_max_body_bytes"].default)
+FETCH_TIMEOUT_SECONDS: float = float(Settings.model_fields["crawl_timeout_seconds"].default)
+
 
 def looks_like_html(content_type: str) -> bool:
     """Whether a response is worth parsing.
