@@ -1049,6 +1049,23 @@ class IndexStore:
         known.update(str(row[0]) for row in results[1].rows)
         return known
 
+    async def indexed_urls(self, urls: Sequence[str]) -> set[str]:
+        """Which of these URLs already have a page row.
+
+        Admission asks this before a fetch: a URL whose canonical form is
+        already in the index costs a fetch, a parse and one page of the host's
+        quota to learn nothing. Only `pages` is consulted — every candidate is
+        by definition in `crawl_queue`, so including the queue would match all
+        of them.
+        """
+        if not urls:
+            return set()
+        placeholders = ", ".join("?" for _ in urls)
+        result = await self._client.execute(
+            f"SELECT url FROM pages WHERE url IN ({placeholders})", tuple(urls)
+        )
+        return {str(row[0]) for row in result.rows}
+
     # -- search ------------------------------------------------------------
 
     async def search(

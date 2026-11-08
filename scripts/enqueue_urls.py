@@ -29,7 +29,14 @@ from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.agents import load_agent  # noqa: E402
 from app.postgres import PostgresClient  # noqa: E402
+
+#: The one canonical form, borrowed from the frontier rather than re-written:
+#: a seed typed as `https://www.ksrtc.in/` must queue the same row the crawler
+#: would discover, or the index ends up holding the page twice and the site's
+#: page quota pays for both.
+normalise_url = load_agent("01_frontier_agent").normalise_url
 
 TABLES = ("crawl_queue", "pages", "sites")
 
@@ -59,7 +66,13 @@ def read_urls(args) -> list[str]:
         if not domain_of(url):
             print(f"  skipping (no host): {url}", file=sys.stderr)
             continue
-        cleaned.append(url)
+        canonical = normalise_url(url)
+        if not canonical:
+            print(f"  skipping (not a canonical page URL): {url}", file=sys.stderr)
+            continue
+        if canonical != url:
+            print(f"  canonicalised: {url} -> {canonical}", file=sys.stderr)
+        cleaned.append(canonical)
     return list(dict.fromkeys(cleaned))
 
 
