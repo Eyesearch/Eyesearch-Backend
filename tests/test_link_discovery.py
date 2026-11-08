@@ -624,3 +624,33 @@ def test_a_sort_control_is_not_a_page():
 def test_one_ordinary_query_key_is_still_a_page():
     """A single `?year=` is a filter on a real page, not a grid."""
     assert is_crawlable("https://rbi.org.in/notifications?year=2024") is True
+
+
+def test_a_footer_does_not_become_page_text():
+    """`myScheme` matched "amazon" because its footer said "hosted by AWS"."""
+    parser = load_agent("03_parser_agent")
+    body = (
+        "This page lists district office addresses and timings for the year. "
+        "Security Policy Home Terms Security Policy. "
+        "The MyScheme is hosted by Amazon Web Services(AWS). Therefore"
+    )
+
+    cleaned = parser.clean_trailing_boilerplate(body)
+
+    assert "Amazon" not in cleaned
+    assert "district office addresses" in cleaned
+
+
+def test_a_short_page_keeps_its_copyright_line():
+    """The guard: a page with nothing else left must not be emptied."""
+    parser = load_agent("03_parser_agent")
+    body = "Small page about cookies in the district. © 2026 Someone."
+
+    assert parser.clean_trailing_boilerplate(body) == body
+
+
+def test_prose_that_mentions_cookies_is_not_a_footer():
+    parser = load_agent("03_parser_agent")
+    body = "The cookie policy explains how this portal uses cookies for sessions. " * 4
+
+    assert parser.clean_trailing_boilerplate(body) == body.rstrip()
