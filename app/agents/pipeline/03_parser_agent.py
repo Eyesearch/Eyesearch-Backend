@@ -363,8 +363,17 @@ class ParsedPage:
 class ParserAgent:
     """HTML in, bounded fields out. Never raises on bad markup."""
 
-    def __init__(self, body_char_cap: int = BODY_CHAR_CAP) -> None:
+    def __init__(
+        self,
+        body_char_cap: int = BODY_CHAR_CAP,
+        max_links: int = MAX_LINKS_PER_PAGE,
+    ) -> None:
         self.body_char_cap = body_char_cap
+        #: How many of a page's links leave it. The orchestrator passes
+        #: `settings.max_outbound_links_per_page`, which used to be dead: the
+        #: parser cut at its own constant first, so a homepage with 200 links
+        #: only ever offered the first 40 and the rest were never discovered.
+        self.max_links = max(1, int(max_links))
 
     def parse(self, url: str, html: str) -> ParsedPage:
         if not html or not html.strip():
@@ -404,7 +413,7 @@ class ParserAgent:
             self.body_char_cap,
         )
         description = build_description(title, self._description(soup), body_text)
-        links = self.extract_links(soup, url)
+        links = self.extract_links(soup, url, limit=self.max_links)
         action_title = action_title_from(
             title, self._h1(soup), brand_name, og_title=self._og_title(soup), url=url
         )
