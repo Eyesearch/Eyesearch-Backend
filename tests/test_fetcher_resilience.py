@@ -263,3 +263,54 @@ def test_the_contract_audits_the_real_body_cap():
     values = {rule.name: rule.value for rule in report.rules}
     assert values["MAX_BODY_BYTES"] == module.MAX_BODY_BYTES > 0
     assert values["FETCH_TIMEOUT_SECONDS"] == module.FETCH_TIMEOUT_SECONDS >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_into_the_private_network_is_refused():
+    """A crawled page is untrusted input: a redirect is the cheapest SSRF.
+
+    The client used to follow up to five hops without looking at any of them,
+    so a page could point the crawler at the loopback or the cloud metadata
+    address and have it read the answer.
+    """
+    html = "<html><body><p>" + "x" * 200 + "</p></body></html>"
+
+    def handler(request):
+        if request.url.host == "karnataka.gov.in":
+            return httpx.Response(302, headers={"location": "http://169.254.169.254/latest/meta-data/"})
+        return httpx.Response(200, text=html)
+
+    agent = FetcherAgent(
+        Settings(environment="test"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        result = await agent.fetch("https://karnataka.gov.in/notice")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is False
+    assert "redirect_refused" in result.error
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_to_the_same_site_is_followed():
+    """The guard must not break the ordinary move-to-a-new-path redirect."""
+    html = "<html><body><p>" + "x" * 200 + "</p></body></html>"
+
+    def handler(request):
+        if request.url.path == "/old":
+            return httpx.Response(301, headers={"location": "/new"})
+        return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+    agent = FetcherAgent(
+        Settings(environment="test"),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+    try:
+        result = await agent.fetch("https://karnataka.gov.in/old")
+    finally:
+        await agent.aclose()
+
+    assert result.ok is True
+    assert "x" * 50 in result.html
