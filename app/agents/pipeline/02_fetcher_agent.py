@@ -12,11 +12,12 @@ Chrome profile is what gets the page.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from typing import Any
 from dataclasses import dataclass
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -113,6 +114,55 @@ _PATH_SAFE = "/%:@!$&'()*+,;=~-._"
 _QUERY_SAFE = "=&%:@!$'()*+,;/?~-._"
 
 
+class RedirectRefused(httpx.HTTPError):
+    """A redirect the crawler will not follow, with the reason in the message."""
+
+
+#: Hosts a crawl must never follow a redirect to: the loopback, the private
+#: ranges, the link-local metadata address a cloud VM answers on, and the names
+#: that resolve to them. A crawled page is untrusted input, and a redirect is
+#: the cheapest way to make a server fetch something only it can reach.
+BLOCKED_REDIRECT_HOSTS = frozenset(
+    {"localhost", "localhost.localdomain", "metadata.google.internal", "metadata"}
+)
+
+#: Suffixes that never name a public host.
+BLOCKED_REDIRECT_SUFFIXES = (".local", ".internal", ".localhost")
+
+
+def is_safe_redirect(url: str) -> bool:
+    """Whether a redirect target may be followed.
+
+    Checks the literal host: loopback, private, link-local, unique-local and
+    unspecified addresses are refused, as are non-HTTP schemes. A hostname that
+    *resolves* to a private address is caught only after DNS, which is why the
+    frontier also refuses IP-literal hosts it cannot place.
+    """
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").strip("[]").lower()
+    if not host:
+        return False
+    if host in BLOCKED_REDIRECT_HOSTS or host.endswith(BLOCKED_REDIRECT_SUFFIXES):
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
 def sanitise_url(url: str) -> str | None:
     """Make `url` something httpx will accept, or None if it cannot be repaired.
 
@@ -178,8 +228,9 @@ class FetcherAgent:
         self._client = client or httpx.AsyncClient(
             timeout=timeout,
             limits=limits,
-            follow_redirects=True,
-            max_redirects=MAX_REDIRECTS,
+            # Redirects are followed by `_stream_get`, one hop at a time, so
+            # every hop is checked before it is requested.
+            follow_redirects=False,
             transport=transport,
             headers={
                 **BOUND_HEADERS,
@@ -268,6 +319,11 @@ class FetcherAgent:
                     response, html, content_type = await self._stream_get(target)
                 except httpx.TimeoutException:
                     last_error = "timeout"
+                except RedirectRefused as error:
+                    # Its own reason: "a page tried to send us somewhere only
+                    # this server can reach" is not the same failure as a
+                    # broken connection, and the log should say which.
+                    last_error = str(error)
                 except httpx.HTTPError as error:
                     last_error = f"http_error:{type(error).__name__}"
                 except Exception as error:
@@ -355,27 +411,46 @@ class FetcherAgent:
         """
         cap = self._settings.crawl_max_body_bytes
 
-        async with self._client.stream("GET", url) as response:
-            content_type = response.headers.get("content-type", "")
-            payload = bytearray()
+        target = url
+        for _hop in range(MAX_REDIRECTS + 1):
+            async with self._client.stream("GET", target) as response:
+                location = response.headers.get("location", "")
+                if response.is_redirect and location:
+                    hop = urljoin(str(response.url), location)
+                    if not is_safe_redirect(hop):
+                        raise RedirectRefused(
+                            f"redirect_refused:{urlsplit(hop).hostname or ''}"
+                        )
+                    target = hop
+                    continue
+                return await self._read_response(response, cap)
 
-            worth_reading = (
-                response.status_code < 400 and looks_like_html(content_type)
-            )
-            if worth_reading:
-                async for chunk in response.aiter_bytes():
-                    payload.extend(chunk)
-                    if len(payload) >= cap:
-                        break
+        raise RedirectRefused("redirect_loop")
 
-            encoding = response.encoding or "utf-8"
-            raw = bytes(payload[:cap])
-            try:
-                html = raw.decode(encoding, errors="replace")
-            except (LookupError, UnicodeDecodeError):
-                html = raw.decode("utf-8", errors="replace")
+    async def _read_response(
+        self, response: httpx.Response, cap: int
+    ) -> tuple[httpx.Response, str, str]:
+        """Read a final response, never holding more than the body cap."""
+        content_type = response.headers.get("content-type", "")
+        payload = bytearray()
 
-            return response, html, content_type
+        worth_reading = (
+            response.status_code < 400 and looks_like_html(content_type)
+        )
+        if worth_reading:
+            async for chunk in response.aiter_bytes():
+                payload.extend(chunk)
+                if len(payload) >= cap:
+                    break
+
+        encoding = response.encoding or "utf-8"
+        raw = bytes(payload[:cap])
+        try:
+            html = raw.decode(encoding, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            html = raw.decode("utf-8", errors="replace")
+
+        return response, html, content_type
 
     async def fetch_many(
         self, urls: list[str], *, attempts: int = 2
