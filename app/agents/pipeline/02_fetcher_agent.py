@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 from dataclasses import dataclass
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -186,6 +187,10 @@ class FetcherAgent:
         self._politeness = max(0.0, float(self._settings.crawl_domain_politeness_seconds))
         self._domain_locks: dict[str, asyncio.Lock] = {}
         self._last_request: dict[str, float] = {}
+        #: Set by the orchestrator. A host that publishes `Crawl-delay` gets the
+        #: longer of the two waits: the file is the host's own instruction, and
+        #: ignoring it is how a crawler earns 403s.
+        self.robots: Any | None = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -201,11 +206,19 @@ class FetcherAgent:
             return
         if not domain:
             return
+        delay = self._politeness
+        if self.robots is not None:
+            try:
+                delay = max(delay, await self.robots.crawl_delay(url))
+            except Exception:  # a robots fault must never stop a fetch
+                delay = self._politeness
+        if delay <= 0:
+            return
         lock = self._domain_locks.setdefault(domain, asyncio.Lock())
         async with lock:
             last = self._last_request.get(domain)
             if last is not None:
-                wait = self._politeness - (time.monotonic() - last)
+                wait = delay - (time.monotonic() - last)
                 if wait > 0:
                     await asyncio.sleep(wait)
             self._last_request[domain] = time.monotonic()
