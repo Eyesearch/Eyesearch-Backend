@@ -68,7 +68,7 @@ def test_revalidation_imports_the_sanitisers_it_uses():
 
 
 def test_revalidation_uses_the_same_caps_as_ingestion():
-    assert revalidation.TITLE_CHAR_CAP == 50
+    assert revalidation.TITLE_CHAR_CAP == 60
     assert revalidation.BRAND_CHAR_CAP == 35
     assert revalidation.DESCRIPTION_CHAR_CAP == 300
 
@@ -101,7 +101,7 @@ async def test_long_stored_titles_are_trimmed(client):
         "SELECT length(title), length(brand_name), length(description) "
         "FROM pages WHERE url = 'https://a.example/long'"
     )
-    assert tuple(int(value) for value in row.rows[0]) == (50, 35, 300)
+    assert tuple(int(value) for value in row.rows[0]) == (60, 35, 300)
 
 
 @pytest.mark.asyncio

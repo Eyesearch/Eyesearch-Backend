@@ -41,7 +41,10 @@ BODY_CHAR_CAP = 2000
 CLEAN_URL_CHAR_CAP = 160
 #: The architecture ceilings, mirrored here so the parser cannot hand the
 #: store a string the card has no room for.
-TITLE_CHAR_CAP = 50
+#: A title is the clickable line, so it gets the room a result page gives it:
+#: Google shows roughly 60 characters (600 px). At 50 a title like "ksrtc:
+#: Karnataka State Road Transport Corporation" lost the word that identified it.
+TITLE_CHAR_CAP = 60
 BRAND_CHAR_CAP = 35
 DESCRIPTION_CHAR_CAP = 300
 
