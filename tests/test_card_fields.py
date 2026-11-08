@@ -293,3 +293,32 @@ def test_the_payload_includes_the_breadcrumbs():
     ).as_dict()
 
     assert payload["breadcrumbs"] == ["Dept", "Tax"]
+
+
+@pytest.mark.asyncio
+async def test_a_site_is_called_by_one_name_in_a_result_page(client):
+    """Two pages of one host that disagree about `og:site_name`.
+
+    The majority name wins, so a single page cannot rename the site it belongs
+    to and the result page does not read as two sites.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            PageDocument(
+                url=f"https://ksrtc.example/fare-{index}",
+                domain="ksrtc.example",
+                title=f"Karnataka bus fare {index}",
+                description="Bus fare and timetable for Karnataka routes.",
+                body_text="Karnataka bus fare timetable routes depot " * 3,
+                digest=f"brand-{index}",
+                brand_name=brand,
+            )
+            for index, brand in enumerate(["KSRTC", "KSRTC", "www.ksrtc"], start=1)
+        ]
+    )
+
+    hits = await store.search("bus fare")
+    assert hits
+    brands = {to_result(hit, brand="KSRTC").as_dict()["brand_name"] for hit in hits}
+    assert brands == {"KSRTC"}
