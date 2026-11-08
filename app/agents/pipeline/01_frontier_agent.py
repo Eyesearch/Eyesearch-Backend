@@ -208,6 +208,20 @@ TRAP_RESOLVED_MARKERS: tuple[str, ...] = (
 )
 
 #: Beyond this a URL is almost certainly generated, not authored.
+#: Query keys that mean "this is a generated listing, not a page".
+#:
+#: `?year=2026&month=3` is a calendar grid and `?field=count&sorting=DESC` is a
+#: sort control: both render the same rows in a different order, so every
+#: combination is a new URL for content the index already holds. One such key is
+#: ordinary (`?id=`, `?q=`); two or more is a control panel.
+GRID_QUERY_KEYS: frozenset[str] = frozenset(
+    {
+        "year", "month", "day", "date", "calendar", "sort", "sorting", "order",
+        "orderby", "field", "filter", "facet", "view", "layout", "dir", "limit",
+        "count", "start", "offset",
+    }
+)
+
 MAX_URL_LENGTH = 350
 
 #: Query keys that identify a campaign, never a different page.
@@ -564,6 +578,13 @@ def is_crawlable(url: str) -> bool:
     # Faceted search generates unbounded combinations of the same page.
     # Four ampersands is five parameters: past that it is a facet, not a page.
     if url.count("&") >= 4:
+        return False
+
+    # A grid or a sort control: two or more keys that only reorder the same
+    # rows. `?year=2026&month=3` and `?field=count&sorting=DESC` both reach the
+    # same content the index already holds, once per combination.
+    grid_keys = sum(1 for key, _value in _query_pairs(url) if key.lower() in GRID_QUERY_KEYS)
+    if grid_keys >= 2:
         return False
 
     return True
@@ -1309,6 +1330,7 @@ __all__ = [
     "MAX_PENDING_QUEUE",
     "PRIORITY_SUFFIXES",
     "SEED_URLS",
+    "GRID_QUERY_KEYS",
     "TRACKING_PARAMS",
     "WHITELISTED_DOMAINS",
     "domain_of",

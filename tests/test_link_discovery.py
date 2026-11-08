@@ -609,3 +609,18 @@ def test_a_lookalike_host_is_not_caught_by_the_blocklist():
 
 def test_ordinary_global_domains_still_pass_with_the_flag_on():
     assert in_crawl_scope("https://www.bbc.com/news", "karnataka.gov.in", allow_global=True) is True
+
+
+def test_a_calendar_grid_is_not_a_page():
+    """`?year=2026&month=3` renders the same rows once per month."""
+    assert is_crawlable("https://karnataka.gov.in/calendar?year=2026&month=3") is False
+
+
+def test_a_sort_control_is_not_a_page():
+    """`?field=count&sorting=DESC` is the same list in another order."""
+    assert is_crawlable("https://scilab.in/?field=count&sorting=DESC") is False
+
+
+def test_one_ordinary_query_key_is_still_a_page():
+    """A single `?year=` is a filter on a real page, not a grid."""
+    assert is_crawlable("https://rbi.org.in/notifications?year=2024") is True

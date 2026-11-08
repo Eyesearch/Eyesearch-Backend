@@ -117,3 +117,28 @@ async def test_a_one_character_prefix_suggests_nothing(client, settings):
     store = IndexStore(client, settings)
 
     assert await store.suggest("k") == []
+
+
+def test_the_same_page_under_www_is_not_a_second_result():
+    """`ksrtc.in/` and `www.ksrtc.in/` are one page, not two results.
+
+    The cap is per domain, so a homepage stored under both host forms used to
+    fill two slots with the same content and the result page looked repeated.
+    """
+    hits = [Hit("https://ksrtc.in/"), Hit("https://www.ksrtc.in/"), Hit("https://ksrtc.in/fare")]
+
+    assert urls(cluster_by_domain(hits, per_domain=2)) == [
+        "https://ksrtc.in/",
+        "https://ksrtc.in/fare",
+    ]
+
+
+def test_www_and_the_bare_host_share_one_per_domain_budget():
+    """Three pages, two of them under `www.`: only two survive the cap."""
+    hits = [
+        Hit("https://ksrtc.in/"),
+        Hit("https://www.ksrtc.in/fare"),
+        Hit("https://www.ksrtc.in/routes"),
+    ]
+
+    assert len(cluster_by_domain(hits, per_domain=2)) == 2
