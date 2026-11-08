@@ -34,12 +34,24 @@ logger = logging.getLogger(__name__)
 MAX_ROBOTS_BYTES = 500_000
 
 
+#: A host asking for a longer pause than this is asking to be left alone at a
+#: cost the crawl cannot pay: with a handful of domains and one worker, a 60 s
+#: delay is a stall. Beyond the cap the request is honoured as the cap.
+MAX_CRAWL_DELAY_SECONDS = 10.0
+
+
 @dataclass(frozen=True)
 class RobotsRules:
     """The Allow/Disallow rules that apply to us, in declaration order."""
 
     allow: tuple[str, ...] = ()
     disallow: tuple[str, ...] = ()
+    #: Seconds between requests to this host, as the file asks. None when the
+    #: file is silent, which leaves the fetcher's own politeness in charge.
+    crawl_delay: float | None = None
+    #: Sitemaps the host declares. Authoritative: a government portal often
+    #: publishes at a path that guessing `/sitemap.xml` never finds.
+    sitemaps: tuple[str, ...] = ()
 
     def allows(self, path: str) -> bool:
         """Longest matching rule wins; Allow wins a tie, as the standard says."""
@@ -84,6 +96,8 @@ def parse_robots(document: str, user_agent: str = "") -> RobotsRules:
     """The rules for `*` and for any group naming a token in `user_agent`."""
     allow: list[str] = []
     disallow: list[str] = []
+    sitemaps: list[str] = []
+    crawl_delay: float | None = None
 
     agents: list[str] = []
     collecting = False
@@ -107,7 +121,27 @@ def parse_robots(document: str, user_agent: str = "") -> RobotsRules:
             collecting = False
             continue
 
-        if key not in ("allow", "disallow"):
+        # A sitemap is not scoped to a group: it is a property of the host, so
+        # it is collected wherever it appears.
+        if key == "sitemap":
+            if value.startswith(("http://", "https://")):
+                sitemaps.append(value)
+            continue
+
+        if key not in ("allow", "disallow", "crawl-delay"):
+            continue
+
+        if key == "crawl-delay":
+            seen_rule = True
+            if not collecting:
+                collecting = _group_applies(agents, user_agent)
+            if collecting and crawl_delay is None:
+                try:
+                    delay = float(value)
+                except ValueError:
+                    delay = -1.0
+                if delay >= 0:
+                    crawl_delay = min(delay, MAX_CRAWL_DELAY_SECONDS)
             continue
 
         seen_rule = True
@@ -124,7 +158,12 @@ def parse_robots(document: str, user_agent: str = "") -> RobotsRules:
         else:
             disallow.append(value)
 
-    return RobotsRules(allow=tuple(allow), disallow=tuple(disallow))
+    return RobotsRules(
+        allow=tuple(allow),
+        disallow=tuple(disallow),
+        crawl_delay=crawl_delay,
+        sitemaps=tuple(dict.fromkeys(sitemaps)),
+    )
 
 
 def _group_applies(agents: list[str], user_agent: str) -> bool:
@@ -186,6 +225,24 @@ class RobotsCache:
         rules = await self._rules_for(key, host)
         return rules.allows(parts.path or "/")
 
+    async def crawl_delay(self, url: str) -> float:
+        """Seconds this host asked to be left between requests. 0 when silent."""
+        parts = urlparse(url or "")
+        host = (parts.hostname or "").lower()
+        if not host:
+            return 0.0
+        rules = await self._rules_for(f"{parts.scheme or 'https'}://{host}", host)
+        return float(rules.crawl_delay or 0.0)
+
+    async def sitemaps_for(self, url: str) -> tuple[str, ...]:
+        """The sitemaps this host declares, empty when it declares none."""
+        parts = urlparse(url or "")
+        host = (parts.hostname or "").lower()
+        if not host:
+            return ()
+        rules = await self._rules_for(f"{parts.scheme or 'https'}://{host}", host)
+        return rules.sitemaps
+
     def __len__(self) -> int:
         return len(self._entries)
 
@@ -244,6 +301,7 @@ class RobotsCache:
 
 
 __all__ = [
+    "MAX_CRAWL_DELAY_SECONDS",
     "MAX_ROBOTS_BYTES",
     "RobotsCache",
     "RobotsRules",

@@ -218,3 +218,43 @@ async def test_the_orchestrator_parks_a_disallowed_url(store, client):
         assert outcome.skip_reasons.get("robots_disallow") == 1
     finally:
         await orchestrator.close()
+
+
+def test_a_crawl_delay_is_read_from_the_group_that_applies():
+    rules = parse_robots("User-agent: *\nCrawl-delay: 4\nDisallow: /x\n", UA)
+
+    assert rules.crawl_delay == 4.0
+
+
+def test_a_crawl_delay_for_another_agent_is_ignored():
+    rules = parse_robots("User-agent: otherbot\nCrawl-delay: 30\n", UA)
+
+    assert rules.crawl_delay is None
+
+
+def test_an_absurd_crawl_delay_is_capped():
+    """A host asking for a minute would stall a one-worker crawl."""
+    rules = parse_robots("User-agent: *\nCrawl-delay: 600\n", UA)
+
+    assert rules.crawl_delay == robots_module.MAX_CRAWL_DELAY_SECONDS
+
+
+def test_declared_sitemaps_are_kept():
+    rules = parse_robots(
+        "Sitemap: https://karnataka.gov.in/sitemap-index.xml\n"
+        "Sitemap: https://karnataka.gov.in/news.xml\n"
+        "User-agent: *\nDisallow: /admin\n",
+        UA,
+    )
+
+    assert rules.sitemaps == (
+        "https://karnataka.gov.in/sitemap-index.xml",
+        "https://karnataka.gov.in/news.xml",
+    )
+
+
+def test_a_silent_file_leaves_the_delay_to_the_fetcher():
+    rules = parse_robots("User-agent: *\nDisallow: /admin\n", UA)
+
+    assert rules.crawl_delay is None
+    assert rules.sitemaps == ()

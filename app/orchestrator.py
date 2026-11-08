@@ -248,6 +248,9 @@ class Orchestrator:
             if self._settings.robots_enabled
             else None
         )
+        # The fetcher spaces requests per host; the host's own Crawl-delay is
+        # the instruction that spacing should obey.
+        self._fetcher.robots = self._robots
         self._frontier = FrontierAgent(
             self._store, self._settings, client=self._fetcher.client
         )
