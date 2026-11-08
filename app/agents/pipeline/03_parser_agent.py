@@ -128,6 +128,44 @@ LEADING_BOILERPLATE = re.compile(
 #: content and the rest of the page is ignored.
 CONTENT_CONTAINER_MIN_CHARS = 100
 
+#: The closing phrases every page carries and no reader needs: a copyright
+#: line, a "powered by", a cookie notice. Matched only at the very end of the
+#: body, and only while the text left over is still a page's worth — a page
+#: about a cookie policy is prose, and stripping it would be vandalism.
+TRAILING_BOILERPLATE = re.compile(
+    r"(?:"
+    r"©[^.]{0,120}\.?|"
+    r"copyright\s*(?:©|\(c\))?[^.]{0,120}\.?|"
+    r"all\s+rights\s+reserved\.?|"
+    r"(?:site\s+)?(?:powered|built|hosted|developed|maintained)\s+by[^.]{0,80}\.?|"
+    r"(?:terms|privacy(?:\s+policy)?|disclaimer|cookies?)(?:\s*(?:\||›|/|·)\s*(?:terms|privacy(?:\s+policy)?|disclaimer|cookies?))+\.?|"
+    r"(?:follow|like|connect\s+with)\s+us\s+on[^.]{0,80}\.?|"
+    r"(?:this\s+site|the\s+site)\s+(?:is|was)\s+(?:hosted|maintained)[^.]{0,80}\.?"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+#: Never strip a trailing phrase if it would leave less than this: the guard
+#: that keeps a short page whole.
+MIN_BODY_AFTER_STRIP = 120
+
+#: Phrases that are unambiguously a footer wherever they appear near the end,
+#: even with a word or two trailing them — "… is hosted by Amazon Web
+#: Services(AWS). Therefore" is how the sentence actually ends on the page.
+FOOTER_MARKER = re.compile(
+    r"(?:powered|built|hosted|developed|maintained)\s+by\b",
+    re.IGNORECASE,
+)
+
+#: How far from the end a footer marker may sit and still be a footer.
+FOOTER_TAIL_WINDOW = 300
+
+#: Words that cannot end a sentence, left behind when a footer is cut away.
+DANGLING_TAIL = re.compile(
+    r"(?:\s+(?:is|was|are|were|be|been|by|the|a|an|and|or|of|to|for|with|in|on|at))+$",
+    re.IGNORECASE,
+)
+
 #: Decorative symbols, media controls and arrows. Stripped from text because
 #: "⏪ ⏸️ ▶️ ⏩" is a player, not a description.
 #:
@@ -169,6 +207,31 @@ def clean_leading_boilerplate(text: str) -> str:
     stripping it there would be vandalism.
     """
     return LEADING_BOILERPLATE.sub("", (text or "").lstrip()).strip()
+
+
+def clean_trailing_boilerplate(text: str) -> str:
+    """Drop the closing copyright/powered-by line, and nothing else.
+
+    Only the end is touched, and only while the remainder is still a page's
+    worth of text: `myScheme`'s footer sentence ("hosted by Amazon Web
+    Services") was matching a search for "amazon" because it sat in the body.
+    """
+    body = (text or "").rstrip()
+    while True:
+        match = TRAILING_BOILERPLATE.search(body)
+        cut = match.start() if match else -1
+        if cut < 0:
+            tail_start = max(0, len(body) - FOOTER_TAIL_WINDOW)
+            footer = FOOTER_MARKER.search(body, tail_start)
+            cut = footer.start() if footer else -1
+        if cut < MIN_BODY_AFTER_STRIP:
+            return body
+        trimmed = body[:cut].rstrip(" -–|·,;:")
+        # "… The MyScheme is | hosted by …" leaves a dangling verb behind.
+        trimmed = DANGLING_TAIL.sub("", trimmed).rstrip(" -–|·,;:")
+        if len(trimmed) < MIN_BODY_AFTER_STRIP:
+            return body
+        body = trimmed
 
 
 def content_container(soup):
@@ -335,7 +398,10 @@ class ParserAgent:
         # ended up at the front of body_text and showed up in snippets.
         body_source = content_container(soup)
         body_text = truncate_body(
-            clean_leading_boilerplate(body_source.get_text(" ")), self.body_char_cap
+            clean_trailing_boilerplate(
+                clean_leading_boilerplate(body_source.get_text(" "))
+            ),
+            self.body_char_cap,
         )
         description = build_description(title, self._description(soup), body_text)
         links = self.extract_links(soup, url)
