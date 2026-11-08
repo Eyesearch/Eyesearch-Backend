@@ -70,7 +70,7 @@ What to know about scope:
 * A queued URL **is fetched regardless of the whitelist.** The whitelist only
   gates *link discovery* — which links a fetched page is allowed to follow.
 * So to let a seeded site expand beyond the URL you gave it, its domain must be
-  in `WHITELISTED_DOMAINS` (in `app/agents/01_frontier_agent.py`), or you set
+  in `WHITELISTED_DOMAINS` (in `app/agents/pipeline/01_frontier_agent.py`), or you set
   `ALLOW_GLOBAL_DOMAINS=true` and let it roam.
 * `MAX_PAGES_PER_DOMAIN` (default 25) caps how many pages one domain contributes.
 * The queue is deduplicated on URL, so re-running the command is safe and reports

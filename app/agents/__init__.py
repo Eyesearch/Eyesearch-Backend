@@ -15,7 +15,7 @@ from __future__ import annotations
 from importlib import import_module
 from types import ModuleType
 
-__all__ = ["AGENT_MODULES", "load_agent"]
+__all__ = ["AGENT_MODULES", "PIPELINE_AGENTS", "load_agent"]
 
 #: Every agent module, in pipeline order.
 AGENT_MODULES: tuple[str, ...] = (
@@ -45,6 +45,23 @@ FEDERATED_ALIASES: dict[str, str] = {
 }
 
 
+#: The crawl pipeline lives in `app/agents/pipeline/`, in the order a URL
+#: travels through it. The files keep their numbers, and the old flat names
+#: still resolve, so no caller changed when they moved.
+PIPELINE_AGENTS: tuple[str, ...] = (
+    "01_frontier_agent",
+    "09_robots_agent",
+    "13_dedupe_compact_agent",
+    "02_fetcher_agent",
+    "03_parser_agent",
+    "10_brand_canonical_agent",
+    "04_quality_agent",
+    "07_classifier_agent",
+    "08_language_agent",
+    "05_indexer_agent",
+)
+
+
 def load_agent(name: str) -> ModuleType:
     """Import one agent module by its file name.
 
@@ -53,4 +70,6 @@ def load_agent(name: str) -> ModuleType:
     target = FEDERATED_ALIASES.get(name)
     if target:
         return import_module(target)
+    if name in PIPELINE_AGENTS:
+        return import_module(f"{__name__}.pipeline.{name}")
     return import_module(f"{__name__}.{name}")

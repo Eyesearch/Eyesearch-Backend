@@ -50,6 +50,10 @@ cannot import a module whose name begins with a digit using `import` syntax, so
 they are reached through `app.agents.load_agent("03_parser_agent")`. That is the
 one wart in the layout, and it is contained in `app/agents/__init__.py`.
 
+The ten that make up the crawl pipeline live in `app/agents/pipeline/`, in the
+order a URL travels through them. The old flat names still resolve, so nothing
+that calls `load_agent()` had to change.
+
 ## Crawl throughput and diagnostics
 
 The default crawl batch is 80 URLs with up to 40 concurrent fetches. The shared

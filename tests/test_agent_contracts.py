@@ -24,6 +24,8 @@ def agent_files() -> list[str]:
         glob.glob(os.path.join(agents, "[0-9]*.py"))
         + [path for path in glob.glob(os.path.join(agents, "federated", "*.py"))
            if not path.endswith("__init__.py")]
+        + [path for path in glob.glob(os.path.join(agents, "pipeline", "*.py"))
+           if not path.endswith("__init__.py")]
     )
 
 
