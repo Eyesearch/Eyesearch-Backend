@@ -164,11 +164,21 @@ def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) ->
         return list(hits)[:limit] if limit else list(hits)
 
     seen: dict[str, int] = {}
+    seen_paths: set[str] = set()
     kept: list = []
     for hit in hits:
-        domain = _domain_of(getattr(hit, "url", "") or "")
+        url = getattr(hit, "url", "") or ""
+        # The same page reached twice is a duplicate, not a second result:
+        # `ksrtc.in/` and `www.ksrtc.in/` are one page, and showing both makes
+        # the result page look like it repeated itself.
+        path = canonical_path(url)
+        if path and path in seen_paths:
+            continue
+        domain = _domain_of(url)
         if seen.get(domain, 0) >= per_domain:
             continue
+        if path:
+            seen_paths.add(path)
         seen[domain] = seen.get(domain, 0) + 1
         kept.append(hit)
         if limit is not None and len(kept) >= limit:
@@ -177,10 +187,17 @@ def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) ->
 
 
 def _domain_of(url: str) -> str:
+    """The host a result belongs to, with `www.` set aside.
+
+    The cluster key, so `ksrtc.in` and `www.ksrtc.in` are one host and the
+    per-domain cap applies to both. Keyed on the raw hostname they counted as
+    two, which is how a site's homepage appeared twice in one result page.
+    """
     try:
-        return (urlparse(url).hostname or "").lower()
+        host = (urlparse(url).hostname or "").lower()
     except ValueError:
         return ""
+    return host[4:] if host.startswith("www.") else host
 
 
 class ResultClusterer:
