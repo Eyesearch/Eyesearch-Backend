@@ -15,6 +15,7 @@ import pytest
 
 from app.agents import load_agent
 from app.engine.config import Settings
+from app.engine.store import PageDocument
 from app.orchestrator import Orchestrator
 
 frontier_module = load_agent("01_frontier_agent")
@@ -654,3 +655,60 @@ def test_prose_that_mentions_cookies_is_not_a_footer():
     body = "The cookie policy explains how this portal uses cookies for sessions. " * 4
 
     assert parser.clean_trailing_boilerplate(body) == body.rstrip()
+
+
+def test_the_link_cap_comes_from_the_setting():
+    """A homepage with 200 links offered only 40, because the parser cut first.
+
+    `max_outbound_links_per_page` was 100 in settings and dead in practice.
+    """
+    parser = load_agent("03_parser_agent").ParserAgent(max_links=100)
+    links = "".join(f'<a href="https://karnataka.gov.in/p{i}">p{i}</a>' for i in range(200))
+    page = parser.parse("https://karnataka.gov.in/", f"<html><body>{links}</body></html>")
+
+    assert len(page.links) == 100
+
+
+def test_a_javascript_shell_is_indexed_but_not_ranked():
+    """paytm, zerodha and amazon are rendered by JavaScript we do not run.
+
+    The page still says what it is in its title and description, which is what
+    a navigational search wants; the body is empty, so it is admitted low.
+    """
+    quality = load_agent("04_quality_agent").QualityAgent()
+    shell = PageDocument(
+        url="https://www.paytm.com/login",
+        domain="paytm.com",
+        title="Paytm Login - Sign in to your account",
+        description="Sign in to Paytm to pay bills, recharge and send money securely.",
+        body_text="Please enable javascript to continue.",
+        digest="",
+    )
+
+    verdict = quality.check(shell)
+
+    assert verdict.ok is True
+    assert verdict.score <= 0.2
+
+
+def test_an_empty_page_is_still_refused():
+    quality = load_agent("04_quality_agent").QualityAgent()
+    empty = PageDocument(
+        url="https://x.in/a", domain="x.in", title="Page", description="", body_text="", digest=""
+    )
+
+    assert quality.check(empty).ok is False
+
+
+def test_a_captcha_wall_is_still_refused():
+    quality = load_agent("04_quality_agent").QualityAgent()
+    wall = PageDocument(
+        url="https://x.in/b",
+        domain="x.in",
+        title="Just a moment",
+        description="Checking your browser before accessing the site now.",
+        body_text="checking your browser",
+        digest="",
+    )
+
+    assert quality.check(wall).ok is False

@@ -231,7 +231,9 @@ class Orchestrator:
             ttl_seconds=self._settings.storage_count_ttl_seconds,
         )
         self._fetcher = FetcherAgent(self._settings, transport=transport)
-        self._parser = ParserAgent()
+        self._parser = ParserAgent(
+            max_links=self._settings.max_outbound_links_per_page
+        )
         self._quality = QualityAgent()
         self._classifier = ClassifierAgent()
         self._language = LanguageAgent()

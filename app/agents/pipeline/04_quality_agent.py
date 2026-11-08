@@ -45,6 +45,21 @@ MIN_TITLE_ALPHANUMERIC = 3
 TITLE_ALPHANUMERIC = re.compile(r"[0-9A-Za-z\u0900-\u0DFF]")
 
 #: Phrases that mean the page is an interstitial, not content.
+#: A JavaScript shell is not junk: it is a page this fetcher cannot read. The
+#: title, the description and the structured data are still in the HTML, which
+#: is enough to answer a navigational query ("paytm login") and not enough to
+#: rank for anything else, so it is admitted with a low score instead of being
+#: thrown away.
+SHELL_MARKERS: tuple[str, ...] = (
+    "enable javascript",
+    "javascript is required",
+    "please turn on javascript",
+    "checking your browser",
+)
+
+#: What a shell is worth: present, findable by name, never ranked highly.
+SHELL_SCORE = 0.2
+
 JUNK_MARKERS: tuple[str, ...] = (
     "403 forbidden",
     "access denied",
@@ -104,7 +119,21 @@ class QualityAgent:
         body = collapse(document.body_text)
         title = collapse(document.title)
 
+        lowered = f"{title} {body[:600]}".lower()
+
+        # A shell: the page exists, its content is rendered by JavaScript this
+        # crawler does not run. Admitted when the HTML still identifies it —
+        # a real title and either a description or structured data — because
+        # that is exactly what a navigational search is looking for.
         if len(body) < self.min_body_chars:
+            if _is_identifiable_shell(title, document, lowered):
+                digest = page_digest(document.url, body)
+                if digest in self._seen:
+                    return QualityVerdict(
+                        ok=False, reason="duplicate", digest=digest, score=0.0
+                    )
+                self._seen.add(digest)
+                return QualityVerdict(ok=True, digest=digest, score=SHELL_SCORE)
             return QualityVerdict(
                 ok=False,
                 reason="low_text_density",
@@ -113,7 +142,6 @@ class QualityAgent:
 
         # Junk is looked for in the title as well as the body. A 404 page can
         # carry a long body of navigation and still be a 404.
-        lowered = f"{title} {body[:600]}".lower()
         for marker in JUNK_MARKERS:
             if marker in lowered:
                 return QualityVerdict(ok=False, reason="junk_page", score=0.0)
@@ -318,3 +346,29 @@ def verify_identity(domain: str, brand: str, title: str) -> tuple[bool, str]:
         if token in BORROWED_BRANDS and token not in own:
             return False, f"title_borrows_brand:{token}"
     return True, "ok"
+
+
+def _is_identifiable_shell(title: str, document: PageDocument, lowered: str) -> bool:
+    """Whether a page with almost no text still says what it is.
+
+    A title is the one thing every shell keeps, and a description or
+    schema.org types tell us what the page is for. Without either, an empty
+    body is an empty page and the gate keeps refusing it.
+    """
+    if len(title) < MIN_TITLE_CHARS:
+        return False
+    if len(TITLE_ALPHANUMERIC.findall(title)) < MIN_TITLE_ALPHANUMERIC:
+        return False
+    # A shell that *says* it needs JavaScript is still a shell; only the hard
+    # junk markers (403, captcha, not found) disqualify it.
+    hard_junk = tuple(marker for marker in JUNK_MARKERS if marker not in SHELL_MARKERS)
+    if any(marker in lowered for marker in hard_junk):
+        return False
+    # Evidence that this is a rendered-by-JavaScript page rather than a thin
+    # page: it says so, or it ships structured data the renderer would fill.
+    # A merely short page with a title is still a short page, and the 80
+    # character floor keeps refusing it.
+    says_it_needs_script = any(marker in lowered for marker in SHELL_MARKERS)
+    if says_it_needs_script or document.schema_types:
+        return True
+    return False
