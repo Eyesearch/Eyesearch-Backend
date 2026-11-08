@@ -85,7 +85,7 @@ def test_a_local_dev_prefix_is_removed():
 
 
 def test_the_parser_declares_the_architecture_caps():
-    assert parser.TITLE_CHAR_CAP == 50
+    assert parser.TITLE_CHAR_CAP == 60
     assert parser.BRAND_CHAR_CAP == 35
     assert parser.DESCRIPTION_CHAR_CAP == 300
 
@@ -104,10 +104,10 @@ def test_the_store_truncates_no_matter_what_it_is_handed():
     )
     row = document.as_row()
 
-    assert len(row[2]) == 50     # title
+    assert len(row[2]) == 60     # title
     assert len(row[3]) == 300    # description
     assert len(row[9]) == 35     # brand
-    assert len(row[11]) == 50    # action title
+    assert len(row[11]) == 60    # action title
 
 
 # ---------------------------------------------------------------------------

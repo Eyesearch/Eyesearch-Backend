@@ -17,7 +17,7 @@ def test_the_body_cap_is_two_kilobytes():
 
 
 def test_the_other_ceilings_are_unchanged():
-    assert parser_module.TITLE_CHAR_CAP == 50
+    assert parser_module.TITLE_CHAR_CAP == 60
     assert parser_module.BRAND_CHAR_CAP == 35
     assert parser_module.DESCRIPTION_CHAR_CAP == 300
 

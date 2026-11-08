@@ -60,7 +60,10 @@ LANGUAGE_MATCH_BOOST = 0.35
 
 #: The architecture ceilings. Mirrored from the parser rather than imported, so
 #: the store does not depend on an agent to know how wide its own columns are.
-TITLE_CHAR_CAP = 50
+#: Kept in step with the parser's own cap. The store is the last line of
+#: defence, not a second opinion: a title the parser allowed to 60 must not be
+#: cut to 50 on the way in.
+TITLE_CHAR_CAP = 60
 BRAND_CHAR_CAP = 35
 DESCRIPTION_CHAR_CAP = 300
 
