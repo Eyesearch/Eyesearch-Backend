@@ -110,6 +110,12 @@ MAX_TITLE_TOKENS = 5
 #: match, which the boosts were not going to rescue.
 RANK_CANDIDATE_LIMIT = 300
 
+#: How many matches the rank is computed over. `ORDER BY ts_rank(...) LIMIT n`
+#: ranks every match before discarding most of them; on 73,943 pages that ran
+#: past the 6 s statement timeout for a single common word. This bounds the
+#: work to a slice that is still 40x the page size.
+RANK_SCAN_LIMIT = 2000
+
 #: How much a page's own quality moves it. `quality_score` runs 0.2 (a
 #: JavaScript shell the crawler could barely read) to 1.0 (a page with prose and
 #: a description), so this is worth 0.16 of score between the two ends - enough
@@ -1228,15 +1234,23 @@ class IndexStore:
             # scan detoast 25k bodies to hand 500 of them on, which cost more
             # than the boost expression it was meant to save. The row is
             # fetched again by primary key for the survivors.
-            f"FROM (SELECT p0.page_id, "
+            # The scan is bounded before the rank is computed, not after.
+            # `ORDER BY ts_rank(...) LIMIT n` ranks *every* match and then
+            # throws almost all of them away: on 73,943 pages a common word
+            # matched enough rows that this alone ran past the 6 s statement
+            # timeout, and the answer fell back to index order. Taking a
+            # bounded slice of matches first makes the rank cost the slice,
+            # not the corpus.
+            f"FROM (SELECT s0.page_id, "
             # ts_rank rather than ts_rank_cd here: the cover-density variant is
             # the more expensive of the two and this stage only decides which
             # rows reach the boost pass, not their final order — the outer sort
             # still scores with ts_rank_cd. Measured on 25k matches: 456 ms
             # against 324 ms.
-            f"ts_rank(p0.search_vector, to_tsquery('{SEARCH_CONFIG}', ?)) AS lex "
-            f"FROM pages p0 "
+            f"ts_rank(s0.search_vector, to_tsquery('{SEARCH_CONFIG}', ?)) AS lex "
+            f"FROM (SELECT p0.page_id, p0.search_vector FROM pages p0 "
             f"WHERE p0.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters} "
+            "LIMIT ?) s0 "
             "ORDER BY lex DESC LIMIT ?) cand "
             "JOIN pages p ON p.page_id = cand.page_id "
             "LEFT JOIN sites s ON s.site_id = p.site_id "
@@ -1273,6 +1287,7 @@ class IndexStore:
             rank_query,
             match_query,
             *extra,
+            RANK_SCAN_LIMIT,
             RANK_CANDIDATE_LIMIT,
             TITLE_MATCH_BOOST,
             AUTHORITY_DOMAIN_BOOST,
@@ -1324,6 +1339,7 @@ class IndexStore:
                     navigational_term,
                     loose,
                     *extra,
+                    RANK_SCAN_LIMIT,
                     TITLE_MATCH_BOOST,
                     AUTHORITY_DOMAIN_BOOST,
                     LANGUAGE_MATCH_BOOST,
