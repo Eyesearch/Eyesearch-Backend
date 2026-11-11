@@ -60,6 +60,10 @@ CACHE_TTL_SECONDS = 60.0
 CACHE_MAX_ENTRIES = 1000
 
 
+#: A search slower than this is worth a log line with its breakdown.
+SLOW_SEARCH_MS = 1000
+
+
 class SearchCache:
     """A small TTL cache for search payloads.
 
@@ -544,6 +548,7 @@ class SearchService:
         # the over-fetch the cap would leave the page short whenever one site
         # dominated the matches — which is exactly when it is needed.
         over_fetch = size * DOMAIN_CLUSTER_OVERFETCH
+        store_started = time.perf_counter()
         try:
             hits = await self._store.search(
                 query,
@@ -556,6 +561,7 @@ class SearchService:
             if federated_task is not None:
                 federated_task.cancel()
             raise
+        store_ms = int((time.perf_counter() - store_started) * 1000)
         hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
@@ -573,6 +579,18 @@ class SearchService:
                 result["snippet"] = highlight_terms(result["snippet"], tokens)
 
         took_ms = int((time.perf_counter() - started) * 1000)
+        # Where the time went, when it went somewhere it should not have. A
+        # search that takes six seconds is either a slow query or slow work
+        # around it, and the two are indistinguishable from outside.
+        if took_ms >= SLOW_SEARCH_MS:
+            logger.info(
+                "slow search: query=%r store_ms=%d rest_ms=%d hits=%d took_ms=%d",
+                query,
+                store_ms,
+                took_ms - store_ms,
+                len(hits),
+                took_ms,
+            )
 
         # `results` stays the organic list. The frontend renders it today, and a
         # card from a source we never crawled must not appear in the slot that
