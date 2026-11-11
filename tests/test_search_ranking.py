@@ -305,3 +305,43 @@ def test_a_timeout_is_told_apart_from_a_real_fault():
 
     assert _is_timeout(Exception("canceling statement due to statement timeout")) is True
     assert _is_timeout(Exception("relation \"pages\" does not exist")) is False
+
+
+@pytest.mark.asyncio
+async def test_a_shell_does_not_outrank_a_real_page(store):
+    """Two pages, same words, different quality.
+
+    `quality_score` was the one signal the ranking ignored, so a JavaScript
+    shell the crawler could barely read (0.2) and a page with prose (1.0) came
+    back in whatever order the lexical score happened to produce. At 73k pages
+    that is what "the results got worse as the index grew" looked like.
+    """
+    from app.engine.store import PageDocument
+
+    await store.persist_batch(
+        [
+            PageDocument(
+                url="https://a.gov.in/shell",
+                domain="a.gov.in",
+                title="District office contact numbers",
+                description="Contact numbers for the district office.",
+                body_text="district office contact numbers",
+                digest="shell-1",
+                quality_score=0.2,
+            ),
+            PageDocument(
+                url="https://b.gov.in/real",
+                domain="b.gov.in",
+                title="District office contact numbers",
+                description="Contact numbers for the district office.",
+                body_text="district office contact numbers and the timings of every counter " * 3,
+                digest="real-1",
+                quality_score=1.0,
+            ),
+        ]
+    )
+
+    hits = await store.search("district office contact numbers")
+
+    assert hits
+    assert "b.gov.in" in hits[0].url

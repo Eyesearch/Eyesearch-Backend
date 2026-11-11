@@ -592,7 +592,10 @@ class SearchService:
             "total_pages": 1 if federated else max(1, -(-len(results) // max(1, size))),
             "has_next_page": False if federated else len(results) >= size,
             "took_ms": took_ms,
-            "degraded": False,
+            # The ranked query ran past the statement timeout and the index-only
+            # path answered instead. Say so: under crawl load this is why an
+            # answer looks worse than the same query did on an idle box.
+            "degraded": any(getattr(hit, "degraded", False) for hit in hits),
             "cache_hit": False,
             "providers": {SOURCE_LABEL: len(results)},
             "failed_providers": [],

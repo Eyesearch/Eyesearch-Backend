@@ -104,6 +104,13 @@ MAX_TITLE_TOKENS = 5
 #: ever shows fifty.
 RANK_CANDIDATE_LIMIT = 500
 
+#: How much a page's own quality moves it. `quality_score` runs 0.2 (a
+#: JavaScript shell the crawler could barely read) to 1.0 (a page with prose and
+#: a description), so this is worth 0.16 of score between the two ends - enough
+#: to separate a shell from a real page of equal lexical match, not enough to
+#: override a strong title hit.
+QUALITY_BOOST = 0.2
+
 #: Width of the passage returned as a match snippet, in characters.
 SNIPPET_CHAR_CAP = 320
 
@@ -219,6 +226,10 @@ class SearchHit:
     #: not appear in the prose. Carries <b> around the match; the caller strips
     #: them because both shipped clients render plain text.
     dynamic_headline: str = ""
+    #: True when this hit came from the index-only path taken after the
+    #: ranked query timed out. The caller reports it: a quietly worse answer
+    #: that looks like a good one is how a load problem becomes a mystery.
+    degraded: bool = False
     #: Schema.org types from the page, used for classification only. Not a
     #: column: it describes the page, it is not part of the index.
     schema_types: list[str] = field(default_factory=list)
@@ -1198,7 +1209,11 @@ class IndexStore:
             "CASE WHEN coalesce(s.domain, '') LIKE '%.in' THEN 1 ELSE 0 END AS region_hit, "
             # Appended last on purpose: the row mapper reads by position, and
             # inserting them earlier would shift every index after it.
-            "p.category, c.code AS category_code, p.sitelinks "
+            "p.category, c.code AS category_code, p.sitelinks, "
+            # Carried into the outer sort so a page that only half exists - a
+            # JavaScript shell, a two-line stub - cannot outrank a real one on
+            # a lexical match alone. It was the one signal the ranking ignored.
+            "COALESCE(p.quality_score, 1.0) AS quality "
             # Two-stage ranking. The inner select is the only one that reads
             # the whole match set, and it carries nothing but the lexically best
             # rows forward; the six boost expressions are then evaluated once
@@ -1226,7 +1241,8 @@ class IndexStore:
             "  - ? * title_hit - ? * auth_hit - ? * lang_hit "
             "  - ? * nav_hit - ? * root_hit * nav_hit "
             "  + ? * description_only "
-            "  - ? * region_hit) ASC "
+            "  - ? * region_hit "
+            "  - ? * quality) ASC "
             "LIMIT ? OFFSET ?"
             ") top_slice"
         )
@@ -1259,6 +1275,7 @@ class IndexStore:
             ROOT_PIN_BOOST,
             DESCRIPTION_ONLY_PENALTY,
             REGIONAL_BOOST,
+            QUALITY_BOOST,
             limit,
             offset,
         )
@@ -1308,6 +1325,7 @@ class IndexStore:
                     ROOT_PIN_BOOST,
                     DESCRIPTION_ONLY_PENALTY,
                     REGIONAL_BOOST,
+                    QUALITY_BOOST,
                     limit,
                     offset,
                 ),
@@ -1393,6 +1411,8 @@ class IndexStore:
         args: list[Any] = [match_query, *extra, FAST_CANDIDATE_LIMIT, offset]
         result = await self._client.execute(sql, args)
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
+        for hit in hits:
+            hit.degraded = True
         self._rescale_scores(hits)
         return hits
 
@@ -1437,7 +1457,14 @@ class IndexStore:
             nav_hit=int(row[12] or 0) if len(row) > 12 else 0,
             root_hit=int(row[13] or 0) if len(row) > 13 else 0,
             region_hit=int(row[14] or 0) if len(row) > 14 else 0,
-            dynamic_headline=str(row[19] or "") if len(row) > 19 else "",
+            # The headline is the last column of the ranked query (`SELECT
+            # top_slice.*, ts_headline(...)`) but the fast path has no headline
+            # at all, so it is read from the end rather than by a fixed index:
+            # adding a column to `top_slice` silently shifted this to the wrong
+            # value, and the snippet went empty instead of wrong, which is worse.
+            dynamic_headline=(
+                str(row[-1] or "") if len(row) > 19 else ""
+            ),
         )
 
     @staticmethod
