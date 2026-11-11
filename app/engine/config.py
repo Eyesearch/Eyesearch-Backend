@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     #: watch the process, not the crawl. Off only if you want a silent server.
     maintenance_enabled: bool = True
     maintenance_interval_seconds: float = 600.0
+    #: How often the queue is reconciled against the per-host ceilings. A host
+    #: that reaches its cap leaves its remaining rows at 'pending' for ever
+    #: otherwise, and a backlog of rows that can never run reads as a stalled
+    #: frontier. Half an hour is cheap: one aggregate over `pages`.
+    capped_sweep_interval_seconds: float = 1800.0
     #: Where the daily seed and category snapshot is written.
     snapshot_dir: str = "snapshots"
 

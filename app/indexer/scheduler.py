@@ -214,6 +214,11 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
     # full of pages that have not had a chance to be fetched yet.
     since_heal = 0.0
     heal_every = max(3600.0, interval * 20)
+    # The cap reconciliation is cheap (one aggregate over `pages`) and it is
+    # what keeps `pending` honest: without it, every host that reaches its
+    # ceiling leaves its remaining rows queued for ever.
+    since_cap_sweep = 0.0
+    cap_sweep_every = max(60.0, float(settings.capped_sweep_interval_seconds))
 
     while True:
         try:
@@ -238,6 +243,20 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                         logger.info("queue hygiene: retired %d indexed duplicates", retired)
                 except Exception as error:  # noqa: BLE001 - never kill the loop
                     logger.warning("self-heal sweep failed: %s", error)
+
+            since_cap_sweep += interval
+            if since_cap_sweep >= cap_sweep_every:
+                since_cap_sweep = 0.0
+                try:
+                    parked = await orchestrator.store.skip_pending_for_capped_domains()
+                    if parked:
+                        logger.info(
+                            "capped-domain sweep: parked %d queued URLs "
+                            "whose host is at its page ceiling",
+                            parked,
+                        )
+                except Exception as error:  # noqa: BLE001 - never kill the loop
+                    logger.warning("capped-domain sweep failed: %s", error)
 
             if not autosuggest_built:
                 # Built once from the index, then kept: the trie answers
