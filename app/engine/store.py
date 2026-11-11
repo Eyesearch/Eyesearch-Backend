@@ -1507,9 +1507,12 @@ class IndexStore:
             [
                 ("SELECT COUNT(*) FROM sites", ()),
                 ("SELECT COUNT(*) FROM pages", ()),
+                # Counting the rows that are *missing* a vector, not the rows
+                # that have one: the partial index `idx_pages_vector_missing`
+                # answers this instantly, while the inverse comparison reads a
+                # tsvector on every page and times out on a large index.
                 (
-                    "SELECT COUNT(*) FROM pages "
-                    "WHERE search_vector IS NOT NULL AND search_vector <> ''::tsvector"
+                    "SELECT COUNT(*) FROM pages WHERE search_vector IS NULL"
                     if _dialect(self._client) == "postgres"
                     else "SELECT COUNT(*) FROM page_fts",
                     (),
@@ -1517,10 +1520,15 @@ class IndexStore:
                 ("SELECT COUNT(*) FROM crawl_queue WHERE status = 'pending'", ()),
             ]
         )
+        pages = int(results[1].scalar(0) or 0)
+        if _dialect(self._client) == "postgres":
+            indexed = max(0, pages - int(results[2].scalar(0) or 0))
+        else:
+            indexed = int(results[2].scalar(0) or 0)
         return Stats(
             sites=int(results[0].scalar(0) or 0),
-            pages=int(results[1].scalar(0) or 0),
-            indexed=int(results[2].scalar(0) or 0),
+            pages=pages,
+            indexed=indexed,
             queued=int(results[3].scalar(0) or 0),
         )
 

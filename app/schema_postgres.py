@@ -206,4 +206,11 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_queue_status ON crawl_queue(status, id)",
     "CREATE INDEX IF NOT EXISTS idx_queue_domain ON crawl_queue(domain)",
     "CREATE INDEX IF NOT EXISTS idx_queue_processed ON crawl_queue(status, processed_at)",
+    # Rows whose search vector was never built. The partial index makes
+    # `COUNT(*) ... WHERE search_vector IS NULL` instant, which is what /health
+    # needs: counting the *indexed* rows instead meant comparing a tsvector on
+    # every one of 70k rows, and that query timed out under crawl load - so the
+    # probe reported `db: down` while the database was answering everything else.
+    "CREATE INDEX IF NOT EXISTS idx_pages_vector_missing ON pages(id) "
+    "WHERE search_vector IS NULL",
 )

@@ -226,3 +226,50 @@ async def test_a_timed_out_bootstrap_is_retried_in_the_background(monkeypatch):
 
     assert app.state.database_ready is True
     assert len(attempts) >= 2
+
+
+@pytest.mark.asyncio
+async def test_a_slow_count_does_not_report_the_database_as_down(monkeypatch):
+    """One aggregate that times out is not a dead database.
+
+    `/health` counts four things. When the `indexed` count was slow it raised,
+    the handler caught it, and the probe answered `db: down` with zeros - so
+    monitoring saw a dead service while the crawler wrote pages and search
+    answered. The probe now asks `SELECT 1` before saying that.
+    """
+    import types
+
+    from app import main as main_module
+    from app.engine.config import Settings
+
+    class Client:
+        async def execute(self, sql, params=()):
+            return types.SimpleNamespace(scalar=lambda _i=0: 1, rows=[(1,)])
+
+    class BrokenStore:
+        def __init__(self, client, settings):
+            pass
+
+        async def stats(self):
+            raise RuntimeError("postgres statement timed out")
+
+    monkeypatch.setattr(main_module, "IndexStore", BrokenStore)
+
+    request = types.SimpleNamespace(
+        app=types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                settings=Settings(_env_file=None),
+                database_ready=True,
+                client=Client(),
+                orchestrator=None,
+                workers=None,
+            )
+        )
+    )
+
+    payload = await main_module.health_payload(request)
+
+    assert payload["db"] == "up"
+    assert payload["status"] == "ok"
+    assert payload["warnings"], "the failed count must be reported, not hidden"
+    assert "timed out" in payload["warnings"][0]

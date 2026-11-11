@@ -437,9 +437,25 @@ async def health_payload(request: Request) -> dict[str, Any]:
             if restarts:
                 payload["worker_restarts"] = restarts
     except Exception as error:  # health must answer, always
-        payload["status"] = "degraded"
-        payload["db"] = "down"
-        payload["error"] = str(error)
+        # A slow count is not a dead database. Ask the cheapest possible
+        # question before reporting `db: down`, or a probe that could not finish
+        # one aggregate tells monitoring the whole service is gone.
+        alive = False
+        try:
+            client = getattr(request.app.state, "client", None)
+            if client is not None:
+                alive = bool((await client.execute("SELECT 1")).scalar(0))
+        except Exception:  # noqa: BLE001 - the fallback itself must not raise
+            alive = False
+
+        if alive:
+            payload["status"] = "ok"
+            payload["db"] = "up"
+            payload["warnings"] = [f"counts unavailable: {error}"]
+        else:
+            payload["status"] = "degraded"
+            payload["db"] = "down"
+            payload["error"] = str(error)
 
     return payload
 
