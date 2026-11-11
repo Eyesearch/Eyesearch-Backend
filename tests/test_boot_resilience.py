@@ -181,7 +181,13 @@ async def test_the_ranked_query_uses_the_full_text_index_when_rows_are_many(clie
     await initialize_database(client)
 
     rows = await client.execute("SELECT indexname FROM pg_indexes WHERE tablename = 'pages'")
-    assert "idx_pages_search" in {row[0] for row in rows.rows}
+    names = {row[0] for row in rows.rows}
+    assert "idx_pages_search" in names
+    # /health counts the rows *missing* a vector; without this index that count
+    # reads every tsvector in the table (50 s on 70k pages) and the probe times
+    # out. The column is `page_id`, not `id` — naming it wrong made the
+    # statement fail at boot and the index silently never existed.
+    assert "idx_pages_vector_missing" in names
 
 
 @pytest.mark.asyncio
