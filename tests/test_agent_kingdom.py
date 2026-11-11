@@ -301,3 +301,38 @@ def test_the_sentinel_does_not_invent_a_reading_it_cannot_take():
     state = load_agent("20_system_sentinel_agent").evaluate_system(0, 0, 0, 0)
     assert state.ram_used_fraction == 0.0
     assert state.disk_used_fraction == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_long_pass_keeps_beating(monkeypatch):
+    """The pass itself can outlast the supervisor's 30 s window.
+
+    Beating only before the pass meant a batch of slow hosts was cancelled
+    mid-pass, every time, and no page was ever revalidated - the worker looked
+    alive in the logs ("worker started") while refreshing nothing.
+    """
+    module = load_agent("06_revalidation_agent")
+    # The real `run_once`, not the fixture's no-op: the pass is what is under
+    # test here.
+    agent = module.RevalidationAgent(
+        store=None,
+        fetcher=None,
+        settings=Settings(revalidation_interval_seconds=1, revalidation_jitter_seconds=0),
+    )
+    beats = []
+    agent.heartbeat = lambda: beats.append(1)
+
+    class Store:
+        async def stale_pages(self, limit, older_than_seconds):
+            return ["https://a.gov.in/1", "https://b.gov.in/2", "https://c.gov.in/3"]
+
+    class Fetcher:
+        async def fetch(self, url, attempts=1):
+            return type("R", (), {"ok": False, "reason": "timeout", "html": "", "status": 0})()
+
+    agent._store = Store()
+    agent._fetcher = Fetcher()
+
+    await agent.run_once()
+
+    assert len(beats) >= 3, "one beat per URL, not one per pass"
