@@ -692,8 +692,13 @@ class IndexStore:
         having = (
             "COUNT(*) >= ?" if cap is not None else f"COUNT(*) >= ({_host_limit_sql('s.domain')})"
         )
+        # The reason goes in `last_error`, which is the only free-text field the
+        # queue has: a row parked here is otherwise indistinguishable from one
+        # that failed a fetch, and `pending` reads as work that will never run.
         result = await self._client.execute(
-            "UPDATE crawl_queue SET status = 'skipped' WHERE status = 'pending' AND domain IN ("
+            "UPDATE crawl_queue SET status = 'skipped', last_error = 'domain_cap',"
+            " processed_at = CURRENT_TIMESTAMP"
+            " WHERE status = 'pending' AND domain IN ("
             "  SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
             f"  GROUP BY s.domain HAVING {having}"
             ")",

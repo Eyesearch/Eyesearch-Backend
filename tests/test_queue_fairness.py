@@ -391,3 +391,25 @@ async def test_pruning_can_be_disabled(client):
     await client.execute("UPDATE crawl_queue SET processed_at = now() - interval '900 days'")
 
     assert await store.prune_queue(retain_days=0, limit=100) == 0
+
+
+async def test_a_parked_row_says_why_it_was_parked(store, client):
+    """`pending` must not read as work that can never run.
+
+    The sweep used to leave `last_error` empty, so a row parked by the page
+    ceiling was indistinguishable from one that had failed a fetch — and the
+    only visible symptom was a backlog that never moved.
+    """
+    await _seed_capped_domains(store, 1, 1)
+    await _queue(client, [("https://site0.example/extra", "site0.example")])
+
+    await store.skip_pending_for_capped_domains()
+
+    row = (await client.execute(
+        "SELECT status, last_error, processed_at FROM crawl_queue "
+        "WHERE url = 'https://site0.example/extra'"
+    )).rows[0]
+
+    assert str(row[0]) == "skipped"
+    assert str(row[1]) == "domain_cap"
+    assert row[2] is not None
