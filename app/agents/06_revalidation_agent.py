@@ -109,6 +109,12 @@ class RevalidationAgent:
         self._quality.reset()
         refreshed = 0
         for url in stale:
+            # A pass over a batch of slow hosts runs for minutes, and the King
+            # restarts any worker silent for 30 s - so a pass that only beat
+            # before it started was cancelled before it finished, every time,
+            # and no page was ever revalidated. One beat per URL keeps the
+            # heartbeat honest while the work is happening.
+            self.beat()
             try:
                 result = await self._fetcher.fetch(url, attempts=1)
                 if not result.ok:
