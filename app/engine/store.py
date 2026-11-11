@@ -102,7 +102,13 @@ MAX_TITLE_TOKENS = 5
 #: makes the cost the candidate window, not the corpus. The window is generous:
 #: a page has to be outside the lexical top 500 to be lost, and the caller only
 #: ever shows fifty.
-RANK_CANDIDATE_LIMIT = 500
+#: How many lexically-best matches reach the boost pass. Measured on 73,943
+#: pages with the crawler running: a fresh query took 5,791 ms at 500 and the
+#: statement timeout is 6,000, so one common word was all it took to lose the
+#: ranking entirely and answer from the index-order fallback. 300 keeps the
+#: window well inside the budget; the rows it drops are the tail of a lexical
+#: match, which the boosts were not going to rescue.
+RANK_CANDIDATE_LIMIT = 300
 
 #: How much a page's own quality moves it. `quality_score` runs 0.2 (a
 #: JavaScript shell the crawler could barely read) to 1.0 (a page with prose and
