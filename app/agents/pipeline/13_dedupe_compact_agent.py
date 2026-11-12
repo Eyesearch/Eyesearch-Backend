@@ -151,7 +151,14 @@ class DedupeCompactAgent:
 DOMAIN_CLUSTER_OVERFETCH = 4
 
 
-def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) -> list:
+def cluster_by_domain(
+    hits,
+    *,
+    per_domain: int = 2,
+    limit: int | None = None,
+    favoured: str | None = None,
+    favoured_per_domain: int | None = None,
+) -> list:
     """At most `per_domain` results from any one domain, in rank order.
 
     A search that returns eight pages from the same site is technically ranked
@@ -159,6 +166,11 @@ def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) ->
     the site's whole navigation. Capping per domain lets the other sites through.
 
     Order is preserved, so this narrows the list rather than reordering it.
+
+    `favoured` is the domain the query is about - the site a reader typed the
+    name of. It gets `favoured_per_domain` slots instead of `per_domain`, which
+    is what a result page for "phonepe" needs: the site's own pages, the way a
+    search engine shows sitelinks, rather than two of them and eight strangers.
     """
     if per_domain <= 0:
         return list(hits)[:limit] if limit else list(hits)
@@ -175,7 +187,10 @@ def cluster_by_domain(hits, *, per_domain: int = 2, limit: int | None = None) ->
         if path and path in seen_paths:
             continue
         domain = _domain_of(url)
-        if seen.get(domain, 0) >= per_domain:
+        allowance = per_domain
+        if favoured and favoured_per_domain and domain == favoured:
+            allowance = max(per_domain, favoured_per_domain)
+        if seen.get(domain, 0) >= allowance:
             continue
         if path:
             seen_paths.add(path)
@@ -203,8 +218,22 @@ def _domain_of(url: str) -> str:
 class ResultClusterer:
     """The rule, as something a service can call without importing a function."""
 
-    def cluster(self, hits, *, per_domain: int = 2, limit: int | None = None) -> list:
-        return cluster_by_domain(hits, per_domain=per_domain, limit=limit)
+    def cluster(
+        self,
+        hits,
+        *,
+        per_domain: int = 2,
+        limit: int | None = None,
+        favoured: str | None = None,
+        favoured_per_domain: int | None = None,
+    ) -> list:
+        return cluster_by_domain(
+            hits,
+            per_domain=per_domain,
+            limit=limit,
+            favoured=favoured,
+            favoured_per_domain=favoured_per_domain,
+        )
 
 
 # ---------------------------------------------------------------------------
