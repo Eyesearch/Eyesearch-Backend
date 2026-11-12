@@ -413,3 +413,34 @@ async def test_a_parked_row_says_why_it_was_parked(store, client):
     assert str(row[0]) == "skipped"
     assert str(row[1]) == "domain_cap"
     assert row[2] is not None
+
+
+async def test_a_government_domain_gets_three_slots_a_round(store, client):
+    """Round-robin at one slot each starves a two-thousand-domain frontier.
+
+    A fresh portal reached its ceiling in 55 days at the crawl rate we run, so
+    a government domain now takes three slots a round and everybody else takes
+    one. The first batch after this change should hold three URLs from the
+    government site for every one from the others.
+    """
+    await _queue(
+        client,
+        [(f"https://karnataka.gov.in/p{i}", "karnataka.gov.in") for i in range(6)]
+        + [(f"https://shop{i}.in/p", f"shop{i}.in") for i in range(3)],
+    )
+
+    batch = await store.pending_batch(6)
+    domains = [item.domain for item in batch]
+
+    assert domains.count("karnataka.gov.in") == 3
+    assert len([d for d in domains if d != "karnataka.gov.in"]) == 3
+
+
+def test_the_slots_a_domain_gets_come_from_its_suffix():
+    from app.engine.store import _domain_slots
+
+    assert _domain_slots("karnataka.gov.in") == 3
+    assert _domain_slots("negd.gov.in") == 3
+    assert _domain_slots("mgnrega.nic.in") == 3
+    assert _domain_slots("iitk.ac.in") == 1
+    assert _domain_slots("flipkart.com") == 1
