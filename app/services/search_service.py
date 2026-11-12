@@ -614,7 +614,12 @@ class SearchService:
         # brand query the pool is that brand and nothing else - 183 phonepe.com
         # pages own every match for "phonepe" - so the other seats are fetched
         # with that site excluded rather than hoped for in the same list.
-        if favoured and len(hits) < size:
+        # Not gated on `favoured`: a page can fall short because one site holds
+        # every match whether or not the query named it, and a short page is the
+        # same problem either way. The site to step around is whichever owns the
+        # top result.
+        dominant = _host_of(hits[0].url) if hits else None
+        if dominant and len(hits) < size:
             others = size - len(hits)
             try:
                 extra_hits = await self._store.search(
@@ -623,7 +628,7 @@ class SearchService:
                     offset=offset,
                     category=category,
                     language=language,
-                    exclude_domain=favoured,
+                    exclude_domain=dominant,
                 )
             except Exception:  # noqa: BLE001 - the page is still good without it
                 extra_hits = []
