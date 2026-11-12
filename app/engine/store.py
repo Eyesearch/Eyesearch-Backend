@@ -121,7 +121,7 @@ RANK_CANDIDATE_LIMIT = 300
 #: ranks every match before discarding most of them; on 73,943 pages that ran
 #: past the 6 s statement timeout for a single common word. This bounds the
 #: work to a slice that is still 40x the page size.
-RANK_SCAN_LIMIT = 2000
+RANK_SCAN_LIMIT = 800
 
 #: How much a page's own quality moves it. `quality_score` runs 0.2 (a
 #: JavaScript shell the crawler could barely read) to 1.0 (a page with prose and
