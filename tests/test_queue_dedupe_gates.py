@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.engine.store import PageDocument
-from app.indexer import maintenance
+from app.indexer import maintenance, queue_hygiene
 
 BODY = "a full paragraph of genuine content about the department and its services. " * 6
 
@@ -224,11 +224,11 @@ async def test_dead_queue_rows_are_pruned_and_pages_are_not(client, store):
         "VALUES ('https://c.gov.in/x3', 'c.gov.in', 'pending', 1)"
     )
 
-    dry = await maintenance.prune_dead_queue_rows(client, dry_run=True)
+    dry = await queue_hygiene.prune_dead_queue_rows(client, dry_run=True)
     assert dry == 2
     assert len(await queue_rows(client)) == 3, "a dry run must delete nothing"
 
-    removed = await maintenance.prune_dead_queue_rows(client)
+    removed = await queue_hygiene.prune_dead_queue_rows(client)
     assert removed == 2
 
     rows = await queue_rows(client)
