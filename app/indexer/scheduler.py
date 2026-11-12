@@ -242,13 +242,6 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                     retired = await purge_indexed_duplicates(orchestrator.store.client)
                     if retired:
                         logger.info("queue hygiene: retired %d indexed duplicates", retired)
-                    # Rows that will never be fetched - parked at a host's
-                    # ceiling, or a host that has failed for a month - otherwise
-                    # stay in the table for ever. Measured: 89 MB of queue for
-                    # 30,000 rows, more than half of it dead.
-                    pruned = await prune_dead_queue_rows(orchestrator.store.client)
-                    if pruned:
-                        logger.info("queue hygiene: pruned %d dead rows", pruned)
                 except Exception as error:  # noqa: BLE001 - never kill the loop
                     logger.warning("self-heal sweep failed: %s", error)
 
@@ -256,6 +249,16 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
             if since_cap_sweep >= cap_sweep_every:
                 since_cap_sweep = 0.0
                 try:
+                    # Rows that will never be fetched - parked at a host's
+                    # ceiling, or a host that has failed for a month - otherwise
+                    # stay in the table for ever. Measured: 89 MB of queue for
+                    # 30,000 rows, more than half of it dead. It runs on this
+                    # clock rather than the heal clock because it is bounded and
+                    # cheap, and because the parked rows it deletes are the ones
+                    # this same sweep creates.
+                    pruned = await prune_dead_queue_rows(orchestrator.store.client)
+                    if pruned:
+                        logger.info("queue hygiene: pruned %d dead rows", pruned)
                     parked = await orchestrator.store.skip_pending_for_capped_domains()
                     if parked:
                         logger.info(
