@@ -26,6 +26,13 @@ from typing import Any, Iterable, Sequence
 from app.database import _dialect
 
 
+def _host_limit(domain: str) -> int:
+    """The page ceiling for one host, from the frontier's own table."""
+    from app.agents import load_agent
+
+    return load_agent("01_frontier_agent").get_host_hard_limit(domain)
+
+
 def _host_limit_sql(column: str) -> str:
     """The frontier's per-host ceilings, as SQL. Imported lazily so the store
     does not depend on an agent at module load."""
@@ -607,16 +614,19 @@ class IndexStore:
         budget = int(self._settings.domain_body_budget_chars or 0)
         if budget > 0:
             for domain in {document.domain for document in documents if document.domain}:
+                # The page count for the site is computed once, not once per
+                # row: the correlated form re-counted the site's pages for every
+                # page it trimmed, which is quadratic and ran past the 20 s
+                # statement timeout on the live index.
                 statements.append(
                     (
-                        "UPDATE pages SET body_text = substr(body_text, 1, "
-                        "CAST(GREATEST(1, CAST(? AS INTEGER) / GREATEST(1, "
-                        "(SELECT COUNT(*) FROM pages q WHERE q.site_id = pages.site_id))) "
-                        "AS INTEGER)) "
-                        "WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
-                        "AND length(body_text) > GREATEST(1, CAST(? AS INTEGER) / "
-                        "GREATEST(1, (SELECT COUNT(*) FROM pages q "
-                        "WHERE q.site_id = pages.site_id)))",
+                        "UPDATE pages p SET body_text = substr(p.body_text, 1, "
+                        "CAST(GREATEST(1, CAST(? AS INTEGER) / GREATEST(1, t.n)) AS INTEGER)) "
+                        "FROM (SELECT site_id, COUNT(*) AS n FROM pages "
+                        "      WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
+                        "      GROUP BY site_id) t "
+                        "WHERE p.site_id = t.site_id "
+                        "AND length(p.body_text) > GREATEST(1, CAST(? AS INTEGER) / GREATEST(1, t.n))",
                         (budget, domain, budget),
                     )
                 )
@@ -1041,15 +1051,21 @@ class IndexStore:
             "    AND (cq.priority = 0 OR NOT EXISTS ("
             "      SELECT 1 FROM pages p WHERE p.url = cq.url"
             "    ))"
-            "    AND cq.domain NOT IN ("
-            "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
-            "      GROUP BY s.domain HAVING COUNT(*) >= "
-            f"      ({_host_limit_sql('s.domain')})"
-            "    )"
+            # The capped-domain exclusion used to sit here as an aggregate over
+            # `pages` on every call: at 74k pages and 30k queued rows it ran past
+            # the 20 s statement timeout and took the whole crawl loop with it.
+            # It is redundant now - the half-hourly sweep parks a capped host's
+            # pending rows as `skipped`, and the batch itself re-checks each
+            # host's ceiling before fetching anything - so the crawl takes the
+            # round-robin batch and drops the capped rows a step later, for
+            # free.
             ") ORDER BY rn ASC, id ASC LIMIT ?",
-            (limit,),
+            # Over-fetch, because the capped hosts are dropped below: without the
+            # spare rows a batch could shrink to nothing on a queue that is
+            # mostly parked.
+            (max(limit, limit * 4),),
         )
-        return [
+        candidates = [
             QueuedUrl(
                 rowid=int(row[0]),
                 url=str(row[1]),
@@ -1058,6 +1074,25 @@ class IndexStore:
             )
             for row in result.rows
         ]
+
+        # Drop the hosts that are already at their ceiling. The check is one
+        # count query for the domains actually in this batch, not an aggregate
+        # over every page in the index — that aggregate ran past the statement
+        # timeout at 74k pages and stalled the crawl loop.
+        domains = list(dict.fromkeys(item.domain for item in candidates if item.domain))
+        counts = await self.domain_page_counts(domains)
+        kept: list[QueuedUrl] = []
+        for item in candidates:
+            indexed = counts.get(item.domain, 0)
+            # A host with nothing indexed yet is never capped, whatever its
+            # ceiling: the aggregate this replaces only ever saw domains that
+            # had pages, and a fresh site must not be filtered out by a zero.
+            if indexed and indexed >= _host_limit(item.domain):
+                continue
+            kept.append(item)
+            if len(kept) >= limit:
+                break
+        return kept
 
     async def queue_depth(self) -> int:
         result = await self._client.execute(
@@ -1148,7 +1183,13 @@ class IndexStore:
         # Negating it here keeps the Python scoring, the boosts and the ORDER BY
         # exactly as they were, so none of the ranking maths had to change.
         rank_query = build_tsquery(query)
-        match_query = build_tsquery(query, prefix=True) or rank_query
+        # The match is an AND of stemmed terms, not an OR of prefix wildcards.
+        # `pm:* | kisan:* | beneficiary:*` matches any page containing any word
+        # beginning with any of those - a set so large that the candidate slice
+        # was drawn from tens of thousands of rows, and the answer took eleven
+        # seconds on an idle database. Prefix matching is still there, but only
+        # as the fallback below, for a query that matched nothing without it.
+        match_query = rank_query
         if not rank_query:
             return []
 
@@ -1337,9 +1378,15 @@ class IndexStore:
                     query_language,
                     navigational_term,
                     navigational_term,
+                    # The match term is bound twice: once for the ts_rank in the
+                    # candidate slice and once for its WHERE. This path only
+                    # runs now that the strict match is an AND rather than an
+                    # OR of prefixes - the short bind was never exercised.
+                    loose,
                     loose,
                     *extra,
                     RANK_SCAN_LIMIT,
+                    RANK_CANDIDATE_LIMIT,
                     TITLE_MATCH_BOOST,
                     AUTHORITY_DOMAIN_BOOST,
                     LANGUAGE_MATCH_BOOST,
