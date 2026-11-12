@@ -197,3 +197,43 @@ async def test_the_sweep_reports_both_halves(client, store):
     result = await maintenance.sweep(client, dry_run=True)
 
     assert set(result) == {"requeued", "deduplicated"}
+
+
+@pytest.mark.asyncio
+async def test_dead_queue_rows_are_pruned_and_pages_are_not(client, store):
+    """A parked or failed row is not work, and it never becomes work.
+
+    The live queue held 89 MB for ~30,000 rows: 13,331 parked at a host's page
+    ceiling and 12,000+ dead hosts. Neither will ever be fetched, and both keep
+    their slot for ever unless something deletes them. Pages are untouched -
+    this deletes from the queue.
+    """
+    await store.persist_batch([page("https://a.gov.in/kept", "prune-1")])
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, last_error, processed_at, priority) "
+        "VALUES ('https://a.gov.in/x1', 'a.gov.in', 'skipped', 'domain_cap', "
+        "        now() - interval '60 days', 1)"
+    )
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, last_error, processed_at, priority) "
+        "VALUES ('https://b.gov.in/x2', 'b.gov.in', 'failed', 'timeout', "
+        "        now() - interval '60 days', 1)"
+    )
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, priority) "
+        "VALUES ('https://c.gov.in/x3', 'c.gov.in', 'pending', 1)"
+    )
+
+    dry = await maintenance.prune_dead_queue_rows(client, dry_run=True)
+    assert dry == 2
+    assert len(await queue_rows(client)) == 3, "a dry run must delete nothing"
+
+    removed = await maintenance.prune_dead_queue_rows(client)
+    assert removed == 2
+
+    rows = await queue_rows(client)
+    assert len(rows) == 1
+    assert rows[0][0] == "https://c.gov.in/x3", "the pending row stays"
+
+    pages = await client.execute("SELECT COUNT(*) FROM pages")
+    assert int(pages.scalar(0) or 0) == 1, "no page may be lost"
