@@ -177,6 +177,11 @@ def cluster_by_domain(
 
     seen: dict[str, int] = {}
     seen_paths: set[str] = set()
+    # The same page under a translated title - "Privacy policy" and "গোপনীয়তা
+    # নীতি" - is one page to the reader even when the URL differs. Titles are
+    # compared after folding case and spacing; a page that repeats a title
+    # already on the list adds nothing to it.
+    seen_titles: set[str] = set()
     kept: list = []
     for hit in hits:
         url = getattr(hit, "url", "") or ""
@@ -186,6 +191,9 @@ def cluster_by_domain(
         path = canonical_path(url)
         if path and path in seen_paths:
             continue
+        title_key = " ".join((getattr(hit, "title", "") or "").lower().split())
+        if title_key and title_key in seen_titles:
+            continue
         domain = _domain_of(url)
         allowance = per_domain
         if favoured and favoured_per_domain and domain == favoured:
@@ -194,6 +202,8 @@ def cluster_by_domain(
             continue
         if path:
             seen_paths.add(path)
+        if title_key:
+            seen_titles.add(title_key)
         seen[domain] = seen.get(domain, 0) + 1
         kept.append(hit)
         if limit is not None and len(kept) >= limit:
