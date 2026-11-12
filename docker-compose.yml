@@ -48,6 +48,11 @@ services:
       # 4 s was tight enough that the queue repair and pending_batch() were
       # cancelled mid-statement under crawl load, which stopped the crawl.
       DB_STATEMENT_TIMEOUT_MS: "${DB_STATEMENT_TIMEOUT_MS:-20000}"
+      # The page ceiling is derived from this, and the watchdog pauses the
+      # crawler when the index reaches it. The code default of 4608 MB is
+      # ~393,000 pages - about four months at 7,000 pages a day - so it is
+      # stated here against the disk this runs on rather than left implicit.
+      MAX_STORAGE_MB: "${MAX_STORAGE_MB:-12000}"
       # A search that needs longer than this is slow, not broken: answer it.
       SEARCH_STATEMENT_TIMEOUT_MS: "${SEARCH_STATEMENT_TIMEOUT_MS:-6000}"
       # India only. The global ring is the largest spider-trap surface there is.
