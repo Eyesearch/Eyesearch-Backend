@@ -11,6 +11,8 @@ the better text, so this is deliberate rather than "keep the first row".
 
 from __future__ import annotations
 
+import unicodedata
+
 import logging
 from dataclasses import dataclass, field
 from urllib.parse import urlparse, urlsplit
@@ -191,7 +193,13 @@ def cluster_by_domain(
         path = canonical_path(url)
         if path and path in seen_paths:
             continue
-        title_key = " ".join((getattr(hit, "title", "") or "").lower().split())
+        # NFKC first: the same Bengali title arrives both composed and
+        # decomposed, and the two are different strings byte for byte while
+        # being the same words to a reader. Folding them here is what makes
+        # "গোপনীয়তা নীতি" and "গোপনীয়তা নীতি" one result.
+        title_key = " ".join(
+            unicodedata.normalize("NFKC", getattr(hit, "title", "") or "").lower().split()
+        )
         if title_key and title_key in seen_titles:
             continue
         domain = _domain_of(url)
