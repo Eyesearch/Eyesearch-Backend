@@ -26,6 +26,35 @@ from typing import Any, Iterable, Sequence
 from app.database import _dialect
 
 
+#: Slots per round for a government domain, against one for everybody else.
+GOV_DOMAIN_SLOTS = 3
+
+#: The suffixes that make a domain government rather than a business.
+GOV_DOMAIN_SUFFIXES: tuple[str, ...] = (".gov.in", ".nic.in")
+
+#: The suffixes that make a domain academic rather than a business.
+EDU_DOMAIN_SUFFIXES: tuple[str, ...] = (".ac.in", ".edu.in", ".res.in")
+
+#: Slots per round for an academic domain. One, deliberately: education was
+#: 42% of the index and the point of weighting is to rebalance, not to
+#: entrench.
+EDU_DOMAIN_SLOTS = 1
+
+
+def _domain_slots_sql(column: str) -> str:
+    """SQL for the slots a domain gets per round, from the same suffix table."""
+    gov = " OR ".join(f"{column} LIKE '%{suffix}'" for suffix in GOV_DOMAIN_SUFFIXES)
+    return f"CASE WHEN {gov} THEN {GOV_DOMAIN_SLOTS} ELSE 1 END"
+
+
+def _domain_slots(domain: str) -> int:
+    """The Python twin of `_domain_slots_sql`, for tests and callers."""
+    lowered = (domain or "").lower()
+    if any(lowered.endswith(suffix) for suffix in GOV_DOMAIN_SUFFIXES):
+        return GOV_DOMAIN_SLOTS
+    return 1
+
+
 def _host_limit(domain: str) -> int:
     """The page ceiling for one host, from the frontier's own table."""
     from app.agents import load_agent
@@ -1043,7 +1072,14 @@ class IndexStore:
             # page is fetched before new discovery from the same site, without
             # letting one site take the whole batch.
             "         ROW_NUMBER() OVER (PARTITION BY cq.domain "
-            "ORDER BY cq.priority ASC, cq.id ASC) AS rn "
+            "ORDER BY cq.priority ASC, cq.id ASC) AS rn, "
+            # How many slots a domain gets per round. Round-robin at one slot
+            # each starves everybody when the frontier is two thousand domains
+            # wide: a fresh portal reached its 200-page ceiling in 55 days at
+            # 292 pages an hour. Government domains take three slots a round,
+            # which triples their growth and, in the same move, slows the
+            # category that had grown to 42% of the index.
+            f"         {_domain_slots_sql('cq.domain')} AS w "
             "  FROM crawl_queue cq WHERE cq.status = 'pending'"
             # Gate two. A row that is already indexed costs a fetch and writes
             # nothing. Priority 0 marks a deliberate re-fetch — a repair, or a
@@ -1059,7 +1095,7 @@ class IndexStore:
             # host's ceiling before fetching anything - so the crawl takes the
             # round-robin batch and drops the capped rows a step later, for
             # free.
-            ") ORDER BY rn ASC, id ASC LIMIT ?",
+            ") ORDER BY ((rn + w - 1) / w) ASC, rn ASC, id ASC LIMIT ?",
             # Over-fetch, because the capped hosts are dropped below: without the
             # spare rows a batch could shrink to nothing on a queue that is
             # mostly parked.
