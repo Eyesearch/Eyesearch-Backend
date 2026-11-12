@@ -1177,6 +1177,7 @@ class IndexStore:
         offset: int = 0,
         category: str | None = None,
         language: str | None = None,
+        exclude_domain: str | None = None,
     ) -> list[SearchHit]:
         """Weighted FTS5 search, best match first, optionally filtered."""
         match = build_match_query(query)
@@ -1195,6 +1196,18 @@ class IndexStore:
         if language:
             filters += " AND p0.language = ?"
             extra.append(language)
+        if exclude_domain:
+            # One site can own every match for its own name: phonepe.com holds
+            # 183 pages and the word is all over them, so even a hundred
+            # candidates were all that one site and the page had nothing from
+            # anywhere else. Excluding it here is how the rest of the web gets
+            # the seats the brand does not take.
+            # Written without a table alias: these filters are spliced into two
+            # different queries, one over `pages p0` and one over `pages p`, and
+            # an aliased column breaks the other. A bare `site_id` resolves to
+            # whichever of the two it lands in.
+            filters += " AND site_id NOT IN (SELECT site_id FROM sites WHERE domain = ?)"
+            extra.append(exclude_domain)
 
         # Title boost. Bound parameters appear in SQL order, so the rank query
         # (in the SELECT) is bound before the match query (in the WHERE).
