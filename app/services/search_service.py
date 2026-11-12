@@ -438,12 +438,23 @@ def to_result(hit: SearchHit, *, brand: str | None = None) -> SearchResult:
         snippet_source = headline
 
     raw_title = hit.title or hit.url
-    # The card title is `[Brand]: [context]`, capped at 50 characters — the one
-    # authoritative display title. The four-word action title is retired as a
-    # display string; where it exists it is only the context it contributes.
-    context = (hit.action_title or "").strip() or raw_title
     brand = (brand or getattr(hit, "brand_name", "") or "").strip()
-    title = format_company_bounded_title(context, brand) if brand else context
+    # The card shows the page's own title, and the brand on its own line above
+    # it — which is what the payload already carries in `brand_name`. The title
+    # used to be `[Brand]: [context]`, and a search for "phonepe" came back as
+    # eight cards each beginning "PhonePe:", which reads as one site repeating
+    # itself rather than as eight different pages.
+    # The formatter cleans the title and removes the brand where it repeats; the
+    # `[Brand]: ` prefix it adds is then taken off, because the card draws the
+    # brand on the line above already.
+    title = format_company_bounded_title(raw_title, brand) if brand else raw_title
+    if brand:
+        prefix = f"{brand.lower()}:"
+        if title.strip().lower().startswith(prefix):
+            title = title.strip()[len(prefix):].strip()
+    # A page titled exactly the brand would say it twice, once per line.
+    if brand and title.strip().lower() == brand.lower():
+        title = (hit.action_title or "").strip() or raw_title
     return SearchResult(
         id=f"eyesearch:{hit.page_id}",
         title=title,
