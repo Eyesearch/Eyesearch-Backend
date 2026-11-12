@@ -63,6 +63,10 @@ CACHE_MAX_ENTRIES = 1000
 #: A search slower than this is worth a log line with its breakdown.
 SLOW_SEARCH_MS = 1000
 
+#: How many results the site a query names may take. Two is right for the open
+#: web and wrong for "phonepe", where the reader asked for that site.
+SITELINK_RESULTS = 6
+
 
 class SearchCache:
     """A small TTL cache for search payloads.
@@ -562,7 +566,21 @@ class SearchService:
                 federated_task.cancel()
             raise
         store_ms = int((time.perf_counter() - store_started) * 1000)
-        hits = ResultClusterer().cluster(hits, per_domain=self._settings.max_results_per_domain, limit=size)
+        # A query that names a site is about that site: "phonepe" should show
+        # PhonePe's own pages, the way a search engine shows sitelinks, instead
+        # of two of them and eight strangers. The favoured domain is the one the
+        # top hit belongs to, and only when that hit is navigational - a query
+        # that merely mentions a site does not earn it the slots.
+        favoured = None
+        if hits and getattr(hits[0], "nav_hit", 0):
+            favoured = _host_of(hits[0].url)
+        hits = ResultClusterer().cluster(
+            hits,
+            per_domain=self._settings.max_results_per_domain,
+            limit=size,
+            favoured=favoured,
+            favoured_per_domain=SITELINK_RESULTS,
+        )
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
         brand_by_host = _consistent_brands(hits)
