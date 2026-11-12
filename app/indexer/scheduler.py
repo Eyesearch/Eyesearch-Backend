@@ -19,6 +19,7 @@ from app.indexer.maintenance import (
     purge_indexed_duplicates,
     sweep_and_requeue_legacy_pages,
 )
+from app.indexer.queue_hygiene import prune_dead_queue_rows
 from app.engine.config import Settings, get_settings
 from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
@@ -241,6 +242,13 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                     retired = await purge_indexed_duplicates(orchestrator.store.client)
                     if retired:
                         logger.info("queue hygiene: retired %d indexed duplicates", retired)
+                    # Rows that will never be fetched - parked at a host's
+                    # ceiling, or a host that has failed for a month - otherwise
+                    # stay in the table for ever. Measured: 89 MB of queue for
+                    # 30,000 rows, more than half of it dead.
+                    pruned = await prune_dead_queue_rows(orchestrator.store.client)
+                    if pruned:
+                        logger.info("queue hygiene: pruned %d dead rows", pruned)
                 except Exception as error:  # noqa: BLE001 - never kill the loop
                     logger.warning("self-heal sweep failed: %s", error)
 
