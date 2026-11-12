@@ -203,3 +203,35 @@ def test_one_title_in_two_unicode_forms_is_one_result():
     clustered = cluster_by_domain(hits, per_domain=6)
 
     assert [h.title for h in clustered] == [composed, "Privacy policy"]
+
+
+def test_the_same_page_in_two_languages_is_one_result():
+    """`/bn/privacy-policy` and `/privacy-policy` are one page, shown twice.
+
+    406 pages in the live index have such a twin. Folding the language segment
+    for the result page merges the two cards without deleting either page -
+    admission and compaction still see two URLs, so nothing is lost.
+    """
+    hits = [Hit(u) for u in (
+        "https://phonepe.com/privacy-policy",
+        "https://phonepe.com/bn/privacy-policy",
+        "https://phonepe.com/hi/privacy-policy",
+        "https://phonepe.com/payment-gateway",
+    )]
+
+    clustered = cluster_by_domain(hits, per_domain=6, limit=10)
+    urls_kept = [h.url for h in clustered]
+
+    assert urls_kept == [
+        "https://phonepe.com/privacy-policy",
+        "https://phonepe.com/payment-gateway",
+    ]
+
+
+def test_a_page_named_like_a_language_is_left_alone():
+    """`/engineering` starts with `en` but is a page, not a translation."""
+    hits = [Hit(u) for u in ("https://a.in/en", "https://a.in/engineering")]
+
+    clustered = cluster_by_domain(hits, per_domain=6, limit=10)
+
+    assert [h.url for h in clustered] == ["https://a.in/en", "https://a.in/engineering"]

@@ -33,6 +33,35 @@ def canonical_path(url: str) -> str:
     return f"{host}{path}" if host else ""
 
 
+#: Path segments that name a language rather than a page. A site that publishes
+#: the same page per language puts one of these first, and the same page then
+#: arrives under two URLs that differ only here.
+LANGUAGE_SEGMENTS: frozenset[str] = frozenset(
+    {"en", "hi", "bn", "kn", "ta", "te", "ml", "mr", "gu", "pa", "or", "as", "ur"}
+)
+
+
+def fold_locale_path(url: str) -> str:
+    """`canonical_path` with a leading language segment removed.
+
+    `phonepe.com/bn/privacy-policy` and `phonepe.com/privacy-policy` are one
+    page, and the result page showed both. Only the *first* segment is folded,
+    and only when it is a known language code, so a page genuinely called
+    `/en/` is not mistaken for a translation of something else.
+
+    This is used for the result page only, not for admission or compaction:
+    merging what a reader sees is reversible, deleting a page is not.
+    """
+    key = canonical_path(url)
+    if not key:
+        return ""
+    host, _, path = key.partition("/")
+    parts = [part for part in path.split("/") if part]
+    if parts and parts[0].lower() in LANGUAGE_SEGMENTS:
+        parts = parts[1:]
+    return f"{host}/{'/'.join(parts)}" if parts else host
+
+
 @dataclass
 class CompactionReport:
     duplicate_digests: int = 0
@@ -190,7 +219,8 @@ def cluster_by_domain(
         # The same page reached twice is a duplicate, not a second result:
         # `ksrtc.in/` and `www.ksrtc.in/` are one page, and showing both makes
         # the result page look like it repeated itself.
-        path = canonical_path(url)
+        # Folded: the same page in two languages is one result, not two.
+        path = fold_locale_path(url)
         if path and path in seen_paths:
             continue
         # NFKC first: the same Bengali title arrives both composed and
