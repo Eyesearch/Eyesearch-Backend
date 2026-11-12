@@ -235,3 +235,35 @@ def test_a_page_named_like_a_language_is_left_alone():
     clustered = cluster_by_domain(hits, per_domain=6, limit=10)
 
     assert [h.url for h in clustered] == ["https://a.in/en", "https://a.in/engineering"]
+
+
+def test_subdomains_of_one_site_share_its_cap():
+    """`ir.phonepe.com` and `phonepe.com` are one site, not four.
+
+    Keyed on the raw host, a brand's subdomains each got their own allowance and
+    eight cards from one company filled a page with nothing from anywhere else.
+    """
+    hits = [Hit(u) for u in (
+        "https://phonepe.com/payment-gateway",
+        "https://ir.phonepe.com/investor-relations",
+        "https://business.phonepe.com/articles/a",
+        "https://terms-and-conditions.phonepe.com/general/list",
+        "https://other.in/x",
+    )]
+
+    clustered = cluster_by_domain(hits, per_domain=2, limit=10)
+
+    kept = [h.url for h in clustered]
+    assert sum(1 for u in kept if "phonepe.com" in u) == 2
+    assert "https://other.in/x" in kept
+
+
+def test_a_multi_part_suffix_is_one_site():
+    """`karnataka.gov.in` is one domain, not `gov.in`."""
+    from app.agents import load_agent
+
+    agent = load_agent("13_dedupe_compact_agent")
+
+    assert agent._domain_of("https://karnataka.gov.in/health") == "karnataka.gov.in"
+    assert agent._domain_of("https://ir.ctc.com/x") == "ctc.com"
+    assert agent._domain_of("https://a.in/x") == "a.in"
