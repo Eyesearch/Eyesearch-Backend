@@ -142,3 +142,45 @@ def test_www_and_the_bare_host_share_one_per_domain_budget():
     ]
 
     assert len(cluster_by_domain(hits, per_domain=2)) == 2
+
+
+
+def _host(url: str) -> str:
+    return url.split("//", 1)[-1].split("/", 1)[0]
+
+
+def test_the_site_a_query_names_keeps_its_own_pages():
+    """`phonepe` should show PhonePe's pages, not two of them and eight strangers.
+
+    The per-domain cap is two, which is right for the open web and wrong when
+    the reader typed the site's name: 183 of its pages are indexed and four
+    reached the page.
+    """
+    hits = [Hit(u) for u in (
+        "https://phonepe.com/payment-gateway",
+        "https://phonepe.com/guides/payment-gateway",
+        "https://phonepe.com/pricing",
+        "https://phonepe.com/about",
+        "https://phonepe.com/contact",
+        "https://phonepe.com/careers",
+        "https://other.in/x",
+        "https://another.in/y",
+    )]
+
+    clustered = cluster_by_domain(
+        hits, per_domain=2, limit=10, favoured="phonepe.com", favoured_per_domain=6
+    )
+    hosts = [_host(h.url) for h in clustered]
+
+    assert hosts.count("phonepe.com") == 6
+    assert "other.in" in hosts and "another.in" in hosts
+
+
+def test_an_unrelated_query_keeps_the_tight_cap():
+    hits = [Hit(u) for u in (
+        "https://a.in/1", "https://a.in/2", "https://a.in/3", "https://b.in/4",
+    )]
+
+    clustered = cluster_by_domain(hits, per_domain=2, limit=10, favoured=None, favoured_per_domain=6)
+
+    assert [_host(h.url) for h in clustered].count("a.in") == 2
