@@ -179,11 +179,12 @@ async def test_the_api_result_carries_the_card_fields(client):
     assert hits, "the seeded page should be found"
     result = to_result(hits[0]).as_dict()
 
-    # The display title is `[Brand]: [context]`, capped at 50 characters — the
-    # one authoritative title. The bare page title is no longer what a card
-    # shows.
-    assert result["title"].startswith("Karnataka Health Department: ")
-    assert len(result["title"]) <= 50
+    # The card title is the page's own words, capped at 60 characters, and the
+    # brand is a field of its own that the client draws above it. It used to be
+    # `[Brand]: [context]`, which read well once and badly eight times: a search
+    # for "phonepe" returned eight cards each beginning "PhonePe:".
+    assert not result["title"].startswith("Karnataka Health Department:")
+    assert len(result["title"]) <= 60
     assert result["brand_name"] == "Karnataka Health Department"
     assert result["clean_url"] == "karnataka.gov.in › health › notifications"
 
@@ -322,3 +323,41 @@ async def test_a_site_is_called_by_one_name_in_a_result_page(client):
     assert hits
     brands = {to_result(hit, brand="KSRTC").as_dict()["brand_name"] for hit in hits}
     assert brands == {"KSRTC"}
+
+
+@pytest.mark.asyncio
+async def test_a_card_title_does_not_repeat_the_brand_above_it(client):
+    """Eight cards each starting "PhonePe:" read as one site repeating itself.
+
+    The brand is a field of its own and the client draws it on the line above,
+    so the title carries the page's own words.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    parsed = load_agent("03_parser_agent").ParserAgent().parse(
+        "https://phonepe.com/payment-gateway",
+        "<html><head><title>Payment Gateway</title></head>"
+        "<body><main><p>Accept UPI payments online with a single integration "
+        "for your business, with settlement in two days and no setup fee.</p>"
+        "</main></body></html>",
+    )
+    await store.persist_batch(
+        [
+            PageDocument(
+                url=parsed.url,
+                domain="phonepe.com",
+                title=parsed.title,
+                description=parsed.description,
+                body_text=parsed.body_text,
+                digest="brand-1",
+                brand_name="PhonePe",
+                clean_url=parsed.clean_url,
+                action_title=parsed.action_title,
+            )
+        ]
+    )
+
+    hits = await store.search("payment gateway")
+    result = to_result(hits[0]).as_dict()
+
+    assert result["brand_name"] == "PhonePe"
+    assert not result["title"].lower().startswith("phonepe:")
