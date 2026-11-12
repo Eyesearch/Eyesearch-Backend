@@ -184,3 +184,22 @@ def test_an_unrelated_query_keeps_the_tight_cap():
     clustered = cluster_by_domain(hits, per_domain=2, limit=10, favoured=None, favoured_per_domain=6)
 
     assert [_host(h.url) for h in clustered].count("a.in") == 2
+
+
+def test_one_title_in_two_unicode_forms_is_one_result():
+    """The same Bengali title arrives composed and decomposed from two URLs.
+
+    Byte for byte they differ; to a reader they are the same words, and the
+    result page showed both.
+    """
+    composed = "গোপনীয়তা নীতি"
+    decomposed = "গোপনীয়তা নীতি"
+
+    hits = [Hit(u) for u in ("https://a.in/1", "https://a.in/2", "https://a.in/3")]
+    hits[0].title = composed
+    hits[1].title = decomposed
+    hits[2].title = "Privacy policy"
+
+    clustered = cluster_by_domain(hits, per_domain=6)
+
+    assert [h.title for h in clustered] == [composed, "Privacy policy"]
