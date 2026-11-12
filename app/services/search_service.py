@@ -610,6 +610,33 @@ class SearchService:
             favoured=favoured,
             favoured_per_domain=favoured_slots,
         )
+        # The quarter the brand does not take must actually be filled. On a
+        # brand query the pool is that brand and nothing else - 183 phonepe.com
+        # pages own every match for "phonepe" - so the other seats are fetched
+        # with that site excluded rather than hoped for in the same list.
+        if favoured and len(hits) < size:
+            others = size - len(hits)
+            try:
+                extra_hits = await self._store.search(
+                    query,
+                    limit=others * DOMAIN_CLUSTER_OVERFETCH,
+                    offset=offset,
+                    category=category,
+                    language=language,
+                    exclude_domain=favoured,
+                )
+            except Exception:  # noqa: BLE001 - the page is still good without it
+                extra_hits = []
+            if extra_hits:
+                seen_urls = {getattr(hit, "url", "") for hit in hits}
+                fresh = [hit for hit in extra_hits if getattr(hit, "url", "") not in seen_urls]
+                hits = ResultClusterer().cluster(
+                    hits + fresh,
+                    per_domain=self._settings.max_results_per_domain,
+                    limit=size,
+                    favoured=favoured,
+                    favoured_per_domain=favoured_slots,
+                )
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
         brand_by_host = _consistent_brands(hits)

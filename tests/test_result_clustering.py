@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.engine.config import Settings
 from app.engine.store import IndexStore, PageDocument
 from app.agents import load_agent
 
@@ -267,3 +268,39 @@ def test_a_multi_part_suffix_is_one_site():
     assert agent._domain_of("https://karnataka.gov.in/health") == "karnataka.gov.in"
     assert agent._domain_of("https://ir.ctc.com/x") == "ctc.com"
     assert agent._domain_of("https://a.in/x") == "a.in"
+
+
+def _brand_page(url: str, digest: str, brand: str) -> PageDocument:
+    return PageDocument(
+        url=url,
+        domain=url.split("/")[2],
+        title="phonepe",
+        description="phonepe",
+        body_text=BODY,
+        digest=digest,
+        brand_name=brand,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_brand_query_still_finds_other_sites(client):
+    """`phonepe` returns phonepe.com and nothing else, so the rest is fetched.
+
+    One site owned every match for its own name: 183 phonepe.com pages, the
+    word on all of them, and a hundred candidates that were all the same site.
+    The other seats are now fetched with that site excluded.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    pages = [
+        _brand_page(f"https://phonepe.com/p{i}", f"brand-{i}", "PhonePe")
+        for i in range(8)
+    ] + [
+        _brand_page("https://moneycontrol.com/phonepe-ipo", "other-1", "Moneycontrol"),
+        _brand_page("https://business-standard.com/phonepe", "other-2", "Business Standard"),
+    ]
+    await store.persist_batch(pages)
+
+    excluded = await store.search("phonepe", limit=20, exclude_domain="phonepe.com")
+
+    assert excluded, "the excluded leg must still find the other sites"
+    assert all("phonepe.com" not in hit.url for hit in excluded)
