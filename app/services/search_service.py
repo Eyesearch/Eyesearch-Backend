@@ -39,7 +39,12 @@ logger = logging.getLogger(__name__)
 
 #: How many extra matches to fetch before the dedupe agent clusters them. The
 #: over-fetch lives here because this is the side that does the fetching.
-DOMAIN_CLUSTER_OVERFETCH = 4
+#: How many results to fetch for every one shown, before the per-domain cap is
+#: applied. Four was enough while every host was its own bucket; now that a
+#: site's subdomains share one, a brand search returns forty rows from that
+#: brand and nothing else, so the page has no other site to fall back on. Ten
+#: reaches past the brand into the pages that merely mention it.
+DOMAIN_CLUSTER_OVERFETCH = 10
 
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
 _dedupe_agent = load_agent("13_dedupe_compact_agent")
