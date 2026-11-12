@@ -217,9 +217,10 @@ async def test_a_second_identical_search_is_served_from_the_cache(store):
     service = SearchService(counting)
 
     first = await service.search("metro")
+    after_first = counting.searches
     second = await service.search("metro")
 
-    assert counting.searches == 1
+    assert counting.searches == after_first, "the cache must not search again"
     assert first["cache_hit"] is False
     assert second["cache_hit"] is True
     assert second["took_ms"] == 0
@@ -232,9 +233,10 @@ async def test_a_different_filter_is_a_cache_miss(store):
     service = SearchService(counting)
 
     await service.search("metro")
+    after_first = counting.searches
     await service.search("metro", category="government")
 
-    assert counting.searches == 2
+    assert counting.searches > after_first, "a different filter must search again"
 
 
 async def test_a_different_page_is_a_cache_miss(store):
@@ -243,9 +245,14 @@ async def test_a_different_page_is_a_cache_miss(store):
     service = SearchService(counting)
 
     await service.search("metro", page=1)
-    await service.search("metro", page=2)
+    # A short page also runs the excluded leg, so one call is one or two store
+    # searches; what the cache must do is stop the repeat from adding any.
+    after_first = counting.searches
+    await service.search("metro", page=1)
+    assert counting.searches == after_first
 
-    assert counting.searches == 2
+    await service.search("metro", page=2)
+    assert counting.searches > after_first
 
 
 async def test_highlighting_is_part_of_the_cache_key(store):
@@ -254,9 +261,12 @@ async def test_highlighting_is_part_of_the_cache_key(store):
     service = SearchService(counting)
 
     await service.search("metro", highlight=False)
-    await service.search("metro", highlight=True)
+    after_first = counting.searches
+    await service.search("metro", highlight=False)
+    assert counting.searches == after_first, "the same key must not search again"
 
-    assert counting.searches == 2
+    await service.search("metro", highlight=True)
+    assert counting.searches > after_first, "a different key must search again"
 
 
 async def test_the_flat_contract_is_cached_too(store):
@@ -265,9 +275,10 @@ async def test_the_flat_contract_is_cached_too(store):
     service = SearchService(counting)
 
     await service.search_flat("metro")
+    after_first = counting.searches
     second = await service.search_flat("metro")
 
-    assert counting.searches == 1
+    assert counting.searches == after_first
     assert second["cache_hit"] is True
 
 
