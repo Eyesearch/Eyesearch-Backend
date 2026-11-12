@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import math
 import re
 import threading
 import time
@@ -41,7 +42,9 @@ logger = logging.getLogger(__name__)
 DOMAIN_CLUSTER_OVERFETCH = 4
 
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
-ResultClusterer = load_agent("13_dedupe_compact_agent").ResultClusterer
+_dedupe_agent = load_agent("13_dedupe_compact_agent")
+ResultClusterer = _dedupe_agent.ResultClusterer
+_registrable_domain_of = _dedupe_agent._domain_of
 format_company_bounded_title = load_agent("03_parser_agent").format_company_bounded_title
 brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
 
@@ -63,9 +66,10 @@ CACHE_MAX_ENTRIES = 1000
 #: A search slower than this is worth a log line with its breakdown.
 SLOW_SEARCH_MS = 1000
 
-#: How many results the site a query names may take. Two is right for the open
-#: web and wrong for "phonepe", where the reader asked for that site.
-SITELINK_RESULTS = 6
+#: The share of a result page the site a query names may take. Three quarters
+#: leaves a quarter for the rest of the web, which is what makes a brand search
+#: read as a search rather than as the site's own menu.
+SITELINK_SHARE = 0.75
 
 
 class SearchCache:
@@ -394,11 +398,13 @@ def _looks_like_a_menu(text: str) -> bool:
 
 
 def _host_of(url: str) -> str:
-    try:
-        host = (urlsplit(url or "").hostname or "").lower()
-    except ValueError:
-        return ""
-    return host[4:] if host.startswith("www.") else host
+    """The site a URL belongs to, subdomains and `www.` set aside.
+
+    The same key the clusterer groups on: `ir.phonepe.com` is `phonepe.com`
+    here too, or the favoured domain would never match the group it is meant
+    to favour, and one brand would be called two names.
+    """
+    return _registrable_domain_of(url)
 
 
 def _consistent_brands(hits: Sequence[SearchHit]) -> dict[str, str]:
@@ -585,12 +591,19 @@ class SearchService:
         favoured = None
         if hits and getattr(hits[0], "nav_hit", 0):
             favoured = _host_of(hits[0].url)
+        # Three quarters of the page for the site the reader named, the rest
+        # for everybody else. A fixed number does not scale: six is most of a
+        # ten-card page and a third of a twenty-card one.
+        favoured_slots = max(
+            self._settings.max_results_per_domain,
+            math.ceil(size * SITELINK_SHARE),
+        )
         hits = ResultClusterer().cluster(
             hits,
             per_domain=self._settings.max_results_per_domain,
             limit=size,
             favoured=favoured,
-            favoured_per_domain=SITELINK_RESULTS,
+            favoured_per_domain=favoured_slots,
         )
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
