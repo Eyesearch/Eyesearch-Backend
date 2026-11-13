@@ -63,9 +63,9 @@ CACHE_MAX_ENTRIES = 1000
 #: A search slower than this is worth a log line with its breakdown.
 SLOW_SEARCH_MS = 1000
 
-#: How many results the site a query names may take. Two is right for the open
-#: web and wrong for "phonepe", where the reader asked for that site.
-SITELINK_RESULTS = 6
+#: How many results the site a query names may take: all of them. Two is right
+#: for the open web and wrong for "phonepe", where the reader asked for that
+#: site and its other pages are the answer.
 
 
 class SearchCache:
@@ -588,12 +588,16 @@ class SearchService:
         favoured = None
         if hits and getattr(hits[0], "nav_hit", 0):
             favoured = _host_of(hits[0].url)
+        # A query that names a site is answered by that site: "phonepe" gets a
+        # page of PhonePe's own pages, not two of them and eight other people's.
+        # The whole page, because that is what was asked for - the reader typed
+        # the site's name, and its other 175 pages are what they came for.
         hits = ResultClusterer().cluster(
             hits,
             per_domain=self._settings.max_results_per_domain,
             limit=size,
             favoured=favoured,
-            favoured_per_domain=SITELINK_RESULTS,
+            favoured_per_domain=size,
         )
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
