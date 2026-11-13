@@ -577,6 +577,9 @@ class SearchService:
                 federated_task.cancel()
             raise
         store_ms = int((time.perf_counter() - store_started) * 1000)
+        # Kept before the cap narrows the list: a pool that came back full is a
+        # search with more behind it.
+        raw_hits = hits
         # A query that names a site is about that site: "phonepe" should show
         # PhonePe's own pages, the way a search engine shows sitelinks, instead
         # of two of them and eight strangers. The favoured domain is the one the
@@ -633,6 +636,12 @@ class SearchService:
             "page": page_number,
             "limit": size,
             "total_estimate": len(results),
+            # Whether another page exists. The count of every match is not
+            # something this endpoint can afford to compute on a broad query,
+            # but "did the pool run full?" answers the only question the client
+            # asks of it, and costs nothing: a pool that came back short is a
+            # search that has reached its end.
+            "has_more": bool(raw_hits and len(raw_hits) >= over_fetch),
             # The fallback only ever answers page one. Saying so in the envelope
             # is what lets the frontend disable Next instead of offering a page
             # that will always come back empty.
