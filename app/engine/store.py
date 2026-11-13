@@ -1177,7 +1177,6 @@ class IndexStore:
         offset: int = 0,
         category: str | None = None,
         language: str | None = None,
-        exclude_domain: str | None = None,
     ) -> list[SearchHit]:
         """Weighted FTS5 search, best match first, optionally filtered."""
         match = build_match_query(query)
@@ -1196,18 +1195,6 @@ class IndexStore:
         if language:
             filters += " AND p0.language = ?"
             extra.append(language)
-        if exclude_domain:
-            # One site can own every match for its own name: phonepe.com holds
-            # 183 pages and the word is all over them, so even a hundred
-            # candidates were all that one site and the page had nothing from
-            # anywhere else. Excluding it here is how the rest of the web gets
-            # the seats the brand does not take.
-            # Written without a table alias: these filters are spliced into two
-            # different queries, one over `pages p0` and one over `pages p`, and
-            # an aliased column breaks the other. A bare `site_id` resolves to
-            # whichever of the two it lands in.
-            filters += " AND site_id NOT IN (SELECT site_id FROM sites WHERE domain = ?)"
-            extra.append(exclude_domain)
 
         # Title boost. Bound parameters appear in SQL order, so the rank query
         # (in the SELECT) is bound before the match query (in the WHERE).
@@ -1494,76 +1481,6 @@ class IndexStore:
         if not siblings:
             return hits
         return ([top, *siblings, *hits[1:]])[:limit]
-
-    async def search_other_sites(
-        self,
-        query: str,
-        *,
-        exclude_domain: str,
-        limit: int = 5,
-        category: str | None = None,
-        language: str | None = None,
-    ) -> list["SearchHit"]:
-        """Results from everywhere except one site, without the ranking pass.
-
-        This fills the seats a brand does not take, so it only needs to find a
-        few pages from other sites - not the best page on the web. The full
-        ranked query costs seconds on a brand name, because ranking every match
-        is the expensive part; the GIN index alone answers this in tens of
-        milliseconds. Measured on "phonepe": 8.1 s through the ranked path,
-        60 ms here.
-        """
-        match = build_tsquery(query)
-        if not match:
-            return []
-        tokens = fts_tokens(query)
-
-        filters = " AND s.domain <> ?"
-        extra: list[Any] = [exclude_domain]
-        if category:
-            filters += " AND p.category = ?"
-            extra.append(category)
-        if language:
-            filters += " AND p.language = ?"
-            extra.append(language)
-
-        sql = (
-            "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
-            "p.brand_name, p.clean_url, p.action_title, "
-            "0.0 AS lexical_score, 0 AS title_hit, 0 AS auth_hit, 0 AS lang_hit, "
-            "0 AS nav_hit, 0 AS root_hit, 0 AS region_hit, "
-            "p.category, c.code AS category_code, p.sitelinks, 0 AS description_only "
-            "FROM pages p "
-            "LEFT JOIN sites s ON s.site_id = p.site_id "
-            "LEFT JOIN categories c ON c.id = p.category_id "
-            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters} "
-            "ORDER BY p.quality_score DESC NULLS LAST, p.page_id DESC "
-            "LIMIT ?"
-        )
-        # Fetch a few more than asked for and put the ones that actually name
-        # the query first. Quality alone is what surfaced `precisely.co.in` for
-        # "phonepe": a good page, not an answer about PhonePe. Counting the
-        # query's words in the title and description is a cheap stand-in for the
-        # ranking pass this query deliberately skips.
-        want = max(1, int(limit))
-        args: list[Any] = [match, *extra, max(want * 5, 20)]
-        result = await self._client.execute(sql, args)
-        hits = [self._row_to_hit(row, tokens) for row in result.rows]
-
-        lowered = [token.lower() for token in tokens]
-
-        def relevance(hit: "SearchHit") -> tuple[int, float]:
-            # The URL counts too: `businessworld.in/article/phonepe-invest-se`
-            # says what the page is about even when its title is generic, and
-            # that is the difference between it and a homepage that merely
-            # scores well.
-            words = f"{hit.title} {hit.description}".lower()
-            named = sum(2 for token in lowered if token in words)
-            named += sum(1 for token in lowered if token in (hit.url or "").lower())
-            return (named, hit.score)
-
-        hits.sort(key=relevance, reverse=True)
-        return hits[:want]
 
     async def _fast_search(
         self,
