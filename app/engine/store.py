@@ -1553,8 +1553,13 @@ class IndexStore:
         lowered = [token.lower() for token in tokens]
 
         def relevance(hit: "SearchHit") -> tuple[int, float]:
+            # The URL counts too: `businessworld.in/article/phonepe-invest-se`
+            # says what the page is about even when its title is generic, and
+            # that is the difference between it and a homepage that merely
+            # scores well.
             words = f"{hit.title} {hit.description}".lower()
-            named = sum(1 for token in lowered if token in words)
+            named = sum(2 for token in lowered if token in words)
+            named += sum(1 for token in lowered if token in (hit.url or "").lower())
             return (named, hit.score)
 
         hits.sort(key=relevance, reverse=True)
