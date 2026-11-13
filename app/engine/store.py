@@ -1540,9 +1540,25 @@ class IndexStore:
             "ORDER BY p.quality_score DESC NULLS LAST, p.page_id DESC "
             "LIMIT ?"
         )
-        args: list[Any] = [match, *extra, max(1, int(limit))]
+        # Fetch a few more than asked for and put the ones that actually name
+        # the query first. Quality alone is what surfaced `precisely.co.in` for
+        # "phonepe": a good page, not an answer about PhonePe. Counting the
+        # query's words in the title and description is a cheap stand-in for the
+        # ranking pass this query deliberately skips.
+        want = max(1, int(limit))
+        args: list[Any] = [match, *extra, max(want * 5, 20)]
         result = await self._client.execute(sql, args)
-        return [self._row_to_hit(row, tokens) for row in result.rows]
+        hits = [self._row_to_hit(row, tokens) for row in result.rows]
+
+        lowered = [token.lower() for token in tokens]
+
+        def relevance(hit: "SearchHit") -> tuple[int, float]:
+            words = f"{hit.title} {hit.description}".lower()
+            named = sum(1 for token in lowered if token in words)
+            return (named, hit.score)
+
+        hits.sort(key=relevance, reverse=True)
+        return hits[:want]
 
     async def _fast_search(
         self,
