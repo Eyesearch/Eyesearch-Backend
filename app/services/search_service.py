@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-import math
 import re
 import threading
 import time
@@ -39,18 +38,10 @@ logger = logging.getLogger(__name__)
 
 #: How many extra matches to fetch before the dedupe agent clusters them. The
 #: over-fetch lives here because this is the side that does the fetching.
-#: How many results to fetch for every one shown, before the per-domain cap is
-#: applied. The per-domain cap needs a few spare rows to work with, and that is
-#: all: widening it to ten to reach past a dominant brand doubled the cost of a
-#: brand search (2.1 s to 4.3 s on "phonepe"), because every extra row is a body
-#: that has to be scanned for a snippet. The other sites are now fetched by the
-#: excluded leg, which is the right tool for that job.
 DOMAIN_CLUSTER_OVERFETCH = 4
 
 BreadcrumbBuilderAgent = load_agent("34_breadcrumb_builder_agent").BreadcrumbBuilderAgent
-_dedupe_agent = load_agent("13_dedupe_compact_agent")
-ResultClusterer = _dedupe_agent.ResultClusterer
-_registrable_domain_of = _dedupe_agent._domain_of
+ResultClusterer = load_agent("13_dedupe_compact_agent").ResultClusterer
 format_company_bounded_title = load_agent("03_parser_agent").format_company_bounded_title
 brand_from_domain = load_agent("10_brand_canonical_agent").brand_from_domain
 
@@ -72,10 +63,9 @@ CACHE_MAX_ENTRIES = 1000
 #: A search slower than this is worth a log line with its breakdown.
 SLOW_SEARCH_MS = 1000
 
-#: The share of a result page the site a query names may take. Three quarters
-#: leaves a quarter for the rest of the web, which is what makes a brand search
-#: read as a search rather than as the site's own menu.
-SITELINK_SHARE = 0.75
+#: How many results the site a query names may take. Two is right for the open
+#: web and wrong for "phonepe", where the reader asked for that site.
+SITELINK_RESULTS = 6
 
 
 class SearchCache:
@@ -404,13 +394,11 @@ def _looks_like_a_menu(text: str) -> bool:
 
 
 def _host_of(url: str) -> str:
-    """The site a URL belongs to, subdomains and `www.` set aside.
-
-    The same key the clusterer groups on: `ir.phonepe.com` is `phonepe.com`
-    here too, or the favoured domain would never match the group it is meant
-    to favour, and one brand would be called two names.
-    """
-    return _registrable_domain_of(url)
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
 
 
 def _consistent_brands(hits: Sequence[SearchHit]) -> dict[str, str]:
@@ -597,54 +585,13 @@ class SearchService:
         favoured = None
         if hits and getattr(hits[0], "nav_hit", 0):
             favoured = _host_of(hits[0].url)
-        # Three quarters of the page for the site the reader named, the rest
-        # for everybody else. A fixed number does not scale: six is most of a
-        # ten-card page and a third of a twenty-card one.
-        favoured_slots = max(
-            self._settings.max_results_per_domain,
-            math.ceil(size * SITELINK_SHARE),
-        )
         hits = ResultClusterer().cluster(
             hits,
             per_domain=self._settings.max_results_per_domain,
             limit=size,
             favoured=favoured,
-            favoured_per_domain=favoured_slots,
+            favoured_per_domain=SITELINK_RESULTS,
         )
-        # The quarter the brand does not take must actually be filled. On a
-        # brand query the pool is that brand and nothing else - 183 phonepe.com
-        # pages own every match for "phonepe" - so the other seats are fetched
-        # with that site excluded rather than hoped for in the same list.
-        # Not gated on `favoured`: a page can fall short because one site holds
-        # every match whether or not the query named it, and a short page is the
-        # same problem either way. The site to step around is whichever owns the
-        # top result.
-        dominant = _host_of(hits[0].url) if hits else None
-        if dominant and len(hits) < size:
-            others = size - len(hits)
-            try:
-                # The cheap, unranked query: the seats being filled are the ones
-                # the brand did not take, so "a few good pages from elsewhere"
-                # is enough. The ranked path costs seconds on a brand name.
-                extra_hits = await self._store.search_other_sites(
-                    query,
-                    exclude_domain=dominant,
-                    limit=others * DOMAIN_CLUSTER_OVERFETCH,
-                    category=category,
-                    language=language,
-                )
-            except Exception:  # noqa: BLE001 - the page is still good without it
-                extra_hits = []
-            if extra_hits:
-                seen_urls = {getattr(hit, "url", "") for hit in hits}
-                fresh = [hit for hit in extra_hits if getattr(hit, "url", "") not in seen_urls]
-                hits = ResultClusterer().cluster(
-                    hits + fresh,
-                    per_domain=self._settings.max_results_per_domain,
-                    limit=size,
-                    favoured=favoured,
-                    favoured_per_domain=favoured_slots,
-                )
         # One brand per site, not per page: a result page that calls one site
         # two names reads as two sites.
         brand_by_host = _consistent_brands(hits)
