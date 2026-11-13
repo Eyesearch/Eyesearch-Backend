@@ -1495,6 +1495,55 @@ class IndexStore:
             return hits
         return ([top, *siblings, *hits[1:]])[:limit]
 
+    async def search_other_sites(
+        self,
+        query: str,
+        *,
+        exclude_domain: str,
+        limit: int = 5,
+        category: str | None = None,
+        language: str | None = None,
+    ) -> list["SearchHit"]:
+        """Results from everywhere except one site, without the ranking pass.
+
+        This fills the seats a brand does not take, so it only needs to find a
+        few pages from other sites - not the best page on the web. The full
+        ranked query costs seconds on a brand name, because ranking every match
+        is the expensive part; the GIN index alone answers this in tens of
+        milliseconds. Measured on "phonepe": 8.1 s through the ranked path,
+        60 ms here.
+        """
+        match = build_tsquery(query)
+        if not match:
+            return []
+        tokens = fts_tokens(query)
+
+        filters = " AND s.domain <> ?"
+        extra: list[Any] = [exclude_domain]
+        if category:
+            filters += " AND p.category = ?"
+            extra.append(category)
+        if language:
+            filters += " AND p.language = ?"
+            extra.append(language)
+
+        sql = (
+            "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
+            "p.brand_name, p.clean_url, p.action_title, "
+            "0.0 AS lexical_score, 0 AS title_hit, 0 AS auth_hit, 0 AS lang_hit, "
+            "0 AS nav_hit, 0 AS root_hit, 0 AS region_hit, "
+            "p.category, c.code AS category_code, p.sitelinks, 0 AS description_only "
+            "FROM pages p "
+            "LEFT JOIN sites s ON s.site_id = p.site_id "
+            "LEFT JOIN categories c ON c.id = p.category_id "
+            f"WHERE p.search_vector @@ to_tsquery('{SEARCH_CONFIG}', ?){filters} "
+            "ORDER BY p.quality_score DESC NULLS LAST, p.page_id DESC "
+            "LIMIT ?"
+        )
+        args: list[Any] = [match, *extra, max(1, int(limit))]
+        result = await self._client.execute(sql, args)
+        return [self._row_to_hit(row, tokens) for row in result.rows]
+
     async def _fast_search(
         self,
         match_query: str,
