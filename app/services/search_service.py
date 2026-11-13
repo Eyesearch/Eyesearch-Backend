@@ -622,13 +622,15 @@ class SearchService:
         if dominant and len(hits) < size:
             others = size - len(hits)
             try:
-                extra_hits = await self._store.search(
+                # The cheap, unranked query: the seats being filled are the ones
+                # the brand did not take, so "a few good pages from elsewhere"
+                # is enough. The ranked path costs seconds on a brand name.
+                extra_hits = await self._store.search_other_sites(
                     query,
+                    exclude_domain=dominant,
                     limit=others * DOMAIN_CLUSTER_OVERFETCH,
-                    offset=offset,
                     category=category,
                     language=language,
-                    exclude_domain=dominant,
                 )
             except Exception:  # noqa: BLE001 - the page is still good without it
                 extra_hits = []
