@@ -249,18 +249,41 @@ def cluster_by_domain(
     return kept
 
 
-def _domain_of(url: str) -> str:
-    """The host a result belongs to, with `www.` set aside.
+#: Second-level labels under which the last three labels are one site.
+_MULTI_PART_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "gov.in", "nic.in", "ac.in", "edu.in", "res.in", "co.in", "org.in",
+        "net.in", "firm.in", "gen.in", "ind.in", "mil.in",
+    }
+)
 
-    The cluster key, so `ksrtc.in` and `www.ksrtc.in` are one host and the
-    per-domain cap applies to both. Keyed on the raw hostname they counted as
-    two, which is how a site's homepage appeared twice in one result page.
+
+def _registrable_domain(host: str) -> str:
+    """The site a host belongs to: `ir.phonepe.com` -> `phonepe.com`."""
+    labels = [label for label in (host or "").split(".") if label]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    last_two = ".".join(labels[-2:])
+    if last_two in _MULTI_PART_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return last_two
+
+
+def _domain_of(url: str) -> str:
+    """The site a result belongs to, with `www.` and subdomains set aside.
+
+    The cluster key. Keyed on the raw hostname, `phonepe.com`, `ir.phonepe.com`
+    and `business.phonepe.com` were three sites, so one brand filled a page
+    through its subdomains while the per-site rules never applied to it.
+    `ksrtc.in` and `www.ksrtc.in` were the smaller version of the same mistake.
     """
     try:
         host = (urlparse(url).hostname or "").lower()
     except ValueError:
         return ""
-    return host[4:] if host.startswith("www.") else host
+    if host.startswith("www."):
+        host = host[4:]
+    return _registrable_domain(host)
 
 
 class ResultClusterer:
