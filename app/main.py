@@ -36,6 +36,8 @@ from app.database import initialize_database, verify_writable
 from app.engine.config import Settings, describe_database_target, get_settings
 from app.engine.store import IndexStore
 from app.live import answer as live_answer
+from app.live import compose as live_compose
+from app.live.router import route as live_route
 from app.live import store as live_store
 from app.live.registry import source_health as live_health
 from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
@@ -680,6 +682,36 @@ async def live_get(
     payload = live_answer.facts_answer(items)
     payload["sources"] = [entry.as_dict() for entry in await live_health(client)]
     return JSONResponse(content=payload)
+
+
+@app.get("/v1/answer")
+async def answer_get(
+    request: Request,
+    q: str = Query(default="", description="The question, as a reader would ask it"),
+    limit: int = Query(default=3, ge=1, le=10),
+):
+    """One answer to a question, from whichever layer can honestly give it.
+
+    A live value when a live source covers the question, the page index when it
+    does not, and `as_of` plus `freshness` on every response. This is the
+    endpoint a chatbot should call: it never has to know that gold lives in one
+    table and pages in another, and it can always say how old the answer is.
+    """
+    query = require_query(q)
+    client = request.app.state.client
+    routed = live_route(query)
+
+    live_answer_payload = await live_compose.from_live(client, routed)
+    if live_answer_payload is not None:
+        live_answer_payload["route"] = routed.as_dict()
+        return JSONResponse(content=live_answer_payload)
+
+    service = get_service(request)
+    payload = await service.search(query, limit=limit)
+    results = payload.get("results", [])
+    composed = live_compose.from_index(results, query)
+    composed["route"] = routed.as_dict()
+    return JSONResponse(content=composed)
 
 
 @app.get("/v1/stats")
