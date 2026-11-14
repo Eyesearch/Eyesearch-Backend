@@ -189,3 +189,33 @@ async def test_a_rate_is_named_by_its_metal_and_purity():
     assert facts["gold.22k.inr.10g"] == ("124401", "INR/10g")
     assert facts["silver.inr.kg"] == ("178000", "INR/kg")
     assert facts["silver.inr.gram"] == ("178", "INR/gram")
+
+
+@pytest.mark.asyncio
+async def test_a_feed_that_answers_with_nothing_is_not_counted_as_working():
+    """A 200 with an empty body is a feed that changed shape, not a quiet day.
+
+    Counting it as success is how a source looks alive while contributing
+    nothing to the answer.
+    """
+    source = NewsSource(http=FakeHTTP(text="<rss><channel></channel></rss>"), feeds={"empty": "https://x.in/rss"})
+
+    assert await source.fetch() == []
+
+
+@pytest.mark.asyncio
+async def test_a_feed_is_asked_to_follow_its_redirect():
+    """Google News answers 302, and without following it the feed is silent."""
+    calls = []
+
+    class RecordingHTTP(FakeHTTP):
+        async def get(self, url, **kwargs):
+            calls.append(kwargs)
+            return self._response
+
+    xml = "<rss><channel><item><title>T</title><link>https://x.in/1</link></item></channel></rss>"
+    source = NewsSource(http=RecordingHTTP(text=xml), feeds={"g": "https://news.google.com/rss"})
+
+    await source.fetch()
+
+    assert calls and calls[0].get("follow_redirects") is True
