@@ -192,6 +192,32 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
     "ON pages(category_id, quality_score DESC)",
     # Lower is crawled sooner. Re-queued pages that were stored under the old
     # 40-character rule carry 0 so they are refetched before fresh discovery.
+    # --- Live facts ---------------------------------------------------------
+    # Values that are true now and wrong shortly: a price, a temperature, a
+    # headline. Deliberately not part of `pages`: a page is useful for months
+    # and a price is useless in an hour, so they cannot share a TTL rule or a
+    # storage ceiling.
+    """
+    CREATE TABLE IF NOT EXISTS live_facts (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        unit TEXT DEFAULT '',
+        source TEXT DEFAULT '',
+        fetched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        ttl_seconds INTEGER DEFAULT 900
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS live_sources (
+        name TEXT PRIMARY KEY,
+        url TEXT DEFAULT '',
+        last_ok TIMESTAMPTZ,
+        last_error TEXT,
+        ok_count INTEGER DEFAULT 0,
+        fail_count INTEGER DEFAULT 0
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_live_facts_fetched ON live_facts(fetched_at)",
     "ALTER TABLE crawl_queue ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 1",
     "CREATE INDEX IF NOT EXISTS idx_crawl_queue_priority "
     "ON crawl_queue(priority, status)",
