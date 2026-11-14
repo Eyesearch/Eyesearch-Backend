@@ -20,6 +20,11 @@ from app.indexer.maintenance import (
     sweep_and_requeue_legacy_pages,
 )
 from app.indexer.queue_hygiene import prune_dead_queue_rows
+
+#: The live feed is reached the same way the pipeline agents are. It never
+#: imports the index and the index never imports it; tests/test_separation.py
+#: holds that line.
+LiveFeedAgent = load_agent("31_live_feed_agent").LiveFeedAgent
 from app.engine.config import Settings, get_settings
 from app.indexer.watchdog import StorageWatchdog
 from app.orchestrator import Orchestrator
@@ -219,6 +224,11 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
     # what keeps `pending` honest: without it, every host that reaches its
     # ceiling leaves its remaining rows queued for ever.
     since_cap_sweep = 0.0
+    # Live facts run on their own clock, inside this loop rather than in a
+    # worker of their own: the box has ~100 MB spare, and a second process
+    # for three HTTP calls is not worth it.
+    since_live = 0.0
+    live_every = max(60.0, float(settings.live_fetch_interval_seconds))
     cap_sweep_every = max(60.0, float(settings.capped_sweep_interval_seconds))
 
     while True:
@@ -244,6 +254,20 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
                         logger.info("queue hygiene: retired %d indexed duplicates", retired)
                 except Exception as error:  # noqa: BLE001 - never kill the loop
                     logger.warning("self-heal sweep failed: %s", error)
+
+            since_live += interval
+            if settings.live_enabled and since_live >= live_every:
+                since_live = 0.0
+                try:
+                    report = await LiveFeedAgent(orchestrator.store.client).run()
+                    if report["stored"]:
+                        logger.info(
+                            "live feed: %d facts stored, %d sources failed",
+                            report["stored"],
+                            report["failed"],
+                        )
+                except Exception as error:  # noqa: BLE001 - never kill the crawl loop
+                    logger.warning("live feed failed: %s", error)
 
             since_cap_sweep += interval
             if since_cap_sweep >= cap_sweep_every:
