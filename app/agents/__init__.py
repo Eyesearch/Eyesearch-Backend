@@ -15,7 +15,7 @@ from __future__ import annotations
 from importlib import import_module
 from types import ModuleType
 
-__all__ = ["AGENT_MODULES", "PIPELINE_AGENTS", "load_agent"]
+__all__ = ["AGENT_MODULES", "LIVE_AGENTS", "PIPELINE_AGENTS", "load_agent"]
 
 #: Every agent module, in pipeline order.
 AGENT_MODULES: tuple[str, ...] = (
@@ -28,6 +28,14 @@ AGENT_MODULES: tuple[str, ...] = (
     "07_classifier_agent",
     "08_language_agent",
     "09_robots_agent",
+)
+
+#: Agents outside the crawl pipeline. Listed separately so the pipeline order
+#: above stays a statement about the crawl and nothing else.
+LIVE_AGENTS: tuple[str, ...] = (
+    # Prices, weather and headlines: a separate system from the crawl, sharing
+    # only the database.
+    "31_live_feed_agent",
 )
 
 
