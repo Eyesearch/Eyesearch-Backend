@@ -35,6 +35,9 @@ from pydantic import BaseModel, Field
 from app.database import initialize_database, verify_writable
 from app.engine.config import Settings, describe_database_target, get_settings
 from app.engine.store import IndexStore
+from app.live import answer as live_answer
+from app.live import store as live_store
+from app.live.registry import source_health as live_health
 from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
 from app.libsql_http import (
     LibsqlClient,
@@ -650,6 +653,33 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
 # ---------------------------------------------------------------------------
 # Stats and OpenSearch
 # ---------------------------------------------------------------------------
+
+
+@app.get("/v1/live")
+async def live_get(
+    request: Request,
+    key: str = Query(default="", description="Exact fact key, e.g. weather.bengaluru.temperature"),
+    prefix: str = Query(default="", description="List every fact whose key starts with this"),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """A value that is true now, with the time it was true.
+
+    Deliberately not `/v1/search`: a price is looked up by key, not ranked, and
+    a caller that gets a ranked list of pages for "today's gold price" will
+    read yesterday's number out of one of them. Every answer carries `as_of`
+    and `freshness` so a caller can say when it was true instead of guessing.
+    """
+    client = request.app.state.client
+    if key:
+        item = await live_store.fact(client, key)
+        if item is None:
+            return JSONResponse(content=live_answer.missing_answer(key), status_code=404)
+        return JSONResponse(content=live_answer.fact_answer(item))
+
+    items = await live_store.all_facts(client, prefix=prefix, limit=limit)
+    payload = live_answer.facts_answer(items)
+    payload["sources"] = [entry.as_dict() for entry in await live_health(client)]
+    return JSONResponse(content=payload)
 
 
 @app.get("/v1/stats")
