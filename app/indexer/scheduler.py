@@ -227,8 +227,11 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
     # Live facts run on their own clock, inside this loop rather than in a
     # worker of their own: the box has ~100 MB spare, and a second process
     # for three HTTP calls is not worth it.
-    since_live = 0.0
+    #: Start the clock at one full interval so the first pass runs on the first
+    #: tick rather than fifteen minutes after boot: a freshly deployed gateway
+    #: that answers /v1/live with nothing for a quarter of an hour looks broken.
     live_every = max(60.0, float(settings.live_fetch_interval_seconds))
+    since_live = live_every
     cap_sweep_every = max(60.0, float(settings.capped_sweep_interval_seconds))
 
     while True:
