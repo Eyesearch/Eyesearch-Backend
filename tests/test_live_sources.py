@@ -66,14 +66,27 @@ async def test_bullion_turns_every_number_into_a_fact():
 
 
 @pytest.mark.asyncio
-async def test_bullion_ignores_text_it_cannot_read_as_a_number():
-    payload = {"data": {"gold": {"24k": {"per_gram": 6500, "note": "before GST"}}}}
+async def test_a_label_is_kept_beside_its_number():
+    """Words are stored too, because a rate's metal is a word.
+
+    Dropping strings left six anonymous rows whose only distinguishing mark was
+    a purity two of them shared, which is how `rates.5` and `rates.6` became
+    impossible to tell apart.
+    """
+    payload = {
+        "data": {
+            "rates": [
+                {"metal": "gold", "purity": "999", "perGram": 6500, "note": "before GST"},
+            ]
+        }
+    }
     source = BullionSource(http=FakeHTTP(payload))
 
-    keys = {key for key, _, _ in await source.fetch()}
+    facts = {key: value for key, value, _ in await source.fetch()}
 
-    assert "bullion.gold.24k.per_gram" in keys
-    assert not any(key.endswith("note") for key in keys)
+    assert facts["bullion.rates.0.perGram"] == "6500"
+    assert facts["bullion.rates.0.metal"] == "gold"
+    assert facts["bullion.rates.0.note"] == "before GST"
 
 
 @pytest.mark.asyncio
@@ -150,3 +163,29 @@ async def test_a_broken_feed_is_skipped_and_the_rest_are_stored():
     assert key.startswith("news.")
     assert value == "Headline"
     assert unit.startswith("https://")
+
+
+@pytest.mark.asyncio
+async def test_a_rate_is_named_by_its_metal_and_purity():
+    """`bullion.rates.2.perGram` is unreadable; `gold.22k.inr.gram` is the ask.
+
+    The service returns anonymous rows, and two of them share a purity, so the
+    metal has to be read from the row itself rather than inferred from position.
+    """
+    payload = {
+        "data": {
+            "rates": [
+                {"metal": "gold", "purity": "999", "perGram": 13580.9, "rupees": 135809},
+                {"metal": "gold", "purity": "916", "perGram": 12440.1, "rupees": 124401},
+                {"metal": "silver", "purity": "999", "perGram": 178, "rupees": 178000},
+            ]
+        }
+    }
+    source = BullionSource(http=FakeHTTP(payload))
+
+    facts = {key: (value, unit) for key, value, unit in await source.fetch()}
+
+    assert facts["gold.24k.inr.gram"] == ("13580.9", "INR/gram")
+    assert facts["gold.22k.inr.10g"] == ("124401", "INR/10g")
+    assert facts["silver.inr.kg"] == ("178000", "INR/kg")
+    assert facts["silver.inr.gram"] == ("178", "INR/gram")
