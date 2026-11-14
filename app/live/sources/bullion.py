@@ -26,6 +26,53 @@ TIMEOUT_SECONDS = 10.0
 ALIASES: dict[str, str] = {}
 
 
+#: Karat for a purity figure. IBJA quotes gold by purity, jewellers quote it by
+#: karat, and a reader asking for "22 carat gold rate" should not have to know
+#: that 916 is what that means.
+KARAT_FOR_PURITY: dict[str, str] = {
+    "999": "24k",
+    "995": "24k",
+    "916": "22k",
+    "750": "18k",
+    "585": "14k",
+}
+
+
+def _friendly(facts: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """Named keys for each rate, built from the metal and purity beside it.
+
+    The service returns an array of anonymous rows. `bullion.rates.2.perGram` is
+    unreadable and indistinguishable from the row next to it; `gold.22k.inr.gram`
+    is what a caller will actually ask for.
+    """
+    rows: dict[str, dict[str, str]] = {}
+    for key, value, _unit in facts:
+        parts = key.split(".")
+        if len(parts) < 4 or parts[0] != NAME or parts[1] != "rates":
+            continue
+        rows.setdefault(parts[2], {})[parts[3]] = value
+
+    named: list[tuple[str, str, str]] = []
+    for index, fields in rows.items():
+        metal = (fields.get("metal") or "").strip().lower()
+        purity = (fields.get("purity") or "").strip()
+        if not metal:
+            continue
+        # Silver is quoted by the kilogram, everything else by the gram.
+        if metal == "silver":
+            if fields.get("rupees"):
+                named.append((f"silver.inr.kg", fields["rupees"], "INR/kg"))
+            if fields.get("perGram"):
+                named.append(("silver.inr.gram", fields["perGram"], "INR/gram"))
+            continue
+        label = KARAT_FOR_PURITY.get(purity, purity or "na")
+        if fields.get("perGram"):
+            named.append((f"{metal}.{label}.inr.gram", fields["perGram"], "INR/gram"))
+        if fields.get("rupees"):
+            named.append((f"{metal}.{label}.inr.10g", fields["rupees"], "INR/10g"))
+    return named
+
+
 def _unit_for(path: str) -> str:
     """What a number in this position is measured in.
 
@@ -44,9 +91,14 @@ def _unit_for(path: str) -> str:
     return ""
 
 
-def _walk(node: Any, path: str = "") -> list[tuple[str, float]]:
-    """Every numeric leaf, keyed by its JSON path."""
-    found: list[tuple[str, float]] = []
+def _walk(node: Any, path: str = "") -> list[tuple[str, str]]:
+    """Every leaf, keyed by its JSON path, as text.
+
+    Strings are kept as well as numbers: the metal a rate belongs to is a word
+    (`gold`, `silver`), and dropping it left six anonymous rows whose only
+    distinguishing mark was a purity that two of them shared.
+    """
+    found: list[tuple[str, str]] = []
     if isinstance(node, dict):
         for key, value in node.items():
             child = f"{path}.{key}" if path else str(key)
@@ -54,13 +106,14 @@ def _walk(node: Any, path: str = "") -> list[tuple[str, float]]:
     elif isinstance(node, list):
         for index, value in enumerate(node):
             found.extend(_walk(value, f"{path}.{index}"))
-    elif isinstance(node, (int, float)) and not isinstance(node, bool):
-        found.append((path, float(node)))
+    elif isinstance(node, bool):
+        pass
+    elif isinstance(node, (int, float)):
+        found.append((path, f"{float(node):g}"))
     elif isinstance(node, str):
-        try:
-            found.append((path, float(node.replace(",", "").strip())))
-        except ValueError:
-            pass
+        text = node.strip()
+        if text:
+            found.append((path, text))
     return found
 
 
@@ -86,7 +139,8 @@ class BullionSource:
         data = payload.get("data", payload) if isinstance(payload, dict) else payload
         facts: list[tuple[str, str, str]] = []
         for path, value in _walk(data, NAME):
-            facts.append((path, f"{value:g}", _unit_for(path)))
+            facts.append((path, value, _unit_for(path)))
+        facts.extend(_friendly(facts))
         for alias, path in ALIASES.items():
             for key, value, unit in list(facts):
                 if key == path:
