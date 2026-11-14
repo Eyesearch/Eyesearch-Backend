@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
     cors_origins: str = "*"
+
+    # --- Live facts ---------------------------------------------------------
+    #: Whether the live feed runs at all. Separate from the crawler switches:
+    #: live facts and crawled pages are independent systems, and turning one
+    #: off must not turn the other off.
+    live_enabled: bool = True
+    #: Seconds between live passes. Fifteen minutes is faster than IBJA
+    #: publishes (twice a working day) and slower than a price moves.
+    live_fetch_interval_seconds: float = 900.0
+    #: Facts held before the oldest are dropped. 20,000 is a few megabytes.
+    live_max_facts: int = 20000
     public_base_url: str = ""
 
     # --- Storage safety -----------------------------------------------------
