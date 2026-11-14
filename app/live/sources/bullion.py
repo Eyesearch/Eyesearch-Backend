@@ -26,6 +26,24 @@ TIMEOUT_SECONDS = 10.0
 ALIASES: dict[str, str] = {}
 
 
+def _unit_for(path: str) -> str:
+    """What a number in this position is measured in.
+
+    IBJA quotes gold twice — `rupees` is the price of ten grams, `perGram` the
+    price of one — so the field name is the only thing that says which. Reading
+    a per-10g figure as a per-gram one is a tenfold error, which is the kind of
+    mistake that gets quoted back at you.
+    """
+    lowered = path.lower()
+    if lowered.endswith("pergram"):
+        return "INR/gram"
+    if lowered.endswith("rupees"):
+        return "INR/10g"
+    if lowered.endswith("change"):
+        return "INR"
+    return ""
+
+
 def _walk(node: Any, path: str = "") -> list[tuple[str, float]]:
     """Every numeric leaf, keyed by its JSON path."""
     found: list[tuple[str, float]] = []
@@ -68,8 +86,7 @@ class BullionSource:
         data = payload.get("data", payload) if isinstance(payload, dict) else payload
         facts: list[tuple[str, str, str]] = []
         for path, value in _walk(data, NAME):
-            unit = "INR/10g" if "10" in path else "INR/gram"
-            facts.append((path, f"{value:g}", unit))
+            facts.append((path, f"{value:g}", _unit_for(path)))
         for alias, path in ALIASES.items():
             for key, value, unit in list(facts):
                 if key == path:

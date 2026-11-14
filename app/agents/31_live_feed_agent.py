@@ -47,17 +47,31 @@ class LiveFeedAgent:
                 )
                 continue
 
+            written = 0
             for key, value, unit in facts:
-                await put_fact(
-                    self._client,
-                    key,
-                    value,
-                    unit=unit,
-                    source=source.name,
-                    ttl_seconds=getattr(source, "ttl_seconds", 900),
+                try:
+                    await put_fact(
+                        self._client,
+                        key,
+                        value,
+                        unit=unit,
+                        source=source.name,
+                        ttl_seconds=getattr(source, "ttl_seconds", 900),
+                    )
+                    written += 1
+                except Exception as error:  # noqa: BLE001 - one bad fact, not one bad pass
+                    # A single unwritable row must not take the rest of the pass
+                    # with it: the sources after this one would never run, and
+                    # the log would say nothing about why.
+                    logger.warning("live fact %s could not be stored: %s", key, error)
+            stored += written
+            if written:
+                await record_ok(self._client, source.name, getattr(source, "url", ""))
+            else:
+                failed += 1
+                await record_fail(
+                    self._client, source.name, "nothing stored", getattr(source, "url", "")
                 )
-                stored += 1
-            await record_ok(self._client, source.name, getattr(source, "url", ""))
 
         expired = await expire(self._client)
         if stored:
