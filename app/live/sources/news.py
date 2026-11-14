@@ -7,14 +7,23 @@ timestamp so the reader knows how old it is.
 
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 NAME = "news"
 TTL_SECONDS = 1800
 TIMEOUT_SECONDS = 10.0
+
+#: Headlines kept per feed. Three is enough to answer "what is the news" and
+#: few enough that one prolific feed cannot fill the answer on its own.
+ITEMS_PER_FEED = 3
+
+USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in; contact@eyesearch.in)"
 
 #: Feeds filled on every pass. Government first: PIB is the one feed whose
 #: headlines are the source of record rather than a report of it.
@@ -64,12 +73,29 @@ class NewsSource:
         try:
             for name, url in self._feeds.items():
                 try:
-                    response = await client.get(url, headers={"Accept": "application/rss+xml, application/xml"})
+                    # Google News answers with a redirect, and not following it
+                    # made that feed look healthy while contributing nothing.
+                    response = await client.get(
+                        url,
+                        headers={
+                            "Accept": "application/rss+xml, application/xml, text/xml;q=0.9",
+                            "User-Agent": USER_AGENT,
+                        },
+                        follow_redirects=True,
+                    )
                     response.raise_for_status()
-                except Exception:
-                    # One feed down is one feed down, not a failed pass.
+                except Exception as error:  # noqa: BLE001 - one feed, not the pass
+                    logger.warning("news feed %s failed: %s", name, error)
                     continue
-                for index, (title, link) in enumerate(parse_items(response.text), start=1):
+
+                items = parse_items(response.text, limit=ITEMS_PER_FEED)
+                if not items:
+                    # A 200 with nothing in it is a feed that has changed shape,
+                    # and silence about that is how a source looks alive while
+                    # contributing nothing.
+                    logger.warning("news feed %s returned no items", name)
+                    continue
+                for index, (title, link) in enumerate(items, start=1):
                     facts.append((f"news.{name}.{index}", title, link))
         finally:
             if self._http is None:
