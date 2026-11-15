@@ -81,3 +81,36 @@ async def test_the_owning_domain_outranks_a_page_that_repeats_the_words(client):
 
     assert hits, "the scheme's own page must be found"
     assert hits[0].url.startswith("https://pmkisan.gov.in")
+
+
+@pytest.mark.asyncio
+async def test_the_entity_page_is_scored_as_the_best_not_the_worst(client):
+    """It was listed first and scored 0%.
+
+    `raw_score` is lower-is-better and the rescale reads it; the default 0.0
+    made the entity page the worst row on a page where every other hit was
+    negative.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            _doc(
+                "https://pmkisan.gov.in/",
+                "Pradhan Mantri Kisan Samman Nidhi",
+                "Beneficiary list and instalment details for registered farmers. " * 3,
+                "score-1",
+            ),
+            _doc(
+                "https://example.in/status",
+                "Kisan status",
+                "A page that mentions kisan status and other things besides. " * 3,
+                "score-2",
+            ),
+        ]
+    )
+
+    hits = await store.search("pm kisan status", limit=5)
+
+    assert hits
+    assert hits[0].url.startswith("https://pmkisan.gov.in")
+    assert hits[0].score == max(hit.score for hit in hits)

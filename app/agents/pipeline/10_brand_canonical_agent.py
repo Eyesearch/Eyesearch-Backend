@@ -83,7 +83,9 @@ def domain_root(url: str) -> str:
 def _host_label(url: str) -> str:
     """The bare host, for when even the domain root yields nothing."""
     try:
-        return (urlsplit(url).hostname or "").lstrip("www.") or ""
+        # `lstrip` takes a set of characters, not a prefix: it turned
+        # `wb.gov.in` into `b.gov.in`. `removeprefix` removes the string.
+        return (urlsplit(url).hostname or "").lower().removeprefix("www.") or ""
     except ValueError:
         return ""
 

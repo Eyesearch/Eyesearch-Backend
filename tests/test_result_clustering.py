@@ -68,25 +68,27 @@ async def test_the_service_returns_a_spread_of_domains(client, settings):
     await store.persist_batch(
         [
             PageDocument(
-                url=f"https://a.gov.in/{i}", domain="a.gov.in", title=f"Karnataka health {i}",
+                url=f"https://a.in/{i}", domain="a.in", title=f"Health scheme {i}",
                 description="d", body_text=BODY, digest=f"cl-a{i}", brand_name="A",
             )
             for i in range(6)
         ]
         + [
             PageDocument(
-                url="https://b.gov.in/1", domain="b.gov.in", title="Karnataka health b",
+                url="https://b.in/1", domain="b.in", title="Health scheme b",
                 description="d", body_text=BODY, digest="cl-b1", brand_name="B",
             )
         ]
     )
 
     service = SearchService(store, settings)
-    payload = await service.search("karnataka health", limit=5)
+    # A query that names no state: a place question now drops every other
+    # state's government host, which is not what this test is about.
+    payload = await service.search("health scheme", limit=5)
     hosts = [item["url"].split("/")[2] for item in payload["results"]]
 
     assert hosts.count("a.gov.in") <= settings.max_results_per_domain
-    assert "b.gov.in" in hosts
+    assert "b.in" in hosts
 
 
 # ---------------------------------------------------------------------------
