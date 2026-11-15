@@ -156,3 +156,15 @@ async def test_a_news_answer_carries_its_newest_headline(client):
     # database's to decide; what matters is that one of them answers.
     assert payload["answer"] in {"US headline one", "US headline two"}
     assert payload["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_rate_reads_as_a_rate(client):
+    """"94.25 rate" is not an answer; a rate has a base, a quote and a value."""
+    await live.put_fact(client, "fx.usd.inr", "94.25", unit="rate", source="currency")
+
+    payload = await from_live(client, route("dollar rate"))
+
+    assert payload is not None
+    assert payload["answer"] == "1 USD = 94.25 INR"
+    assert payload["quote"] == "INR"
