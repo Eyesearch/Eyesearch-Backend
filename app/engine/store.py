@@ -129,6 +129,12 @@ AUTHORITY_DOMAIN_BOOST = 1.5
 #: How many query terms are checked against the title.
 MAX_TITLE_TOKENS = 5
 
+#: Shortest token that may count as a title hit. "pm" is in half the headlines
+#: on the web, so a title containing it said nothing about whether the page was
+#: about PM Kisan — and it was enough to lift an unrelated news item above the
+#: scheme's own site.
+MIN_TITLE_TOKEN_CHARS = 3
+
 #: How many lexical matches survive to be scored with the full boost expression.
 #:
 #: The boosts are six CASE expressions per row, several of them with regex and
@@ -1199,10 +1205,16 @@ class IndexStore:
         # Title boost. Bound parameters appear in SQL order, so the rank query
         # (in the SELECT) is bound before the match query (in the WHERE).
         tokens = fts_tokens(query)
-        title_tokens = tokens[:MAX_TITLE_TOKENS]
+        title_tokens = [
+            token for token in tokens if len(token) >= MIN_TITLE_TOKEN_CHARS
+        ][:MAX_TITLE_TOKENS]
         if title_tokens:
-            title_terms = " OR ".join(
-                "strpos(lower(coalesce(p.title, '')), ?) > 0" for _ in title_tokens
+            # Counted, not OR'd: a page whose title holds all three of
+            # "karnataka scheme status" is a better answer than one whose title
+            # holds "scheme", and the boolean could not tell them apart.
+            title_terms = " + ".join(
+                "CASE WHEN strpos(lower(coalesce(p.title, '')), ?) > 0 THEN 1 ELSE 0 END"
+                for _ in title_tokens
             )
         else:
             title_terms = "false"
@@ -1256,7 +1268,7 @@ class IndexStore:
             "p.brand_name, p.clean_url, p.action_title, "
             f"(-ts_rank_cd(p.search_vector, to_tsquery('{SEARCH_CONFIG}', ?))) "
             "AS lexical_score, "
-            f"CASE WHEN ({title_terms}) THEN 1 ELSE 0 END AS title_hit, "
+            f"({title_terms}) AS title_hit, "
             f"CASE WHEN ({auth_terms}) THEN 1 ELSE 0 END AS auth_hit, "
             # Language alignment: a Kannada query should surface Kannada pages.
             # The code is detected from the query's own script, so nothing is

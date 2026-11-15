@@ -13,7 +13,8 @@ from __future__ import annotations
 import pytest
 
 import app.engine.store as store_module
-from app.engine.store import PageDocument, passage_around_match
+from app.engine.config import Settings
+from app.engine.store import IndexStore, PageDocument, passage_around_match
 
 FILLER = "The department publishes routine notices for district offices. " * 6
 
@@ -345,3 +346,65 @@ async def test_a_shell_does_not_outrank_a_real_page(store):
 
     assert hits
     assert "b.gov.in" in hits[0].url
+
+
+@pytest.mark.asyncio
+async def test_a_title_holding_more_of_the_query_outranks_one_holding_less(client):
+    """"Karnataka scheme status" should prefer a title with all three words.
+
+    The title check used to be a boolean — any one word was worth the same as
+    all of them — so a page titled "Scheme" tied with one titled "Karnataka
+    Scheme Status", and the tie was settled by domain authority.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            _doc(
+                "https://karnataka.gov.in/scheme-status",
+                "Karnataka Scheme Status",
+                "Karnataka scheme status for every district in the state. " * 3,
+                "rank-1",
+            ),
+            _doc(
+                "https://nilgiris.nic.in/",
+                "Scheme",
+                "Karnataka scheme status is mentioned here once among many links. " * 3,
+                "rank-2",
+            ),
+        ]
+    )
+
+    hits = await store.search("karnataka scheme status", limit=5)
+
+    assert hits, "both pages should match"
+    assert hits[0].url.startswith("https://karnataka.gov.in")
+
+
+@pytest.mark.asyncio
+async def test_a_two_letter_word_in_a_title_is_not_a_match(client):
+    """"pm" is in half the headlines on the web, so it says nothing.
+
+    A news item whose title happened to contain "PM" outranked the scheme's own
+    site for "pm kisan status", because any title word earned the same boost.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            _doc(
+                "https://pmkisan.gov.in/status",
+                "PM Kisan status",
+                "Check pm kisan status and beneficiary list for your account. " * 3,
+                "rank-3",
+            ),
+            _doc(
+                "https://newsonair.gov.in/pm-visits",
+                "PM visits rain forest",
+                "The pm visited a rain forest and spoke about kisan welfare and status. " * 3,
+                "rank-4",
+            ),
+        ]
+    )
+
+    hits = await store.search("pm kisan status", limit=5)
+
+    assert hits[0].url.startswith("https://pmkisan.gov.in")
