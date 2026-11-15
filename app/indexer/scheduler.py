@@ -262,7 +262,9 @@ async def _maintain(orchestrator: Orchestrator, settings: Settings, handles: "Wo
             if settings.live_enabled and since_live >= live_every:
                 since_live = 0.0
                 try:
-                    report = await LiveFeedAgent(orchestrator.store.client).run()
+                    report = await LiveFeedAgent(
+                        orchestrator.store.client, settings=settings
+                    ).run()
                     if report["stored"]:
                         logger.info(
                             "live feed: %d facts stored, %d sources failed",
