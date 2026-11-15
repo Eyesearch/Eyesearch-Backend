@@ -635,22 +635,36 @@ class SearchService:
         primary_card = blended.get("primary_card")
         federated = bool(knowledge_cards)
 
+        # One fact, three fields. The envelope used to derive `has_next_page`
+        # and `total_pages` from the length of this page while `has_more` came
+        # from the size of the pool, so a page that came back short after
+        # deduplication said "more results exist" and "this is the last page" at
+        # the same time. The client believed the second one and hid Next.
+        has_more = bool(raw_hits and len(raw_hits) >= over_fetch)
+
         payload = {
             "query": query,
             "page": page_number,
             "limit": size,
+            # How many this page holds. Named for what it is: the count of every
+            # match is not something a broad query can afford, and a client
+            # showing "about N results" was showing the page size as a total.
             "total_estimate": len(results),
             # Whether another page exists. The count of every match is not
             # something this endpoint can afford to compute on a broad query,
             # but "did the pool run full?" answers the only question the client
             # asks of it, and costs nothing: a pool that came back short is a
             # search that has reached its end.
-            "has_more": bool(raw_hits and len(raw_hits) >= over_fetch),
+            "has_more": has_more,
             # The fallback only ever answers page one. Saying so in the envelope
             # is what lets the frontend disable Next instead of offering a page
             # that will always come back empty.
-            "total_pages": 1 if federated else max(1, -(-len(results) // max(1, size))),
-            "has_next_page": False if federated else len(results) >= size,
+            "total_pages": (
+                1
+                if federated or not has_more
+                else max(page_number + 1, -(-len(results) // max(1, size)) + page_number)
+            ),
+            "has_next_page": False if federated else has_more,
             "took_ms": took_ms,
             # The ranked query ran past the statement timeout and the index-only
             # path answered instead. Say so: under crawl load this is why an
