@@ -99,6 +99,16 @@ async def main() -> int:
         await client.close()
 
     print(f"\n{queued} rows {'would be ' if args.dry_run else ''}queued")
+
+    if not args.dry_run:
+        print("\nWhat the queue says about these domains now:")
+        result = await client.execute(
+            "SELECT domain, status, count(*) FROM crawl_queue "
+            "WHERE domain = ANY(?) GROUP BY 1, 2 ORDER BY 3 DESC",
+            ([url.split("//", 1)[1].split("/", 1)[0] for url in GOVERNMENT_SITES],),
+        )
+        for row in result.rows:
+            print(f"  {row[0]:32} {row[1]:10} {row[2]}")
     return 0
 
 
