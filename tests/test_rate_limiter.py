@@ -221,9 +221,11 @@ async def test_a_page_write_sends_quality_score_as_a_json_number():
     stored, so this asserts the serialised request body.
     """
     captured: dict[str, object] = {}
+    bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)
+        bodies.append(captured["body"])
         count = len(captured["body"]["requests"])
         return httpx.Response(
             200,
@@ -269,8 +271,15 @@ async def test_a_page_write_sends_quality_score_as_a_json_number():
     finally:
         await client.close()
 
-    requests = captured["body"]["requests"]
-    # 0 BEGIN, 1 sites, 2 pages, 3/4 counts, 5 COMMIT
+    # The batch is one request; the totals are read afterwards, in another. The
+    # write is the body that opens with BEGIN IMMEDIATE.
+    batch = next(
+        body
+        for body in bodies
+        if body["requests"] and "BEGIN IMMEDIATE" in body["requests"][0]["stmt"]["sql"]
+    )
+    requests = batch["requests"]
+    # 0 BEGIN, 1 sites, 2 pages, ...
     page_args = requests[2]["stmt"]["args"]
 
     assert page_args[5] == {"type": "float", "value": 0.999}
