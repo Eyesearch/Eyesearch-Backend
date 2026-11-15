@@ -33,10 +33,24 @@ def test_a_question_is_routed_to_the_layer_that_can_answer_it(question, kind, ke
     assert routed.key == key
 
 
-def test_a_weather_question_about_an_unfilled_city_is_not_guessed_at():
+def test_a_weather_question_about_a_city_we_do_not_fill_is_not_guessed_at():
     """Answering with some other city's temperature would be worse than a page."""
-    routed = route("weather in shimoga")
-    assert routed.kind == "index"
+    assert route("weather in london").kind == "index"
+
+
+@pytest.mark.parametrize(
+    "question,city",
+    [
+        ("weather in shimoga", "shivamogga"),
+        ("weather in hubli", "hubballi"),
+        ("weather in mangalore", "mangaluru"),
+        ("weather in vizag", "visakhapatnam"),
+        ("weather in guwahati", "guwahati"),
+    ],
+)
+def test_a_city_is_matched_by_the_name_people_use(question, city):
+    """"shimoga" is how people write Shivamogga, and the feed stores the latter."""
+    assert route(question).key == f"weather.{city}.temperature"
 
 
 def test_a_kannada_question_is_understood():
