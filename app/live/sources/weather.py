@@ -14,35 +14,43 @@ URL = "https://api.open-meteo.com/v1/forecast"
 TTL_SECONDS = 1800
 TIMEOUT_SECONDS = 10.0
 
-#: The cities filled on every pass — the state capitals, the large cities of
-#: every state, and the ones people actually ask about. Names, not coordinates:
-#: a hardcoded latitude is a number nobody can check, and `geocode.coordinates`
-#: resolves each one once and keeps it for a year.
+#: The cities filled on every pass. Names, not coordinates: a hardcoded
+#: latitude is a number nobody can check, and `geocode.coordinates` resolves
+#: each one once and keeps it for a year.
+#:
+#: The list is the world's large cities plus every Indian state capital, so a
+#: reader anywhere gets their own weather without asking, and anyone else is
+#: placed on demand from the name they used.
 CITIES: tuple[str, ...] = (
-    # metros and union territory capitals
+    # India
     "delhi", "mumbai", "kolkata", "chennai", "bengaluru", "hyderabad",
-    "ahmedabad", "pune", "surat", "jaipur", "lucknow", "kanpur", "nagpur",
-    "indore", "thane", "bhopal", "visakhapatnam", "patna", "vadodara",
-    "ghaziabad", "ludhiana", "agra", "nashik", "faridabad", "meerut",
-    "rajkot", "varanasi", "srinagar", "aurangabad", "dhanbad", "amritsar",
-    "allahabad", "prayagraj", "ranchi", "howrah", "coimbatore", "jabalpur",
-    "gwalior", "vijayawada", "jodhpur", "madurai", "raipur", "kota",
-    "chandigarh", "guwahati", "solapur", "hubballi", "tiruchirappalli",
-    "bareilly", "mysuru", "tiruppur", "gurugram", "aligarh", "jalandhar",
-    "bhubaneswar", "salem", "warangal", "guntur", "bhiwandi", "saharanpur",
-    "gorakhpur", "bikaner", "amravati", "noida", "jamshedpur", "bhilai",
-    "cuttack", "firozabad", "kochi", "nellore", "bhavnagar", "dehradun",
-    "durgapur", "asansol", "rourkela", "nanded", "kolhapur", "ajmer",
-    "akola", "gulbarga", "kalaburagi", "jamnagar", "ujjain", "loni",
-    "siliguri", "jhansi", "ulhasnagar", "jammu", "sangli", "mangaluru",
-    "erode", "belagavi", "ambattur", "tirunelveli", "malegaon", "gaya",
-    "thiruvananthapuram", "udaipur", "kakinada", "davanagere", "kozhikode",
-    "kurnool", "rajahmundry", "bokaro", "south dumdum", "bellary",
-    "patiala", "gopalpur", "agartala", "bhagalpur", "muzaffarnagar",
-    "bhatinda", "puducherry", "shimla", "imphal", "shillong", "aizawl",
-    "kohima", "gangtok", "itanagar", "panaji", "dispur", "port blair",
-    "silchar", "haridwar", "nainital", "darjeeling", "ooty", "vijayapura",
-    "hospet", "shivamogga", "tumakuru", "chikkamagaluru", "udupi",
+    "ahmedabad", "pune", "jaipur", "lucknow", "kanpur", "nagpur", "indore",
+    "bhopal", "patna", "visakhapatnam", "vadodara", "coimbatore", "kochi",
+    "guwahati", "chandigarh", "bhubaneswar", "thiruvananthapuram", "ranchi",
+    "raipur", "dehradun", "shimla", "srinagar", "jammu", "gangtok",
+    "shillong", "imphal", "aizawl", "kohima", "agartala", "itanagar",
+    "panaji", "mysuru", "mangaluru", "hubballi", "belagavi", "shivamogga",
+    "vijayawada", "madurai", "tiruchirappalli", "salem", "warangal",
+    # Asia
+    "tokyo", "osaka", "seoul", "beijing", "shanghai", "hong kong",
+    "singapore", "kuala lumpur", "jakarta", "bangkok", "manila", "hanoi",
+    "dhaka", "colombo", "kathmandu", "karachi", "lahore", "islamabad",
+    "dubai", "abu dhabi", "doha", "riyadh", "kuwait city", "muscat",
+    "manama", "tehran", "baghdad", "tel aviv", "istanbul", "tashkent",
+    # Europe
+    "london", "paris", "berlin", "madrid", "rome", "amsterdam", "brussels",
+    "vienna", "zurich", "stockholm", "oslo", "copenhagen", "helsinki",
+    "dublin", "lisbon", "prague", "warsaw", "budapest", "athens", "moscow",
+    "kyiv", "bucharest", "sofia", "belgrade", "zagreb",
+    # Americas
+    "new york", "los angeles", "chicago", "houston", "toronto", "vancouver",
+    "montreal", "mexico city", "sao paulo", "rio de janeiro", "buenos aires",
+    "bogota", "lima", "santiago", "san francisco", "seattle", "miami",
+    "washington", "boston", "atlanta", "dallas",
+    # Africa and Oceania
+    "cairo", "lagos", "nairobi", "johannesburg", "cape town", "accra",
+    "addis ababa", "casablanca", "dakar", "sydney", "melbourne", "brisbane",
+    "perth", "auckland", "wellington",
 )
 
 #: How many cities go into one request. Open-Meteo accepts several coordinates

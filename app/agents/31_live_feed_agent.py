@@ -44,8 +44,13 @@ class LiveFeedAgent:
         for cls in SOURCES:
             if cls.__name__ == "WeatherSource":
                 continue
+            if cls.__name__ == "MetalsSource":
+                # Gold in dirhams needs the day's rate, which the currency
+                # source stores a moment earlier in the same pass.
+                built.append(cls(client=self._client))
+                continue
             built.append(cls())
-        built.insert(1, WeatherSource(cities=self._city_cache))
+        built.append(WeatherSource(cities=self._city_cache))
         return built
 
     async def _resolve_cities(self) -> None:

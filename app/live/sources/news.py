@@ -25,13 +25,26 @@ ITEMS_PER_FEED = 3
 
 USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in; contact@eyesearch.in)"
 
-#: Feeds filled on every pass. Government first: PIB is the one feed whose
-#: headlines are the source of record rather than a report of it.
+#: Feeds filled on every pass, one per country edition where the publisher
+#: offers one. Government first: PIB is the feed whose headlines are the source
+#: of record rather than a report of it.
+#:
+#: The Google News URLs carry `hl`, `gl` and `ceid`, and all three matter: a
+#: request that loses them is served the American edition, which is how an
+#: Indian product ended up quoting a story about a Trump golf course.
 FEEDS: dict[str, str] = {
     "pib": "https://www.pib.gov.in/RssMain.aspx",
     "thehindu": "https://www.thehindu.com/news/national/feeder/default.rss",
     "toi": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
-    "google_india": "https://news.google.com/rss",
+    "in": "https://news.google.com/rss",
+    "in_kn": "https://news.google.com/rss",
+    "in_hi": "https://news.google.com/rss",
+    "us": "https://news.google.com/rss",
+    "gb": "https://news.google.com/rss",
+    "ae": "https://news.google.com/rss",
+    "au": "https://news.google.com/rss",
+    "ca": "https://news.google.com/rss",
+    "sg": "https://news.google.com/rss",
 }
 
 _TAG = re.compile(r"<[^>]+>")

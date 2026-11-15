@@ -267,3 +267,56 @@ async def test_a_city_the_geocoder_cannot_find_is_skipped(client):
             return None
 
     assert await coordinates("notarealplace", client, http=Empty()) is None
+
+
+@pytest.mark.asyncio
+async def test_currency_quotes_the_dollar_against_the_world():
+    from app.live.sources.currency import CurrencySource
+
+    payload = {"base": "USD", "rates": {"INR": 88.5, "AED": 3.67, "EUR": 0.92}}
+    source = CurrencySource(http=FakeHTTP(payload))
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["fx.usd.inr"] == "88.5"
+    assert facts["fx.usd.aed"] == "3.67"
+    assert facts["fx.usd.usd"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_gold_is_quoted_in_another_country_by_arithmetic(client):
+    """Dollars per ounce, times the rate, over the grams in an ounce."""
+    from app.live import store as live_store
+    from app.live.sources.metals import GRAMS_PER_OUNCE, MetalsSource
+
+    await live_store.put_fact(client, "fx.usd.aed", "3.67", unit="rate", source="currency")
+    source = MetalsSource(client=client, http=FakeHTTP({"value": 4200.0}))
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["gold.spot.usd.oz"] == "4200"
+    assert float(facts["gold.spot.usd.gram"]) == pytest.approx(4200 / GRAMS_PER_OUNCE, rel=1e-3)
+    assert float(facts["gold.spot.aed.gram"]) == pytest.approx(4200 * 3.67 / GRAMS_PER_OUNCE, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_a_currency_with_no_rate_is_skipped_rather_than_guessed(client):
+    from app.live.sources.metals import MetalsSource
+
+    source = MetalsSource(client=client, http=FakeHTTP({"value": 4200.0}))
+
+    facts = {key for key, _, _ in await source.fetch()}
+
+    assert "gold.spot.usd.gram" in facts
+    assert "gold.spot.aed.gram" not in facts
+
+
+@pytest.mark.asyncio
+async def test_each_country_edition_is_its_own_feed():
+    """An edition that loses its parameters is the American one, not the Indian."""
+    from app.live.sources.news import FEEDS
+
+    assert "gl=US" in FEEDS["us"]
+    assert "gl=IN" in FEEDS["in"]
+    assert "hl=kn" in FEEDS["in_kn"]
+    assert FEEDS["us"] != FEEDS["in"]

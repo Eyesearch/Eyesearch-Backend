@@ -64,6 +64,41 @@ BULLION_WORDS = ("gold", "silver", "bullion", "ಚಿನ್ನ", "ಬೆಂಗ�
 WEATHER_WORDS = ("weather", "temperature", "forecast", "rain", "ಹವಾಮಾನ", "ಮಳೆ", "mausam")
 NEWS_WORDS = ("news", "headline", "ಸುದ್ದಿ", "breaking", "headlines")
 
+#: Country editions a news question can name. The key is what the reader might
+#: type, the value is the feed it means.
+NEWS_EDITIONS: dict[str, str] = {
+    "us": "us", "usa": "us", "america": "us", "united states": "us",
+    "uk": "gb", "britain": "gb", "england": "gb", "london": "gb",
+    "uae": "ae", "dubai": "ae", "emirates": "ae",
+    "australia": "au", "canada": "ca", "singapore": "sg",
+    "india": "in", "karnataka": "in", "kerala": "in", "tamil nadu": "in",
+    "kannada": "in_kn", "hindi": "in_hi",
+}
+
+#: Currencies a gold question can name, and the fact each one means.
+GOLD_CURRENCIES: dict[str, str] = {
+    # currencies, including the plurals people actually type
+    "dollar": "usd", "dollars": "usd", "usd": "usd", "us": "usd",
+    "euro": "eur", "euros": "eur", "eur": "eur",
+    "pound": "gbp", "pounds": "gbp", "gbp": "gbp", "sterling": "gbp",
+    "dirham": "aed", "dirhams": "aed", "aed": "aed",
+    "riyal": "sar", "riyals": "sar", "sar": "sar",
+    "singapore dollar": "sgd", "sgd": "sgd",
+    "australian dollar": "aud", "aud": "aud",
+    "canadian dollar": "cad", "cad": "cad",
+    "yen": "jpy", "jpy": "jpy",
+    # places, because "gold price in dubai" is how the question is asked
+    "dubai": "aed", "abu dhabi": "aed", "sharjah": "aed",
+    "london": "gbp", "britain": "gbp", "england": "gbp", "uk": "gbp",
+    "new york": "usd", "america": "usd", "usa": "usd",
+    "paris": "eur", "germany": "eur", "france": "eur", "italy": "eur",
+    "tokyo": "jpy", "japan": "jpy",
+    "singapore": "sgd", "australia": "aud", "canada": "cad",
+    "saudi": "sar", "riyadh": "sar",
+    # India keeps the IBJA rate, so its words route back to the retail quote
+    "rupee": "inr", "rupees": "inr", "inr": "inr", "india": "inr",
+}
+
 
 @dataclass
 class Route:
@@ -112,6 +147,15 @@ def route(query: str) -> Route:
             if re.search(r"\bkg\b|kilo", lowered):
                 return Route("bullion", "silver.inr.kg", reason="silver by the kilogram")
             return Route("bullion", "silver.inr.gram", reason="silver by the gram")
+        # A question that names a currency or a country other than India wants
+        # the spot price in that currency. IBJA quotes the Indian retail rate and
+        # nothing else, so answering "gold price in dubai" with it would be a
+        # rupee figure under a dirham question.
+        for word, code in GOLD_CURRENCIES.items():
+            if re.search(rf"\b{re.escape(word)}\b", lowered):
+                if code == "inr":
+                    break
+                return Route("bullion", f"gold.spot.{code}.gram", reason=f"spot gold in {code}")
         karat = _karat(lowered)
         if re.search(r"\b10\s*(g|gm|gram)\b", lowered):
             return Route("bullion", f"gold.{karat}.inr.10g", reason=f"{karat} gold per ten grams")
@@ -127,6 +171,9 @@ def route(query: str) -> Route:
         return Route("index", reason="weather question without a city we fill")
 
     if any(word in lowered for word in NEWS_WORDS):
+        for word, edition in NEWS_EDITIONS.items():
+            if re.search(rf"\b{re.escape(word)}\b", lowered):
+                return Route("news", edition, reason=f"{edition} headlines")
         return Route("news", reason="headlines")
 
     return Route("index", reason="no live source for this")
