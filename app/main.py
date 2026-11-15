@@ -38,6 +38,7 @@ from app.engine.store import IndexStore
 from app.live import answer as live_answer
 from app.live import compose as live_compose
 from app.live.router import route as live_route
+from app.security import KeyLimiter, record_call, verify_key
 from app.live import store as live_store
 from app.live.registry import source_health as live_health
 from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
@@ -324,6 +325,93 @@ async def rate_limit(request: Request, call_next):
                 headers={"Retry-After": str(retry_after)},
             )
     return await call_next(request)
+
+
+#: Paths a caller may reach without a key. Everything else needs one: the
+#: search gateway is a paid product's backend, and an open endpoint is a
+#: free one for whoever finds it.
+OPEN_PATHS: tuple[str, ...] = ("/", "/health", "/healthz", "/ready", "/opensearch.xml")
+
+#: Paths that need a key. Listed rather than implied, so a new endpoint is a
+#: decision someone made instead of something that happened to be open.
+KEYED_PREFIXES: tuple[str, ...] = ("/v1/",)
+
+_API_KEY_LIMITER = KeyLimiter()
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """Check `X-API-Key`, then the per-minute and daily allowances.
+
+    401 when the key is missing, unknown or revoked; 429 when either limit is
+    spent. The counters are recorded only for calls that are allowed, so a
+    rejected request cannot use up the quota of the key it guessed.
+    """
+    path = request.url.path
+    needs_key = any(path.startswith(prefix) for prefix in KEYED_PREFIXES)
+    if not needs_key or path in OPEN_PATHS or request.method == "OPTIONS":
+        return await call_next(request)
+
+    client = getattr(request.app.state, "client", None)
+    if client is None:
+        return await call_next(request)
+
+    key = request.headers.get("X-API-Key") or ""
+    record = await verify_key(client, key)
+    if record is None or record.revoked:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": {
+                    "code": "unauthorized",
+                    "message": (
+                        "A valid API key is required. Send it in the X-API-Key header."
+                        if not key
+                        else "That API key is not valid, or has been revoked."
+                    ),
+                    "retryable": False,
+                }
+            },
+        )
+
+    allowed, remaining = _API_KEY_LIMITER.allow(record.key_id, record.rate_limit_per_minute)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "rate_limited",
+                    "message": "Too many requests for this key. Try again shortly.",
+                    "retryable": True,
+                }
+            },
+            headers={
+                "Retry-After": "60",
+                "X-RateLimit-Limit": str(record.rate_limit_per_minute),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+    if record.daily_quota > 0 and record.calls_today >= record.daily_quota:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "quota_exhausted",
+                    "message": "This key has used its allowance for today.",
+                    "retryable": True,
+                }
+            },
+            headers={"X-RateLimit-Remaining": "0"},
+        )
+
+    await record_call(client, record.key_id)
+    response = await call_next(request)
+    response.headers["X-RateLimit-Limit"] = str(record.rate_limit_per_minute)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    response.headers["X-Quota-Limit"] = str(record.daily_quota)
+    response.headers["X-Quota-Remaining"] = str(max(0, record.daily_quota - record.calls_today - 1))
+    return response
 
 
 app.add_middleware(
