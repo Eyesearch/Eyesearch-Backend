@@ -41,3 +41,21 @@ def test_the_government_seed_script_imports():
     assert callable(module.main)
     assert len(module.GOVERNMENT_SITES) > 20
     assert "https://pmkisan.gov.in/" in module.GOVERNMENT_SITES
+
+
+def test_the_district_seed_uses_the_registry_names():
+    """`mysuru.nic.in` does not exist; `mysore.nic.in` does.
+
+    A state portal that answers 403 is not reachable, but its districts are on
+    the same `.nic.in` estate that already crawls for other states.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "seed_government_districts", SCRIPT.parent / "seed_government.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert len(module.DISTRICT_SITES) > 20
+    assert "https://mysore.nic.in/" in module.DISTRICT_SITES
+    assert "https://bengaluruurban.nic.in/" in module.DISTRICT_SITES
+    assert not any("mysuru" in url for url in module.DISTRICT_SITES)
