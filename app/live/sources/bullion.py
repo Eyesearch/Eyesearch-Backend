@@ -18,7 +18,7 @@ import httpx
 
 NAME = "bullion"
 URL = "https://api.dharun.dev/v1/bullion"
-TTL_SECONDS = 900
+TTL_SECONDS = 1800
 TIMEOUT_SECONDS = 10.0
 
 #: Friendly keys mapped to the paths the source actually uses. Filled in from a
