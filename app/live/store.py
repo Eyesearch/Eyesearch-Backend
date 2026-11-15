@@ -14,7 +14,12 @@ from typing import Any, Sequence
 logger = logging.getLogger(__name__)
 
 #: A fact older than this is not returned as fresh. Per-fact TTL overrides it.
-DEFAULT_TTL_SECONDS = 900
+#:
+#: Twice the fifteen-minute refresh interval, not equal to it: with an equal
+#: TTL there is a window before every pass in which every price is already
+#: stale, and a reader asking at the wrong minute is told the data is old while
+#: the refresh is still running.
+DEFAULT_TTL_SECONDS = 1800
 
 #: How many facts the table may hold before the oldest are dropped. The ceiling
 #: is a row count rather than bytes: 20,000 facts is a few megabytes, and
