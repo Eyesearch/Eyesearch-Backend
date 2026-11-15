@@ -11,7 +11,7 @@ import httpx
 
 NAME = "weather"
 URL = "https://api.open-meteo.com/v1/forecast"
-TTL_SECONDS = 900
+TTL_SECONDS = 1800
 TIMEOUT_SECONDS = 10.0
 
 #: The cities filled on every pass — the state capitals, the large cities of
