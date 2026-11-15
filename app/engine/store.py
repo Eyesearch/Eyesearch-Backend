@@ -76,6 +76,8 @@ from app.agents import load_agent
 
 logger = logging.getLogger(__name__)
 
+from app.engine.places import detect as detect_place, other_domains
+
 LanguageAgent = load_agent("08_language_agent").LanguageAgent
 autosuggest = load_agent("39_autosuggest_trie_agent")
 
@@ -133,6 +135,12 @@ MAX_TITLE_TOKENS = 5
 #: than a count. Counting 129,000 pages read half a gigabyte from disk on the
 #: live box and took ten seconds — inside the transaction that writes a batch.
 ESTIMATE_FROM = 1000
+
+#: What the named place's own portal is worth, and what another state's portal
+#: costs. A Karnataka question answered by karnataka.gov.in is right; answered by
+#: nilgiris.nic.in it is wrong, however many times the page says "Karnataka".
+PLACE_BOOST = 6.0
+OTHER_PLACE_PENALTY = 4.0
 
 #: Shortest token that may count as a title hit. "pm" is in half the headlines
 #: on the web, so a title containing it said nothing about whether the page was
@@ -1269,6 +1277,23 @@ class IndexStore:
             f"s.domain LIKE '%{suffix}'" for suffix in AUTHORITY_SUFFIXES
         )
 
+        # A query that names a place is answered by that place. The portals come
+        # from a table of every state and union territory, so nothing here is
+        # specific to one of them: the page on the named state's own portal is
+        # the answer, and a page on another state's portal is a wrong answer
+        # however often it repeats the word.
+        place = detect_place(query)
+        if place is not None:
+            place_terms = " OR ".join(
+                f"s.domain = '{domain}'" for domain in place.domains
+            )
+            other_terms = " OR ".join(
+                f"s.domain = '{domain}'" for domain in other_domains(place)[:120]
+            )
+        else:
+            place_terms = "false"
+            other_terms = "false"
+
         # ts_rank is higher-is-better; bm25 was negative and lower-is-better.
         # Negating it here keeps the Python scoring, the boosts and the ORDER BY
         # exactly as they were, so none of the ranking maths had to change.
@@ -1356,7 +1381,13 @@ class IndexStore:
             # Carried into the outer sort so a page that only half exists - a
             # JavaScript shell, a two-line stub - cannot outrank a real one on
             # a lexical match alone. It was the one signal the ranking ignored.
-            "COALESCE(p.quality_score, 1.0) AS quality "
+            "COALESCE(p.quality_score, 1.0) AS quality, "
+            # Appended after every other column: the row mapper reads by
+            # position, and inserting these beside `title_hit` shifted every
+            # column after them, so the ranking silently read quality as a
+            # category code.
+            f"CASE WHEN ({place_terms}) THEN 1 ELSE 0 END AS place_hit, "
+            f"CASE WHEN ({other_terms}) THEN 1 ELSE 0 END AS other_place_hit "
             # Two-stage ranking. The inner select is the only one that reads
             # the whole match set, and it carries nothing but the lexically best
             # rows forward; the six boost expressions are then evaluated once
@@ -1393,6 +1424,7 @@ class IndexStore:
             "  - ? * nav_hit - ? * root_hit * nav_hit "
             "  + ? * description_only "
             "  - ? * region_hit "
+            "  - ? * place_hit + ? * other_place_hit "
             "  - ? * quality) ASC "
             "LIMIT ? OFFSET ?"
             ") top_slice"
@@ -1427,6 +1459,8 @@ class IndexStore:
             ROOT_PIN_BOOST,
             DESCRIPTION_ONLY_PENALTY,
             REGIONAL_BOOST,
+            PLACE_BOOST,
+            OTHER_PLACE_PENALTY,
             QUALITY_BOOST,
             limit,
             offset,
@@ -1485,6 +1519,8 @@ class IndexStore:
                     ROOT_PIN_BOOST,
                     DESCRIPTION_ONLY_PENALTY,
                     REGIONAL_BOOST,
+                    PLACE_BOOST,
+                    OTHER_PLACE_PENALTY,
                     QUALITY_BOOST,
                     limit,
                     offset,
