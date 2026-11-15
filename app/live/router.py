@@ -16,15 +16,47 @@ from dataclasses import dataclass
 
 #: Cities the weather source fills. A question naming one of these is answered
 #: live; one naming somewhere else is not guessed at.
-WEATHER_CITIES: tuple[str, ...] = (
-    "bengaluru", "bangalore", "mysuru", "mysore", "mumbai", "delhi",
-    "new delhi", "chennai", "hyderabad", "kolkata", "pune",
+from app.live.sources.weather import CITIES as FILLED_CITIES
+
+#: The cities the weather source fills, plus the spellings people use for them.
+#: Read from the source rather than repeated, so adding a city to the feed adds
+#: it to the router in the same edit.
+WEATHER_CITIES: tuple[str, ...] = FILLED_CITIES + (
+    "bangalore", "mysore", "new delhi", "bombay", "madras", "calcutta",
+    "trivandrum", "cochin", "benares", "allahabad", "gurgaon", "noida",
 )
 
 CITY_ALIASES: dict[str, str] = {
     "bangalore": "bengaluru",
     "mysore": "mysuru",
     "new delhi": "delhi",
+    "bombay": "mumbai",
+    "madras": "chennai",
+    "calcutta": "kolkata",
+    "trivandrum": "thiruvananthapuram",
+    "cochin": "kochi",
+    "benares": "varanasi",
+    "gurgaon": "gurugram",
+    "shimoga": "shivamogga",
+    "hubli": "hubballi",
+    "mangalore": "mangaluru",
+    "belgaum": "belagavi",
+    "gulbarga": "kalaburagi",
+    "tumkur": "tumakuru",
+    "chickmagalur": "chikkamagaluru",
+    "udipi": "udupi",
+    "pondicherry": "puducherry",
+    "simla": "shimla",
+    "baroda": "vadodara",
+    "poona": "pune",
+    "calicut": "kozhikode",
+    "tellicherry": "kannur",
+    "quilon": "kollam",
+    "tanjore": "thanjavur",
+    "trichy": "tiruchirappalli",
+    "vizag": "visakhapatnam",
+    "vijaywada": "vijayawada",
+    "jubbulpore": "jabalpur",
 }
 
 #: Words that make a question about a live value rather than a page.
@@ -57,8 +89,14 @@ def _karat(query: str) -> str:
 
 
 def _city(query: str) -> str | None:
+    """The city a question names, resolved to the name the feed stores it under.
+
+    The alias keys are searched as well as the city names: "shimoga" is how
+    people write Shivamogga, and a router that only knew the official spelling
+    sent the question to the index.
+    """
     lowered = query.lower()
-    for city in WEATHER_CITIES:
+    for city in WEATHER_CITIES + tuple(CITY_ALIASES):
         if re.search(rf"\b{re.escape(city)}\b", lowered):
             return CITY_ALIASES.get(city, city)
     return None
