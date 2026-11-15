@@ -34,8 +34,12 @@ def test_a_question_is_routed_to_the_layer_that_can_answer_it(question, kind, ke
 
 
 def test_a_weather_question_about_a_city_we_do_not_fill_is_not_guessed_at():
-    """Answering with some other city's temperature would be worse than a page."""
-    assert route("weather in london").kind == "index"
+    """Answering with some other city's temperature would be worse than a page.
+
+    London is filled now that the feed is worldwide, so the example is a place
+    that is not a city at all.
+    """
+    assert route("weather in the sahara desert").kind == "index"
 
 
 @pytest.mark.parametrize(
@@ -55,6 +59,30 @@ def test_a_city_is_matched_by_the_name_people_use(question, city):
 
 def test_a_kannada_question_is_understood():
     assert route("ಚಿನ್ನದ ಬೆಲೆ").kind == "bullion"
+
+
+@pytest.mark.parametrize(
+    "question,key",
+    [
+        ("gold price in dubai", "gold.spot.aed.gram"),
+        ("gold price in dollars", "gold.spot.usd.gram"),
+        ("gold rate in london", "gold.spot.gbp.gram"),
+        ("gold price in india", "gold.22k.inr.gram"),
+        ("22k gold rate", "gold.22k.inr.gram"),
+    ],
+)
+def test_gold_is_answered_in_the_currency_the_question_names(question, key):
+    """IBJA quotes the Indian retail rate; everywhere else is the spot price."""
+    assert route(question).key == key
+
+
+@pytest.mark.parametrize(
+    "question,edition",
+    [("us news", "us"), ("uk news", "gb"), ("kannada news", "in_kn")],
+)
+def test_a_news_question_can_name_its_country(question, edition):
+    routed = route(question)
+    assert routed.kind == "news" and routed.key == edition
 
 
 @pytest.mark.asyncio
