@@ -27,29 +27,25 @@ class LiveFeedAgent:
 
     def __init__(self, client, *, sources=None) -> None:
         self._client = client
-        if sources is None:
-            sources = self._build_sources()
         self._sources = sources
+        self._city_cache: dict[str, tuple[float, float]] = {}
 
     def _build_sources(self):
         """Every source, with the weather cities resolved first.
 
-        The weather source cannot ask about a city it has no coordinates for, so
-        the names are geocoded here — cached for a year in `live_facts` — and
-        handed over as a map. Everything else needs no preparation.
+        Built at run time, not at construction: the weather source cannot ask
+        about a city it has no coordinates for, and the coordinates are only
+        known once `_resolve_cities` has run. Building this in `__init__` handed
+        the source an empty map, so the pass ran, reported success, and fetched
+        no weather at all.
         """
         built = []
         for cls in SOURCES:
             if cls.__name__ == "WeatherSource":
                 continue
             built.append(cls())
-        built.insert(1, WeatherSource(cities=self._cities))
+        built.insert(1, WeatherSource(cities=self._city_cache))
         return built
-
-    @property
-    def _cities(self) -> dict[str, tuple[float, float]]:
-        """Coordinates for every configured city, from the cache."""
-        return getattr(self, "_city_cache", {})
 
     async def _resolve_cities(self) -> None:
         """Fill `self._city_cache` before the pass, geocoding only what is new."""
@@ -66,7 +62,8 @@ class LiveFeedAgent:
         stored = 0
         failed = 0
         await self._resolve_cities()
-        for source in self._sources:
+        sources = self._sources if self._sources is not None else self._build_sources()
+        for source in sources:
             try:
                 facts = await source.fetch()
             except Exception as error:  # noqa: BLE001 - one source must not stop the pass
