@@ -15,6 +15,8 @@ import logging
 
 from app.live.registry import record_fail, record_ok
 from app.live.sources import SOURCES
+from app.live.sources.geocode import coordinates
+from app.live.sources.weather import CITIES as WEATHER_CITIES, WeatherSource
 from app.live.store import expire, put_fact
 
 logger = logging.getLogger(__name__)
@@ -25,11 +27,45 @@ class LiveFeedAgent:
 
     def __init__(self, client, *, sources=None) -> None:
         self._client = client
-        self._sources = sources if sources is not None else [cls() for cls in SOURCES]
+        if sources is None:
+            sources = self._build_sources()
+        self._sources = sources
+
+    def _build_sources(self):
+        """Every source, with the weather cities resolved first.
+
+        The weather source cannot ask about a city it has no coordinates for, so
+        the names are geocoded here — cached for a year in `live_facts` — and
+        handed over as a map. Everything else needs no preparation.
+        """
+        built = []
+        for cls in SOURCES:
+            if cls.__name__ == "WeatherSource":
+                continue
+            built.append(cls())
+        built.insert(1, WeatherSource(cities=self._cities))
+        return built
+
+    @property
+    def _cities(self) -> dict[str, tuple[float, float]]:
+        """Coordinates for every configured city, from the cache."""
+        return getattr(self, "_city_cache", {})
+
+    async def _resolve_cities(self) -> None:
+        """Fill `self._city_cache` before the pass, geocoding only what is new."""
+        resolved: dict[str, tuple[float, float]] = {}
+        for city in WEATHER_CITIES:
+            point = await coordinates(city, self._client)
+            if point is not None:
+                resolved[city] = point
+        self._city_cache = resolved
+        if resolved:
+            logger.info("live feed: %d cities placed", len(resolved))
 
     async def run(self) -> dict[str, int]:
         stored = 0
         failed = 0
+        await self._resolve_cities()
         for source in self._sources:
             try:
                 facts = await source.fetch()
