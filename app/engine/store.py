@@ -801,7 +801,7 @@ class IndexStore:
         if not domain:
             return 0
         result = await self._client.execute(
-            "UPDATE crawl_queue SET status = 'skipped' "
+            "UPDATE crawl_queue SET status = 'skipped', last_error = 'domain_cap' "
             "WHERE status = 'pending' AND domain = ?",
             (domain,),
         )
@@ -879,22 +879,31 @@ class IndexStore:
         self,
         failed_ids: Sequence[int] = (),
         skipped_ids: Sequence[int] = (),
+        *,
+        reason: str = "",
     ) -> tuple[int, int]:
         """Close failed and skipped rows in a single round trip.
 
         These were two separate calls, and every round trip costs a slot
         against the rate limiter that bounds the whole crawl.
+
+        The reason is written, not just counted. Nine hundred rows sitting at
+        `failed` with an empty `last_error` is a queue that cannot be diagnosed:
+        the number is visible and the cause is not.
         """
         statements: list[tuple[str, Sequence[Any]]] = [
             (
-                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1 "
-                "WHERE id = ?",
-                (rowid,),
+                "UPDATE crawl_queue SET status = 'failed', retry_count = retry_count + 1, "
+                "last_error = ? WHERE id = ?",
+                (reason or "rejected", rowid),
             )
             for rowid in failed_ids
         ]
         statements.extend(
-            ("UPDATE crawl_queue SET status = 'skipped' WHERE id = ?", (rowid,))
+            (
+                "UPDATE crawl_queue SET status = 'skipped', last_error = ? WHERE id = ?",
+                (reason or "skipped", rowid),
+            )
             for rowid in skipped_ids
         )
         if not statements:
