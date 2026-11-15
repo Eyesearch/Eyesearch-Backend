@@ -532,12 +532,17 @@ class Orchestrator:
             outcome.queue_failed += await self._store.mark_retryable_failed(rowids, reason)
 
         if failed_ids or skipped_ids:
-            failed, _skipped = await self._indexer.park(failed_ids, skipped_ids)
+            failed, _skipped = await self._indexer.park(
+                failed_ids, skipped_ids, reason=",".join(sorted(outcome.skip_reasons)) or "rejected"
+            )
             outcome.queue_failed += failed
-            # Park the rest of the backlog for those domains too, so the depth
-            # reflects real work and new domains are not dropped at the cap.
-            for domain in {item.domain for item in queue if item.rowid in set(skipped_ids)}:
-                await self._store.skip_pending_for_domain(domain)
+            # Park the rest of the backlog only when the domain is genuinely
+            # capped. A page skipped because it was already indexed says nothing
+            # about the pages still queued behind it, and skipping them all is
+            # how `karnataka.gov.in` ended up with 37 skipped rows and no pages.
+            if "domain_cap" in outcome.skip_reasons:
+                for domain in {item.domain for item in queue if item.rowid in set(skipped_ids)}:
+                    await self._store.skip_pending_for_domain(domain)
 
         if documents:
             index_outcome = await self._indexer.persist(documents, queue_ids)
