@@ -117,7 +117,10 @@ async def test_a_question_with_no_live_answer_says_it_is_from_the_index(client):
     )
 
     assert payload["freshness"] == "indexed"
-    assert payload["answer"] == "Karnataka scheme"
+    # A page title is a source to cite, not an answer to repeat.
+    assert payload["answer"] is None
+    assert payload["title"] == "Karnataka scheme"
+    assert payload["url"] == "https://karnataka.gov.in/x"
     assert "crawled" in payload["note"]
 
 
@@ -168,3 +171,22 @@ async def test_a_rate_reads_as_a_rate(client):
     assert payload is not None
     assert payload["answer"] == "1 USD = 94.25 INR"
     assert payload["quote"] == "INR"
+
+
+def test_an_index_answer_is_rendered_as_a_source_not_a_fact():
+    """A model reading prose must not be handed a page title as an answer."""
+    from app.live.compose import as_markdown
+
+    markdown = as_markdown(
+        {
+            "freshness": "indexed",
+            "answer": None,
+            "title": "Karnataka Scheme Status",
+            "url": "https://karnataka.gov.in/schemes",
+            "alternatives": [{"title": "District page", "url": "https://x.nic.in/"}],
+        }
+    )
+
+    assert "Karnataka Scheme Status" in markdown
+    assert "https://karnataka.gov.in/schemes" in markdown
+    assert "not a value we hold" in markdown

@@ -73,12 +73,20 @@ def from_index(results: list[dict[str, Any]], query: str) -> dict[str, Any]:
     return {
         "query": query,
         "kind": "index",
-        "answer": top.get("title") or top.get("url"),
+        # Deliberately null. A page title is not an answer: "The Nilgiris
+        # District, Tamilnadu" filled this field once and a caller reading
+        # `answer` had no way to know it was a page rather than a fact. The
+        # title is still here, under `title`, next to its `url`.
+        "answer": None,
+        "title": top.get("title") or "",
         "url": top.get("url"),
         "snippet": top.get("snippet", ""),
         "freshness": "indexed",
         "source": top.get("url", ""),
-        "note": "This is a page we crawled, not a value we hold. Its age is the crawl time of that page.",
+        "note": (
+            "This is a page we crawled, not a value we hold. Read `title`, `url` "
+            "and `snippet` as a source to cite, not as an answer to repeat."
+        ),
         "alternatives": [
             {"title": item.get("title"), "url": item.get("url")}
             for item in results[1:4]
@@ -95,6 +103,19 @@ def as_markdown(payload: dict[str, Any]) -> str:
     """
     answer = payload.get("answer")
     if not answer:
+        # An index answer is a source, so it is rendered as one: the reader is
+        # told what we hold and where it is, not given a sentence to repeat.
+        if payload.get("freshness") == "indexed" and payload.get("title"):
+            lines = [
+                f"**{payload['title']}**",
+                "",
+                f"- Source: {payload.get('url', '')}",
+                "- This is a page we crawled, not a value we hold.",
+            ]
+            for alternative in payload.get("alternatives") or []:
+                if alternative.get("title"):
+                    lines.append(f"- Also held: {alternative['title']} ({alternative.get('url', '')})")
+            return "\n".join(lines)
         return f"No live value is held for this question ({payload.get('freshness', 'missing')})."
 
     lines = [f"**{answer}**", ""]
