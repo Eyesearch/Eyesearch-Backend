@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.live import store as live
 from app.live.sources.bullion import BullionSource
 from app.live.sources.news import NewsSource, parse_items
 from app.live.sources.weather import WeatherSource, describe
@@ -219,3 +220,50 @@ async def test_a_feed_is_asked_to_follow_its_redirect():
     await source.fetch()
 
     assert calls and calls[0].get("follow_redirects") is True
+
+
+@pytest.mark.asyncio
+async def test_a_city_is_placed_by_name_and_remembered(client):
+    """Coordinates come from the geocoder, not from a table of numbers.
+
+    A hardcoded latitude for every Indian city is a number nobody can check,
+    and the geocoder answers for any name — which is what makes the weather
+    source work beyond the handful of cities someone typed in.
+    """
+    from app.live.sources.geocode import coordinates
+
+    class Geo:
+        async def get(self, url, **kwargs):
+            return FakeResponse({"results": [{"latitude": 15.335, "longitude": 76.46}]})
+
+        async def aclose(self):
+            return None
+
+    point = await coordinates("hosapete", client, http=Geo())
+
+    assert point == (15.335, 76.46)
+    cached = await live.fact(client, "geo.hosapete")
+    assert cached is not None and cached.value == "15.335,76.46"
+
+    class NeverCalled:
+        async def get(self, url, **kwargs):
+            raise AssertionError("a placed city must not be geocoded twice")
+
+        async def aclose(self):
+            return None
+
+    assert await coordinates("hosapete", client, http=NeverCalled()) == (15.335, 76.46)
+
+
+@pytest.mark.asyncio
+async def test_a_city_the_geocoder_cannot_find_is_skipped(client):
+    from app.live.sources.geocode import coordinates
+
+    class Empty:
+        async def get(self, url, **kwargs):
+            return FakeResponse({"results": []})
+
+        async def aclose(self):
+            return None
+
+    assert await coordinates("notarealplace", client, http=Empty()) is None
