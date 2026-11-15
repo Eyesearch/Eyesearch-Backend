@@ -120,7 +120,7 @@ async def all_facts(client, *, prefix: str = "", limit: int = 200) -> list[LiveF
     ]
 
 
-async def expire(client) -> int:
+async def expire(client, max_facts: int | None = None) -> int:
     """Delete facts whose TTL has passed, then trim to `MAX_FACTS`.
 
     Expiry is what keeps a table of minute-long values from growing for ever:
@@ -137,7 +137,7 @@ async def expire(client) -> int:
         "DELETE FROM live_facts WHERE key IN ("
         "  SELECT key FROM live_facts ORDER BY fetched_at DESC OFFSET ?"
         ")",
-        (MAX_FACTS,),
+        (int(max_facts or MAX_FACTS),),
     )
     count += int(getattr(trimmed, "rows_affected", 0) or 0)
     if count:

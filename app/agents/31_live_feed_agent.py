@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 class LiveFeedAgent:
     """Run every live source once and store what comes back."""
 
-    def __init__(self, client, *, sources=None) -> None:
+    def __init__(self, client, *, sources=None, settings=None) -> None:
         self._client = client
+        self._settings = settings
         self._sources = sources
         self._city_cache: dict[str, tuple[float, float]] = {}
 
@@ -106,7 +107,10 @@ class LiveFeedAgent:
                     self._client, source.name, "nothing stored", getattr(source, "url", "")
                 )
 
-        expired = await expire(self._client)
+        # The ceiling comes from settings, not from the module constant: a
+        # configured limit that the code ignores is worse than no limit, because
+        # it reads as one.
+        expired = await expire(self._client, getattr(self._settings, "live_max_facts", None))
         if stored:
             logger.info("live feed: stored %d facts, %d sources failed", stored, failed)
         return {"stored": stored, "failed": failed, "expired": expired}
