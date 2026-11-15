@@ -1,0 +1,29 @@
+"""The key script runs, which is not the same as its functions being tested.
+
+`python scripts/api_key.py` imported `build_client` from the wrong module and
+died with ImportError inside the container — after the deploy, in the operator's
+hands, where no test had been. This one imports it.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "api_key.py"
+
+
+def test_the_script_imports():
+    spec = importlib.util.spec_from_file_location("api_key_script", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert callable(module.main)
+
+
+def test_the_script_names_a_client_that_exists():
+    """The factory it imports has to be the one the app actually uses."""
+    import app.libsql_http as libsql_http
+
+    assert hasattr(libsql_http, "build_client")
