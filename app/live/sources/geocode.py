@@ -29,8 +29,14 @@ async def coordinates(
     client,
     *,
     http: httpx.AsyncClient | None = None,
+    country_code: str | None = None,
 ) -> tuple[float, float] | None:
-    """`(latitude, longitude)` for a city in India, cached for a year."""
+    """`(latitude, longitude)` for a city anywhere, cached for a year.
+
+    No country is assumed. The feed asks about cities in every country, and a
+    lookup pinned to one of them would have placed "springfield" in the wrong
+    continent without saying so.
+    """
     key = f"geo.{city}"
     cached = await fact(client, key)
     if cached is not None and "," in cached.value:
@@ -42,11 +48,10 @@ async def coordinates(
 
     client_http = http or httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
     try:
-        response = await client_http.get(
-            GEOCODE_URL,
-            params={"name": city, "count": 1, "language": "en", "format": "json", "countryCode": "IN"},
-            follow_redirects=True,
-        )
+        params = {"name": city, "count": 1, "language": "en", "format": "json"}
+        if country_code:
+            params["countryCode"] = country_code
+        response = await client_http.get(GEOCODE_URL, params=params, follow_redirects=True)
         response.raise_for_status()
         results = (response.json() or {}).get("results") or []
     except Exception as error:  # noqa: BLE001 - a city we cannot place is skipped
