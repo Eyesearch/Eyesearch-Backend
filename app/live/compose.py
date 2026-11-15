@@ -49,6 +49,13 @@ async def from_live(client, routed: Route) -> dict[str, Any] | None:
 
     answer = fact_answer(item)
     answer["kind"] = routed.kind
+    if routed.kind == "currency" and answer["unit"] == "rate":
+        # "94.25 rate" is not an answer to "dollar rate". An exchange rate has
+        # a base, a quote and a direction, and the reader needs all three.
+        quoted = routed.key.rsplit(".", 1)[-1].upper() if routed.key else ""
+        answer["answer"] = f"1 USD = {item.value} {quoted}".strip()
+        answer["base"] = "USD"
+        answer["quote"] = quoted
     return answer
 
 
