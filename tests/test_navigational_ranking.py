@@ -83,3 +83,35 @@ def test_the_storage_ceiling_is_four_and_a_half_gigabytes():
     settings = Settings(_env_file=None)
 
     assert settings.storage_ceiling_bytes == int(4.5 * 1024**3)
+
+
+def test_a_host_that_starts_with_w_keeps_its_name():
+    """`lstrip("www.")` is a set of characters, not a prefix.
+
+    It turned `wb.gov.in` into `b.gov.in` and `worldbank.org` into
+    `orldbank.org`, so the site the reader named was asked for the sub-pages of
+    a domain that does not exist — and got none, silently.
+    """
+    from app.agents import load_agent
+
+    host_label = load_agent("10_brand_canonical_agent")._host_label
+
+    assert host_label("https://wb.gov.in/") == "wb.gov.in"
+    assert host_label("https://www.wb.gov.in/") == "wb.gov.in"
+    assert host_label("https://worldbank.org/x") == "worldbank.org"
+    assert host_label("https://www.karnataka.gov.in/x") == "karnataka.gov.in"
+
+
+def test_a_query_of_short_words_is_not_a_type_error():
+    """Every token shorter than the minimum produced a boolean, not an integer.
+
+    `title_terms` was `false` when no token was long enough to check, and the
+    expression is summed and compared with `0` — so a two-letter search was a
+    500 rather than a search.
+    """
+    import inspect
+
+    from app.engine import store as store_module
+
+    source = inspect.getsource(store_module.IndexStore.search)
+    assert 'title_terms = "0"' in source
