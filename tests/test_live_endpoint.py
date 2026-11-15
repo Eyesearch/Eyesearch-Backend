@@ -84,3 +84,20 @@ async def test_the_weather_source_is_built_after_the_cities_are_placed(client):
     agent = load_agent("31_live_feed_agent").LiveFeedAgent(client)
 
     assert agent._sources is None, "sources are built at run time, not at construction"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_answers_a_live_question_from_the_live_layer(client):
+    """`/v1/retrieve` is what the AI tab calls; it must not answer with a page."""
+    from app.live import compose
+    from app.live.router import Route
+
+    await live.put_fact(client, "gold.22k.inr.gram", "12440.1", unit="INR/gram", source="bullion")
+
+    payload = await compose.from_live(client, Route("bullion", "gold.22k.inr.gram"))
+
+    assert payload is not None
+    markdown = compose.as_markdown(payload)
+    assert "12440.1" in markdown
+    assert "As of" in markdown
+    assert "bullion" in markdown
