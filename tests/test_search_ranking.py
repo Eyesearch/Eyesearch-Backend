@@ -408,3 +408,43 @@ async def test_a_two_letter_word_in_a_title_is_not_a_match(client):
     hits = await store.search("pm kisan status", limit=5)
 
     assert hits[0].url.startswith("https://pmkisan.gov.in")
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_on_the_loose_match_is_not_an_outage(client):
+    """A query the strict AND misses must not answer "the index is unavailable".
+
+    The loose fallback is an OR of prefixes, so it matches most of the index;
+    ranking most of the index is what runs past the statement timeout. Without
+    a guard there, `pm kisan status` became a 503 for an ordinary question.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            _doc(
+                "https://pmkisan.gov.in/status",
+                "PM Kisan status",
+                "Check pm kisan status and the beneficiary list for your account. " * 3,
+                "loose-1",
+            )
+        ]
+    )
+
+    calls = {"n": 0}
+    real_execute = client.execute
+
+    async def failing_execute(sql, args=()):
+        if "ts_rank_cd" in sql and calls["n"] == 0:
+            calls["n"] += 1
+            raise store_module.LibsqlError(
+                "postgres statement timed out: canceling statement due to statement timeout"
+            )
+        return await real_execute(sql, args)
+
+    client.execute = failing_execute  # type: ignore[method-assign]
+    try:
+        hits = await store.search("pm kisan status beneficiary list", limit=5)
+    finally:
+        client.execute = real_execute  # type: ignore[method-assign]
+
+    assert isinstance(hits, list)

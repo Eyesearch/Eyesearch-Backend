@@ -1458,7 +1458,8 @@ class IndexStore:
             # Same SQL, same bind order: the title terms, the MATCH term, the
             # filters, then both boosts. Leaving a boost out here is a bind-count
             # mismatch, and it only shows up on queries the strict AND misses.
-            result = await self._client.execute(
+            try:
+                result = await self._client.execute(
                 sql,
                 (
                     match_query,
@@ -1488,7 +1489,18 @@ class IndexStore:
                     limit,
                     offset,
                 ),
-            )
+                )
+            except LibsqlError as error:
+                # The loose match is an OR of prefixes: it matches most of the
+                # index, and ranking most of the index is what ran past the
+                # statement timeout. The strict path has had this guard all
+                # along; without it here, a query the strict AND missed became
+                # "the search index is unavailable" — a 503 for an ordinary
+                # question like "pm kisan status".
+                if not _is_timeout(error):
+                    raise
+                logger.warning("loose search timed out; falling back to index-only: %s", error)
+                return await self._fast_search(loose, filters, extra, limit, offset, tokens)
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
             self._rescale_scores(hits)
         return hits
