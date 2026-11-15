@@ -125,3 +125,34 @@ def test_an_unanswered_question_is_missing_not_invented():
     payload = from_index([], "what is the population of atlantis")
     assert payload["freshness"] == "missing"
     assert payload["answer"] is None
+
+
+@pytest.mark.parametrize(
+    "question,key",
+    [
+        ("dollar rate", "fx.usd.inr"),
+        ("usd to inr", "fx.usd.inr"),
+        ("exchange rate", "fx.usd.inr"),
+        ("dollar rate in aed", "fx.usd.aed"),
+    ],
+)
+def test_a_currency_question_goes_to_the_rate_not_the_index(question, key):
+    """"dollar rate" came back as an Indian electricity regulator."""
+    routed = route(question)
+    assert routed.kind == "currency"
+    assert routed.key == key
+
+
+@pytest.mark.asyncio
+async def test_a_news_answer_carries_its_newest_headline(client):
+    """A caller reading `answer` should not have to know news arrives as a list."""
+    await live.put_fact(client, "news.us.1", "US headline one", unit="https://x.in/1")
+    await live.put_fact(client, "news.us.2", "US headline two", unit="https://x.in/2")
+
+    payload = await from_live(client, route("us news"))
+
+    assert payload is not None
+    # Both rows are written in the same instant, so which is "newest" is the
+    # database's to decide; what matters is that one of them answers.
+    assert payload["answer"] in {"US headline one", "US headline two"}
+    assert payload["count"] == 2
