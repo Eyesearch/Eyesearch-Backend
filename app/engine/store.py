@@ -1316,7 +1316,11 @@ class IndexStore:
                 for _ in title_tokens
             )
         else:
-            title_terms = "false"
+            # `0`, not `false`. The expression is summed and then compared with
+            # an integer (`base.title_hit = 0`); a query whose every token is
+            # shorter than the minimum — "wb", "up", "go" — produced a boolean
+            # and the comparison failed, so a two-letter search was a 500.
+            title_terms = "0"
 
         # Authority is read from `sites.domain`, the registrable domain the page
         # was actually indexed under — not from `p.url LIKE '%.gov.in/%'`, which
@@ -1673,7 +1677,12 @@ class IndexStore:
                 clean_url=str(row[6] or ""),
                 action_title=str(row[7] or ""),
                 sitelinks=list(row[8] or []),
-                score=1.0,
+                # `raw_score` is what the rescale reads, and it is lower-is-
+                # better. Leaving it at the default 0.0 made the entity page the
+                # *worst* row on the page: it was listed first and scored 0%,
+                # because every other hit had a negative score. Below the best
+                # of them is what "this is the answer" looks like to that maths.
+                raw_score=min((hit.raw_score for hit in hits), default=0.0) - 1.0,
             )
             for row in rows
         ]
@@ -1696,7 +1705,11 @@ class IndexStore:
         from urllib.parse import urlsplit
 
         try:
-            domain = (urlsplit(top.url or "").hostname or "").lstrip("www.").lower()
+            # `removeprefix`, not `lstrip`: lstrip takes a *set* of characters,
+            # so `wb.gov.in` became `b.gov.in` and `worldbank.org` became
+            # `orldbank.org`. West Bengal's portal lost its own sub-pages
+            # silently, because the lookup then asked for a domain nobody has.
+            domain = (urlsplit(top.url or "").hostname or "").lower().removeprefix("www.")
         except ValueError:
             return hits
         if not domain:
