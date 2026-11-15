@@ -171,6 +171,13 @@ RANK_CANDIDATE_LIMIT = 300
 #: work to a slice that is still 40x the page size.
 RANK_SCAN_LIMIT = 800
 
+#: The loose match is an OR of prefixes, so it matches most of the index. Ranking
+#: that with the same budget as the strict match is what ran past the statement
+#: timeout and turned "pm kisan status" into a 503. It is a recall fallback, not
+#: a precise answer, so it gets a much smaller budget.
+LOOSE_SCAN_LIMIT = 200
+LOOSE_CANDIDATE_LIMIT = 60
+
 #: How much a page's own quality moves it. `quality_score` runs 0.2 (a
 #: JavaScript shell the crawler could barely read) to 1.0 (a page with prose and
 #: a description), so this is worth 0.16 of score between the two ends - enough
@@ -1476,7 +1483,7 @@ class IndexStore:
             if not _is_timeout(error):
                 raise
             logger.warning("ranked search timed out; falling back to index-only: %s", error)
-            return await self._fast_search(match_query, filters, extra, limit, offset, tokens)
+            return await self._fast_search_safely(match_query, filters, extra, limit, offset, tokens)
 
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
 
@@ -1510,8 +1517,8 @@ class IndexStore:
                     loose,
                     loose,
                     *extra,
-                    RANK_SCAN_LIMIT,
-                    RANK_CANDIDATE_LIMIT,
+                    LOOSE_SCAN_LIMIT,
+                    LOOSE_CANDIDATE_LIMIT,
                     TITLE_MATCH_BOOST,
                     AUTHORITY_DOMAIN_BOOST,
                     LANGUAGE_MATCH_BOOST,
@@ -1536,7 +1543,7 @@ class IndexStore:
                 if not _is_timeout(error):
                     raise
                 logger.warning("loose search timed out; falling back to index-only: %s", error)
-                return await self._fast_search(loose, filters, extra, limit, offset, tokens)
+                return await self._fast_search_safely(loose, filters, extra, limit, offset, tokens)
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
             self._rescale_scores(hits)
         return hits
@@ -1583,6 +1590,31 @@ class IndexStore:
         if not siblings:
             return hits
         return ([top, *siblings, *hits[1:]])[:limit]
+
+    async def _fast_search_safely(
+        self,
+        match_query: str,
+        filters: str,
+        extra: list[Any],
+        limit: int,
+        offset: int,
+        tokens: list[str],
+    ) -> list["SearchHit"]:
+        """The index-only read, and never a 503.
+
+        This is the last thing tried before an error reaches the reader. If even
+        this runs past the timeout, an empty answer is the honest one: the index
+        is slow, not broken, and a caller that gets `missing` can retry, while a
+        caller that gets 503 for an ordinary question concludes the product is
+        down.
+        """
+        try:
+            return await self._fast_search(match_query, filters, extra, limit, offset, tokens)
+        except LibsqlError as error:
+            if not _is_timeout(error):
+                raise
+            logger.warning("index-only search also timed out; answering with nothing: %s", error)
+            return []
 
     async def _fast_search(
         self,
