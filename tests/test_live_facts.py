@@ -110,3 +110,15 @@ async def test_the_live_tables_are_not_the_pages_table(client):
     result = await client.execute("SELECT COUNT(*) FROM pages")
     assert int(result.scalar(0) or 0) == 0
     assert store is not None
+
+
+@pytest.mark.asyncio
+async def test_the_ceiling_is_the_configured_one(client):
+    """A limit in settings that the code ignores reads as a limit and is not one."""
+    for index in range(5):
+        await live.put_fact(client, f"bulk.{index}", str(index), ttl_seconds=900)
+
+    await live.expire(client, max_facts=3)
+
+    remaining = await live.all_facts(client, limit=50)
+    assert len(remaining) == 3
