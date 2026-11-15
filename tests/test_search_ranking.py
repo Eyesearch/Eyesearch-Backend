@@ -448,3 +448,29 @@ async def test_a_timeout_on_the_loose_match_is_not_an_outage(client):
         client.execute = real_execute  # type: ignore[method-assign]
 
     assert isinstance(hits, list)
+
+
+@pytest.mark.asyncio
+async def test_a_database_that_times_out_twice_answers_nothing_rather_than_503(client):
+    """The last thing tried must not raise a 503 for an ordinary question.
+
+    `pm kisan status` answered "the search index is unavailable" because the
+    ranked query timed out, the loose query timed out, and the index-only read
+    timed out too. A caller that gets `missing` can retry; one that gets 503
+    concludes the product is down.
+    """
+    store = IndexStore(client, Settings(environment="test"))
+
+    async def always_times_out(sql, args=()):
+        raise store_module.LibsqlError(
+            "postgres statement timed out: canceling statement due to statement timeout"
+        )
+
+    real_execute = client.execute
+    client.execute = always_times_out  # type: ignore[method-assign]
+    try:
+        hits = await store.search("pm kisan status", limit=5)
+    finally:
+        client.execute = real_execute  # type: ignore[method-assign]
+
+    assert hits == []
