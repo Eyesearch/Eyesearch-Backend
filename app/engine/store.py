@@ -77,7 +77,11 @@ from app.agents import load_agent
 logger = logging.getLogger(__name__)
 
 from app.engine.entities import detect as detect_entity
-from app.engine.places import detect as detect_place, other_domains
+from app.engine.places import (
+    detect as detect_place,
+    is_other_states_portal,
+    other_domains,
+)
 
 LanguageAgent = load_agent("08_language_agent").LanguageAgent
 autosuggest = load_agent("39_autosuggest_trie_agent")
@@ -545,6 +549,29 @@ def _is_timeout(error: Exception) -> bool:
     """Whether a database error is a statement timeout rather than a real fault."""
     text = str(error).lower()
     return "statement timeout" in text or "canceling statement" in text or "cancelling statement" in text
+
+
+def _drop_other_places(hits: list["SearchHit"], place) -> list["SearchHit"]:
+    """Remove another state's portal from an answer to a place question.
+
+    The ranking penalty pushes those rows down; this removes them. When they are
+    all that is left, an empty answer is the honest one — a reader cannot tell
+    that a Tamil Nadu district page is not a Karnataka answer, and a model will
+    report it as one.
+    """
+    if place is None:
+        return hits
+    return [
+        hit
+        for hit in hits
+        if not is_other_states_portal(_domain_of_url(hit.url), place)
+    ]
+
+
+def _domain_of_url(url: str) -> str:
+    """The registrable host of a URL, without the scheme or the path."""
+    rest = url.split("//", 1)[-1]
+    return rest.split("/", 1)[0].lower().removeprefix("www.")
 
 
 def _query_language(query: str) -> str:
@@ -1523,6 +1550,13 @@ class IndexStore:
         if entity is not None:
             hits = await self._with_entity_pages(hits, entity, limit)
 
+        # A question that named a state is not answered by another state's
+        # portal, however well it scored. The penalty already pushed those rows
+        # down; when they are the only rows left, the honest answer is that we
+        # hold nothing for this state, not a Tamil Nadu page under a Karnataka
+        # question.
+        hits = _drop_other_places(hits, place)
+
         if hits:
             hits = await self._with_official_siblings(hits, limit)
             self._rescale_scores(hits)
@@ -1582,6 +1616,11 @@ class IndexStore:
                 logger.warning("loose search timed out; falling back to index-only: %s", error)
                 return await self._fast_search_safely(loose, filters, extra, limit, offset, tokens)
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
+            # The same rule as the strict path. Without it here, a query the
+            # strict match answered with nothing came back from the loose match
+            # with another state's portal — the filter has to hold on every path
+            # that can produce an answer.
+            hits = _drop_other_places(hits, place)
             self._rescale_scores(hits)
         return hits
 
