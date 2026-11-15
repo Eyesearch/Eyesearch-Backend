@@ -27,3 +27,17 @@ def test_the_script_names_a_client_that_exists():
     import app.libsql_http as libsql_http
 
     assert hasattr(libsql_http, "build_client")
+
+
+def test_the_government_seed_script_imports():
+    """The seed is run by hand on the box, where an ImportError costs a deploy."""
+    spec = importlib.util.spec_from_file_location(
+        "seed_government", SCRIPT.parent / "seed_government.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert callable(module.main)
+    assert len(module.GOVERNMENT_SITES) > 20
+    assert "https://pmkisan.gov.in/" in module.GOVERNMENT_SITES
