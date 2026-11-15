@@ -84,3 +84,30 @@ def from_index(results: list[dict[str, Any]], query: str) -> dict[str, Any]:
             for item in results[1:4]
         ],
     }
+
+
+def as_markdown(payload: dict[str, Any]) -> str:
+    """The same answer as markdown, for a caller that asked for prose.
+
+    The age is in the text on purpose. A model reading this must be able to say
+    when the value was true without having to parse a field it was never told
+    about.
+    """
+    answer = payload.get("answer")
+    if not answer:
+        return f"No live value is held for this question ({payload.get('freshness', 'missing')})."
+
+    lines = [f"**{answer}**", ""]
+    if payload.get("as_of"):
+        lines.append(f"- As of: {payload['as_of']}")
+    if payload.get("source"):
+        lines.append(f"- Source: {payload['source']}")
+    lines.append(f"- Freshness: {payload.get('freshness', 'unknown')}")
+
+    answers = payload.get("answers")
+    if isinstance(answers, list) and len(answers) > 1:
+        lines.append("")
+        lines.append("Also current:")
+        for entry in answers[1:]:
+            lines.append(f"- {entry.get('answer')} ({entry.get('as_of')})")
+    return "\n".join(lines)
