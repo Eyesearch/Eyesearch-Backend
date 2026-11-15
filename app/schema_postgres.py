@@ -217,6 +217,27 @@ POSTGRES_SCHEMA_STATEMENTS: tuple[str, ...] = (
         fail_count INTEGER DEFAULT 0
     )
     """,
+    # --- API keys -----------------------------------------------------------
+    # Only the hash is stored: a leaked database must not be a leaked set of
+    # keys. `prefix` is the first few characters, so an operator can recognise a
+    # key in a list without being able to use it.
+    """
+    CREATE TABLE IF NOT EXISTS api_keys (
+        key_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        key_hash TEXT NOT NULL UNIQUE,
+        prefix TEXT DEFAULT '',
+        rate_limit_per_minute INTEGER DEFAULT 60,
+        daily_quota INTEGER DEFAULT 10000,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TIMESTAMPTZ,
+        last_used_at TIMESTAMPTZ,
+        calls_total BIGINT DEFAULT 0,
+        calls_today INTEGER DEFAULT 0,
+        calls_day DATE DEFAULT CURRENT_DATE
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)",
     "CREATE INDEX IF NOT EXISTS idx_live_facts_fetched ON live_facts(fetched_at)",
     "ALTER TABLE crawl_queue ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 1",
     "CREATE INDEX IF NOT EXISTS idx_crawl_queue_priority "
