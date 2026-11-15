@@ -656,6 +656,23 @@ async def _retrieve_payload(
     limit: int,
 ):
     query = require_query(raw_query)
+
+    # A question a live source can answer is answered from it, not from a page
+    # that happens to mention the subject. `/v1/answer` has done this since the
+    # router landed; `/v1/retrieve` is the endpoint the AI tab calls, so without
+    # this the chat answered "gold price" with a link to a page about gold.
+    routed = live_route(query)
+    if routed.kind != "index":
+        live_payload = await live_compose.from_live(request.app.state.client, routed)
+        if live_payload is not None:
+            live_payload["route"] = routed.as_dict()
+            if output_format == "markdown":
+                return PlainTextResponse(
+                    content=live_compose.as_markdown(live_payload),
+                    media_type="text/markdown; charset=utf-8",
+                )
+            return JSONResponse(content=live_payload)
+
     service = get_service(request)
     payload = await service.retrieve(query, limit=limit, format=output_format)
     if isinstance(payload, str):

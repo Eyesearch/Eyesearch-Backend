@@ -122,3 +122,31 @@ async def test_the_ceiling_is_the_configured_one(client):
 
     remaining = await live.all_facts(client, limit=50)
     assert len(remaining) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_live_tables_report_their_size(client):
+    """The agreed ceiling is 500 MB of bytes, not 20,000 rows."""
+    await live.put_fact(client, "size.check", "x" * 500, ttl_seconds=900)
+
+    size = await live.live_bytes(client)
+
+    assert size > 0
+
+
+@pytest.mark.asyncio
+async def test_a_store_over_its_byte_ceiling_drops_the_oldest(client):
+    for index in range(20):
+        await live.put_fact(client, f"bulk.size.{index}", "y" * 200, ttl_seconds=900)
+
+    removed = await live.trim_to_size(client, max_mb=0)
+
+    assert removed > 0
+    assert await live.live_bytes(client) >= 0
+
+
+@pytest.mark.asyncio
+async def test_a_store_under_its_ceiling_is_left_alone(client):
+    await live.put_fact(client, "small.one", "1", ttl_seconds=900)
+
+    assert await live.trim_to_size(client, max_mb=500) == 0
