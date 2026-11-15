@@ -70,16 +70,78 @@ GOVERNMENT_SITES: tuple[str, ...] = (
 )
 
 
+#: District portals, by the name the NIC registry uses for them. A state portal
+#: that answers 403 to a datacenter IP is not reachable, but its districts are
+#: served from the same `.nic.in` estate that already crawls for other states —
+#: Nilgiris and Tamenglong are both in the index.
+#:
+#: The names are the registry's, not the current official spelling: `mysore`,
+#: `belgaum`, `gulbarga` and `shimoga` are how those districts are registered,
+#: and `mysuru.nic.in` does not exist. A wrong guess costs one 404, not a crawl.
+DISTRICT_SITES: tuple[str, ...] = (
+    "https://bengaluruurban.nic.in/",
+    "https://bengalurural.nic.in/",
+    "https://bagalkot.nic.in/",
+    "https://belgaum.nic.in/",
+    "https://bellary.nic.in/",
+    "https://bidar.nic.in/",
+    "https://bijapur.nic.in/",
+    "https://chamarajanagar.nic.in/",
+    "https://chickmagalur.nic.in/",
+    "https://chikkaballapur.nic.in/",
+    "https://chitradurga.nic.in/",
+    "https://davanagere.nic.in/",
+    "https://dharwad.nic.in/",
+    "https://gadag.nic.in/",
+    "https://gulbarga.nic.in/",
+    "https://hassan.nic.in/",
+    "https://haveri.nic.in/",
+    "https://kodagu.nic.in/",
+    "https://kolar.nic.in/",
+    "https://koppal.nic.in/",
+    "https://mandya.nic.in/",
+    "https://mysore.nic.in/",
+    "https://raichur.nic.in/",
+    "https://shimoga.nic.in/",
+    "https://tumkur.nic.in/",
+    "https://udupi.nic.in/",
+    "https://uttarakannada.nic.in/",
+    "https://yadgir.nic.in/",
+)
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Queue the government portals")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--priority", type=int, default=0, help="0 is highest")
+    parser.add_argument(
+        "--districts",
+        action="store_true",
+        help="queue the district portals instead, for a state portal that blocks us",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="only report what the queue says about these domains",
+    )
     args = parser.parse_args()
+
+    sites = DISTRICT_SITES if args.districts else GOVERNMENT_SITES
 
     client = build_client(get_settings())
     queued = 0
     try:
-        for url in GOVERNMENT_SITES:
+        if args.report:
+            result = await client.execute(
+                "SELECT domain, status, left(coalesce(last_error, ''), 40) e, count(*) "
+                "FROM crawl_queue WHERE domain = ANY(?) GROUP BY 1, 2, 3 ORDER BY 4 DESC",
+                ([url.split("//", 1)[1].split("/", 1)[0] for url in sites],),
+            )
+            for row in result.rows:
+                print(f"  {row[0]:32} {row[1]:10} {row[2]:42} {row[3]}")
+            return 0
+
+        for url in sites:
             canonical = normalise_url(url)
             domain = canonical.split("//", 1)[1].split("/", 1)[0]
             if args.dry_run:
@@ -105,7 +167,7 @@ async def main() -> int:
         result = await client.execute(
             "SELECT domain, status, count(*) FROM crawl_queue "
             "WHERE domain = ANY(?) GROUP BY 1, 2 ORDER BY 3 DESC",
-            ([url.split("//", 1)[1].split("/", 1)[0] for url in GOVERNMENT_SITES],),
+            ([url.split("//", 1)[1].split("/", 1)[0] for url in sites],),
         )
         for row in result.rows:
             print(f"  {row[0]:32} {row[1]:10} {row[2]}")
