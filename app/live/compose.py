@@ -21,12 +21,19 @@ NEWS_LIMIT = 5
 async def from_live(client, routed: Route) -> dict[str, Any] | None:
     """The live answer for a routed question, or None when there is not one."""
     if routed.kind == "news":
-        items = await all_facts(client, prefix="news.", limit=NEWS_LIMIT)
+        # The edition the question named, or every edition when it named none.
+        prefix = f"news.{routed.key}." if routed.key else "news."
+        items = await all_facts(client, prefix=prefix, limit=NEWS_LIMIT)
+        if not items and routed.key:
+            items = await all_facts(client, prefix="news.", limit=NEWS_LIMIT)
         if not items:
             return None
         return {
             "kind": "news",
             "count": len(items),
+            # A caller that reads `answer` should not have to know that news
+            # arrives as a list; the newest headline answers the question.
+            "answer": items[0].value,
             "answers": [fact_answer(item) for item in items],
             "freshness": "live" if any(item.fresh for item in items) else "stale",
             "as_of": items[0].fetched_at,
