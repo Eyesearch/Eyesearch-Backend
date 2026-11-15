@@ -35,7 +35,26 @@ PLACES: tuple[Place, ...] = (
     Place("haryana", ("haryana.gov.in",)),
     Place("himachal pradesh", ("hp.gov.in",), ("himachal",)),
     Place("jharkhand", ("jharkhand.gov.in",)),
-    Place("karnataka", ("karnataka.gov.in",), ("bengaluru", "bangalore")),
+    # Karnataka's district hosts are listed because they are the ones seeded:
+    # the state portal answers 403 to this crawler, so its districts are how
+    # Karnataka content is reached. A district host that is not listed here
+    # cannot be told apart from another state's, which is the cost of not
+    # carrying all 700-odd of them.
+    Place(
+        "karnataka",
+        (
+            "karnataka.gov.in",
+            "bengaluruurban.nic.in", "bengalurural.nic.in", "bagalkot.nic.in",
+            "belgaum.nic.in", "bellary.nic.in", "bidar.nic.in", "bijapur.nic.in",
+            "chamarajanagar.nic.in", "chickmagalur.nic.in", "chikkaballapur.nic.in",
+            "chitradurga.nic.in", "davanagere.nic.in", "dharwad.nic.in",
+            "gadag.nic.in", "gulbarga.nic.in", "hassan.nic.in", "haveri.nic.in",
+            "kodagu.nic.in", "kolar.nic.in", "koppal.nic.in", "mandya.nic.in",
+            "mysore.nic.in", "raichur.nic.in", "shimoga.nic.in", "tumkur.nic.in",
+            "udupi.nic.in", "uttarakannada.nic.in", "yadgir.nic.in",
+        ),
+        ("bengaluru", "bangalore"),
+    ),
     Place("kerala", ("kerala.gov.in",), ("thiruvananthapuram", "kochi")),
     Place("madhya pradesh", ("mp.gov.in",), ("madhyapradesh",)),
     Place("maharashtra", ("maharashtra.gov.in",), ("mumbai", "pune")),
@@ -88,3 +107,42 @@ def other_domains(place: Place) -> tuple[str, ...]:
         if other.name != place.name
         for domain in other.domains
     )
+
+
+#: Central portals answer questions about every state, so they are never the
+#: wrong state's answer. Everything else on a government suffix belongs to one
+#: state or one of its districts.
+CENTRAL_DOMAINS: frozenset[str] = frozenset(
+    {
+        "india.gov.in", "uidai.gov.in", "incometax.gov.in", "gst.gov.in",
+        "epfindia.gov.in", "passportindia.gov.in", "parivahan.gov.in",
+        "nrega.nic.in", "myscheme.gov.in", "nvsp.in", "mca.gov.in",
+        "rbi.org.in", "sebi.gov.in", "ayushmanbharat.gov.in", "pmjay.gov.in",
+        "cowin.gov.in", "digilocker.gov.in", "scholarships.gov.in",
+        "nsp.gov.in", "egazette.gov.in", "egazette.nic.in", "eci.gov.in",
+        "sci.gov.in", "ecourts.gov.in", "upsc.gov.in", "cbse.gov.in",
+        "nta.ac.in", "ssc.nic.in", "ibps.in", "indianrailways.gov.in",
+        "indiapost.gov.in", "licindia.in", "npci.org.in", "trai.gov.in",
+    }
+)
+
+#: Suffixes that mark a government host.
+GOVERNMENT_SUFFIXES: tuple[str, ...] = (".gov.in", ".nic.in", ".ac.in", ".res.in")
+
+
+def is_other_states_portal(domain: str, place: Place) -> bool:
+    """Whether this host speaks for a state other than the one named.
+
+    A district site — `nilgiris.nic.in` — belongs to Tamil Nadu as surely as
+    `tn.gov.in` does, and neither belongs in an answer to a Karnataka question.
+    The state portals alone were not enough: the page that answered "karnataka
+    scheme status" was a district site, which no state table names.
+    """
+    host = domain.lower().removeprefix("www.")
+    if not host:
+        return False
+    if host in place.domains or host in CENTRAL_DOMAINS:
+        return False
+    if any(host == portal or host.endswith("." + portal) for portal in place.domains):
+        return False
+    return any(host.endswith(suffix) for suffix in GOVERNMENT_SUFFIXES)
