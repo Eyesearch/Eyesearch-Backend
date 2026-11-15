@@ -69,3 +69,18 @@ def test_the_endpoint_is_registered_and_is_not_search():
     paths = {route.path for route in app.routes}
     assert "/v1/live" in paths
     assert "/v1/search" in paths
+
+
+@pytest.mark.asyncio
+async def test_the_weather_source_is_built_after_the_cities_are_placed(client):
+    """An agent that builds its sources at construction fetches no weather.
+
+    The weather source asks about the cities it was given, so it has to be
+    handed them after they are resolved — building it in `__init__` gave it an
+    empty map, and the pass reported success while storing nothing.
+    """
+    from app.agents import load_agent
+
+    agent = load_agent("31_live_feed_agent").LiveFeedAgent(client)
+
+    assert agent._sources is None, "sources are built at run time, not at construction"
