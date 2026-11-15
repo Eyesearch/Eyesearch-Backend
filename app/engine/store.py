@@ -76,6 +76,7 @@ from app.agents import load_agent
 
 logger = logging.getLogger(__name__)
 
+from app.engine.entities import detect as detect_entity
 from app.engine.places import detect as detect_place, other_domains
 
 LanguageAgent = load_agent("08_language_agent").LanguageAgent
@@ -141,6 +142,11 @@ ESTIMATE_FROM = 1000
 #: nilgiris.nic.in it is wrong, however many times the page says "Karnataka".
 PLACE_BOOST = 6.0
 OTHER_PLACE_PENALTY = 4.0
+
+#: What the domain that owns a named scheme or service is worth. Higher than a
+#: title match, because the page that answers "pm kisan status" does not contain
+#: the phrase "pm kisan status" at all.
+ENTITY_BOOST = 7.0
 
 #: Shortest token that may count as a title hit. "pm" is in half the headlines
 #: on the web, so a title containing it said nothing about whether the page was
@@ -1298,6 +1304,17 @@ class IndexStore:
         # specific to one of them: the page on the named state's own portal is
         # the answer, and a page on another state's portal is a wrong answer
         # however often it repeats the word.
+        # A named scheme or service has an owning domain, the same way a named
+        # state does. "pm kisan status" and a page titled "Pradhan Mantri Kisan
+        # Samman Nidhi" share one token; the table is what connects them.
+        entity = detect_entity(query)
+        if entity is not None:
+            entity_terms = " OR ".join(
+                f"s.domain = '{domain}'" for domain in entity.domains
+            )
+        else:
+            entity_terms = "false"
+
         place = detect_place(query)
         if place is not None:
             place_terms = " OR ".join(
@@ -1403,7 +1420,8 @@ class IndexStore:
             # column after them, so the ranking silently read quality as a
             # category code.
             f"CASE WHEN ({place_terms}) THEN 1 ELSE 0 END AS place_hit, "
-            f"CASE WHEN ({other_terms}) THEN 1 ELSE 0 END AS other_place_hit "
+            f"CASE WHEN ({other_terms}) THEN 1 ELSE 0 END AS other_place_hit, "
+            f"CASE WHEN ({entity_terms}) THEN 1 ELSE 0 END AS entity_hit "
             # Two-stage ranking. The inner select is the only one that reads
             # the whole match set, and it carries nothing but the lexically best
             # rows forward; the six boost expressions are then evaluated once
@@ -1440,7 +1458,7 @@ class IndexStore:
             "  - ? * nav_hit - ? * root_hit * nav_hit "
             "  + ? * description_only "
             "  - ? * region_hit "
-            "  - ? * place_hit + ? * other_place_hit "
+            "  - ? * place_hit + ? * other_place_hit - ? * entity_hit "
             "  - ? * quality) ASC "
             "LIMIT ? OFFSET ?"
             ") top_slice"
@@ -1477,6 +1495,7 @@ class IndexStore:
             REGIONAL_BOOST,
             PLACE_BOOST,
             OTHER_PLACE_PENALTY,
+            ENTITY_BOOST,
             QUALITY_BOOST,
             limit,
             offset,
@@ -1495,6 +1514,14 @@ class IndexStore:
             return await self._fast_search_safely(match_query, filters, extra, limit, offset, tokens)
 
         hits = [self._row_to_hit(row, tokens) for row in result.rows]
+
+        # A named scheme is answered by the page on its own domain, whether or
+        # not that page contains the words the reader typed. pmkisan.gov.in says
+        # "Pradhan Mantri Kisan Samman Nidhi" and never says "pm kisan status",
+        # so a text match excludes it and a boost cannot reach what the match
+        # never returned.
+        if entity is not None:
+            hits = await self._with_entity_pages(hits, entity, limit)
 
         if hits:
             hits = await self._with_official_siblings(hits, limit)
@@ -1537,6 +1564,7 @@ class IndexStore:
                     REGIONAL_BOOST,
                     PLACE_BOOST,
                     OTHER_PLACE_PENALTY,
+                    ENTITY_BOOST,
                     QUALITY_BOOST,
                     limit,
                     offset,
@@ -1556,6 +1584,62 @@ class IndexStore:
             hits = [self._row_to_hit(row, tokens) for row in result.rows]
             self._rescale_scores(hits)
         return hits
+
+    async def _with_entity_pages(
+        self,
+        hits: list["SearchHit"],
+        entity,
+        limit: int,
+    ) -> list["SearchHit"]:
+        """Put the named scheme's own pages at the front of the answer.
+
+        This is a lookup, not a search. The question named the thing; the domain
+        that owns it is known; the only question left is which of its pages to
+        show, and the front door is the right one to show first.
+        """
+        if any(hit.url and any(f"//{domain}" in hit.url for domain in entity.domains) for hit in hits):
+            return hits
+
+        placeholders = ", ".join("?" for _ in entity.domains)
+        try:
+            result = await self._client.execute(
+                "SELECT p.page_id, p.url, p.title, p.description, p.body_text, "
+                "p.brand_name, p.clean_url, p.action_title, p.sitelinks "
+                "FROM pages p JOIN sites s ON s.site_id = p.site_id "
+                f"WHERE s.domain IN ({placeholders}) "
+                "ORDER BY (length(p.url) - length(replace(p.url, '/', ''))) ASC, "
+                "         COALESCE(p.quality_score, 1.0) DESC "
+                "LIMIT ?",
+                (*entity.domains, min(3, max(1, limit))),
+            )
+        except LibsqlError as error:
+            if not _is_timeout(error):
+                raise
+            return hits
+
+        rows = [tuple(row) for row in result.rows]
+        if not rows:
+            return hits
+
+        from app.engine.store import SearchHit  # noqa: PLC0415 - local by design
+
+        leading = [
+            SearchHit(
+                page_id=int(row[0]),
+                url=str(row[1]),
+                title=str(row[2] or ""),
+                description=str(row[3] or ""),
+                body_text=str(row[4] or ""),
+                brand_name=str(row[5] or ""),
+                clean_url=str(row[6] or ""),
+                action_title=str(row[7] or ""),
+                sitelinks=list(row[8] or []),
+                score=1.0,
+            )
+            for row in rows
+        ]
+        seen = {hit.url for hit in leading}
+        return leading + [hit for hit in hits if hit.url not in seen]
 
     async def _with_official_siblings(self, hits: list["SearchHit"], limit: int) -> list["SearchHit"]:
         """Put the named site's own pages directly behind its front door.
