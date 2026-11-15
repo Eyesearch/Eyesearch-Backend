@@ -297,3 +297,48 @@ async def test_an_unknown_queue_row_does_not_fail_the_page_write(store, client, 
 
     assert outcome.committed is True
     assert outcome.pages_written == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_row_says_why(client):
+    """Nine hundred rows at `failed` with no reason is a queue nobody can read."""
+    from app.engine.config import Settings
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, 'pending')",
+        ("https://example.in/one", "example.in"),
+    )
+    rowid = int(
+        (await client.execute("SELECT id FROM crawl_queue WHERE domain = 'example.in'")).scalar(0)
+    )
+
+    await store.park_rows([rowid], [], reason="rejected:thin_body")
+
+    result = await client.execute("SELECT status, last_error FROM crawl_queue WHERE id = ?", (rowid,))
+    row = tuple([tuple(r) for r in result.rows][0])
+    assert row[0] == "failed"
+    assert row[1] == "rejected:thin_body"
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_row_says_why(client):
+    from app.engine.config import Settings
+    from app.engine.store import IndexStore
+
+    store = IndexStore(client, Settings(environment="test"))
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status) VALUES (?, ?, 'pending')",
+        ("https://example.in/two", "example.in"),
+    )
+    rowid = int(
+        (await client.execute("SELECT id FROM crawl_queue WHERE domain = 'example.in'")).scalar(0)
+    )
+
+    await store.park_rows([], [rowid], reason="already_indexed")
+
+    result = await client.execute("SELECT status, last_error FROM crawl_queue WHERE id = ?", (rowid,))
+    row = tuple([tuple(r) for r in result.rows][0])
+    assert row[0] == "skipped"
+    assert row[1] == "already_indexed"
