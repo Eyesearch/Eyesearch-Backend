@@ -320,3 +320,34 @@ async def test_each_country_edition_is_its_own_feed():
     assert "gl=IN" in FEEDS["in"]
     assert "hl=kn" in FEEDS["in_kn"]
     assert FEEDS["us"] != FEEDS["in"]
+
+
+@pytest.mark.asyncio
+async def test_the_dirham_is_available_even_though_the_ecb_does_not_publish_it():
+    """The ECB list has no AED, so a Frankfurter-only feed cannot price Dubai."""
+    from app.live.sources.currency import CurrencySource
+
+    primary = {"result": "success", "rates": {"INR": 94.25, "AED": 3.6725}}
+    source = CurrencySource(http=FakeHTTP(primary))
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["fx.usd.aed"] == "3.6725"
+    assert facts["fx.usd.inr"] == "94.25"
+
+
+@pytest.mark.asyncio
+async def test_the_ecb_feed_covers_the_primary_when_it_fails():
+    from app.live.sources.currency import CurrencySource
+
+    class PrimaryDown(FakeHTTP):
+        async def get(self, url, **kwargs):
+            if "frankfurter" in url:
+                return FakeResponse({"rates": {"INR": 90.0}})
+            raise RuntimeError("primary down")
+
+    source = CurrencySource(http=PrimaryDown())
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["fx.usd.inr"] == "90"
