@@ -64,6 +64,17 @@ BULLION_WORDS = ("gold", "silver", "bullion", "ಚಿನ್ನ", "ಬೆಂಗ�
 WEATHER_WORDS = ("weather", "temperature", "forecast", "rain", "ಹವಾಮಾನ", "ಮಳೆ", "mausam")
 NEWS_WORDS = ("news", "headline", "ಸುದ್ದಿ", "breaking", "headlines")
 
+#: Words that make a question about an exchange rate rather than a page. The
+#: first version only knew about gold and news, so "dollar rate" went to the
+#: index and came back as an Indian electricity regulator.
+CURRENCY_WORDS = (
+    "exchange rate", "dollar rate", "dollar price", "usd inr", "usd to inr",
+    "inr to usd", "currency rate", "forex", "rupee rate", "ಡಾಲರ್",
+)
+
+#: Which pair a currency question means when it does not name one.
+DEFAULT_CURRENCY_PAIR = "fx.usd.inr"
+
 #: Country editions a news question can name. The key is what the reader might
 #: type, the value is the feed it means.
 NEWS_EDITIONS: dict[str, str] = {
@@ -169,6 +180,12 @@ def route(query: str) -> Route:
         # rather than with the temperature of somewhere the reader never asked
         # about.
         return Route("index", reason="weather question without a city we fill")
+
+    if any(word in lowered for word in CURRENCY_WORDS):
+        for code in ("inr", "eur", "gbp", "aed", "sar", "sgd", "aud", "cad", "jpy"):
+            if re.search(rf"\b{code}\b", lowered):
+                return Route("currency", f"fx.usd.{code}", reason=f"USD to {code.upper()}")
+        return Route("currency", DEFAULT_CURRENCY_PAIR, reason="USD to INR")
 
     if any(word in lowered for word in NEWS_WORDS):
         for word, edition in NEWS_EDITIONS.items():
