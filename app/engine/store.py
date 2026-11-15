@@ -129,6 +129,11 @@ AUTHORITY_DOMAIN_BOOST = 1.5
 #: How many query terms are checked against the title.
 MAX_TITLE_TOKENS = 5
 
+#: Above this many pages the totals come from the planner's estimate rather
+#: than a count. Counting 129,000 pages read half a gigabyte from disk on the
+#: live box and took ten seconds — inside the transaction that writes a batch.
+ESTIMATE_FROM = 1000
+
 #: Shortest token that may count as a title hit. "pm" is in half the headlines
 #: on the web, so a title containing it said nothing about whether the page was
 #: about PM Kisan — and it was enough to lift an unrelated news item above the
@@ -632,27 +637,30 @@ class IndexStore:
         # The strict per-page ceiling, applied in the same transaction as the
         # inserts so a row is never over it between two commits. It is flat: a
         # domain with one page gets the same 40 characters as one with 25.
+        #
+        # Scoped to the URLs just written, not to the whole domain. The domain
+        # form re-read every page that site ever had on every batch — 129,000
+        # pages at ~5 KB is half a gigabyte that does not fit in this box's
+        # memory, so each pass read it from disk and ran past the 20-second
+        # statement timeout. That is what made every batch report
+        # "19 fetched, 0 indexed": the inserts rolled back with the trim.
         ceiling = int(self._settings.page_body_char_ceiling or 0)
-        if ceiling > 0:
-            for domain in {document.domain for document in documents if document.domain}:
+        written_urls = [document.url for document in documents if document.url]
+        if ceiling > 0 and written_urls:
+            for document in documents:
                 statements.append(
                     (
                         f"UPDATE pages SET body_text = {SQL_TRIM_TO_WORD} "
-                        "WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
-                        "AND length(body_text) > CAST(? AS INTEGER)",
-                        (ceiling, ceiling, ceiling, ceiling, domain, ceiling),
+                        "WHERE url = ? AND length(body_text) > CAST(? AS INTEGER)",
+                        (ceiling, ceiling, ceiling, ceiling, document.url, ceiling),
                     )
                 )
 
         # The domain total is the backstop: with 40 x 25 it cannot bite, but it
         # still holds if either the ceiling or the page cap is raised.
         budget = int(self._settings.domain_body_budget_chars or 0)
-        if budget > 0:
-            for domain in {document.domain for document in documents if document.domain}:
-                # The page count for the site is computed once, not once per
-                # row: the correlated form re-counted the site's pages for every
-                # page it trimmed, which is quadratic and ran past the 20 s
-                # statement timeout on the live index.
+        if budget > 0 and written_urls:
+            for document in documents:
                 statements.append(
                     (
                         "UPDATE pages p SET body_text = substr(p.body_text, 1, "
@@ -660,14 +668,17 @@ class IndexStore:
                         "FROM (SELECT site_id, COUNT(*) AS n FROM pages "
                         "      WHERE site_id = (SELECT site_id FROM sites WHERE domain = ?) "
                         "      GROUP BY site_id) t "
-                        "WHERE p.site_id = t.site_id "
+                        "WHERE p.site_id = t.site_id AND p.url = ? "
                         "AND length(p.body_text) > GREATEST(1, CAST(? AS INTEGER) / GREATEST(1, t.n))",
-                        (budget, domain, budget),
+                        (budget, document.domain, document.url, budget),
                     )
                 )
 
-        statements.append(("SELECT COUNT(*) FROM pages", ()))
-        statements.append(("SELECT COUNT(*) FROM sites", ()))
+        # No counts in the write path. `SELECT COUNT(*)` over 129,000 pages read
+        # half a gigabyte from disk on this box and took ten seconds on its own —
+        # inside the transaction that writes the batch, so it timed out the write
+        # it was meant to report on. The count is taken after the commit, from
+        # the planner's estimate.
         statements.append(("COMMIT", ()))
 
         try:
@@ -681,8 +692,7 @@ class IndexStore:
         queue_start = pages_start + len(documents)
         page_inserts = results[pages_start:queue_start]
         queue_updates = results[queue_start : queue_start + len(queue_ids)]
-        total_pages = int(results[-3].scalar(0) or 0)
-        total_sites = int(results[-2].scalar(0) or 0)
+        total_pages, total_sites = await self._counts()
 
         written = sum(1 for result in page_inserts if result.rows_affected > 0)
         closed = sum(1 for result in queue_updates if result.rows_affected > 0)
@@ -710,6 +720,38 @@ class IndexStore:
             outcome.sites_written,
         )
         return outcome
+
+    async def _counts(self) -> tuple[int, int]:
+        """Page and site totals, from the planner's estimate.
+
+        `SELECT COUNT(*)` over 129,000 pages read half a gigabyte from disk on
+        this box and took ten seconds. Inside the write transaction it timed out
+        the very batch it was reporting on. The estimate is free and accurate to
+        within a few percent after an ANALYZE, which is all a log line needs.
+        """
+        try:
+            result = await self._client.execute(
+                "SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'pages'), "
+                "       (SELECT reltuples::bigint FROM pg_class WHERE relname = 'sites')"
+            )
+            row = [tuple(r) for r in result.rows][0]
+            pages = int(row[0] or 0) if len(row) > 0 else 0
+            sites = int(row[1] or 0) if len(row) > 1 else 0
+        except Exception:  # noqa: BLE001 - a log line is not worth failing a commit
+            pages, sites = 0, 0
+
+        # Below this the count is cheap and exact, so it is taken; above it the
+        # estimate is used, because a real count is the ten-second scan that
+        # caused the timeout in the first place.
+        if pages < ESTIMATE_FROM:
+            try:
+                counted = await self._client.execute("SELECT COUNT(*) FROM pages")
+                pages = int(counted.scalar(0) or 0)
+                counted = await self._client.execute("SELECT COUNT(*) FROM sites")
+                sites = int(counted.scalar(0) or 0)
+            except Exception:  # noqa: BLE001
+                pass
+        return pages, sites
 
     async def prune_queue(self, *, retain_days: int, limit: int) -> int:
         """Delete terminal queue rows older than the retention window.
