@@ -110,3 +110,19 @@ async def test_the_conversion_happens_once(store):
     assert card["snippet_short"] == "KSRTC bus timings"
     assert "has_more" in card
     assert "relevance" in card
+
+
+@pytest.mark.asyncio
+async def test_the_envelope_does_not_contradict_itself(store):
+    """`has_more` and `has_next_page` are the same fact and must agree.
+
+    The envelope derived `has_next_page` from the length of this page and
+    `has_more` from the size of the pool, so a page shortened by deduplication
+    said "more results exist" and "this is the last page" at once. The client
+    believed the second and hid Next.
+    """
+    payload = await service(store, StubFederation([])).search("karnataka", limit=10)
+
+    assert payload["has_next_page"] == payload["has_more"]
+    if payload["has_more"]:
+        assert payload["total_pages"] > payload["page"]
