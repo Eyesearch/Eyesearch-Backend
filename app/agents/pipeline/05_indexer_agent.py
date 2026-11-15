@@ -190,8 +190,10 @@ class IndexerAgent:
         self,
         failed_ids: Sequence[int] = (),
         skipped_ids: Sequence[int] = (),
+        *,
+        reason: str = "",
     ) -> tuple[int, int]:
-        return await self._store.park_rows(failed_ids, skipped_ids)
+        return await self._store.park_rows(failed_ids, skipped_ids, reason=reason)
 
     async def mark_failed(self, queue_ids: Sequence[int], reason: str = "") -> int:
         return await self._store.mark_failed(queue_ids, reason)
