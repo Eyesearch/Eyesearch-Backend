@@ -165,7 +165,9 @@ async def test_a_page_with_no_sitelinks_returns_an_empty_list(client, settings):
         ]
     )
 
-    hits = await store.search("karnataka health")
+    # A query that names no state: a place question now refuses another state's
+    # portal outright, and this test is about the sitelinks field, not places.
+    hits = await store.search("plain page")
     payload = to_result(hits[0]).as_dict()
 
     assert payload["sitelinks"] == []
