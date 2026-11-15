@@ -14,19 +14,41 @@ URL = "https://api.open-meteo.com/v1/forecast"
 TTL_SECONDS = 900
 TIMEOUT_SECONDS = 10.0
 
-#: The cities filled on every pass. Latitude and longitude are fixed here rather
-#: than geocoded per request: a geocode call per reader would be slower than the
-#: weather call it feeds.
-CITIES: dict[str, tuple[float, float]] = {
-    "bengaluru": (12.9716, 77.5946),
-    "mysuru": (12.2958, 76.6394),
-    "mumbai": (19.0760, 72.8777),
-    "delhi": (28.6139, 77.2090),
-    "chennai": (13.0827, 80.2707),
-    "hyderabad": (17.3850, 78.4867),
-    "kolkata": (22.5726, 88.3639),
-    "pune": (18.5204, 73.8567),
-}
+#: The cities filled on every pass — the state capitals, the large cities of
+#: every state, and the ones people actually ask about. Names, not coordinates:
+#: a hardcoded latitude is a number nobody can check, and `geocode.coordinates`
+#: resolves each one once and keeps it for a year.
+CITIES: tuple[str, ...] = (
+    # metros and union territory capitals
+    "delhi", "mumbai", "kolkata", "chennai", "bengaluru", "hyderabad",
+    "ahmedabad", "pune", "surat", "jaipur", "lucknow", "kanpur", "nagpur",
+    "indore", "thane", "bhopal", "visakhapatnam", "patna", "vadodara",
+    "ghaziabad", "ludhiana", "agra", "nashik", "faridabad", "meerut",
+    "rajkot", "varanasi", "srinagar", "aurangabad", "dhanbad", "amritsar",
+    "allahabad", "prayagraj", "ranchi", "howrah", "coimbatore", "jabalpur",
+    "gwalior", "vijayawada", "jodhpur", "madurai", "raipur", "kota",
+    "chandigarh", "guwahati", "solapur", "hubballi", "tiruchirappalli",
+    "bareilly", "mysuru", "tiruppur", "gurugram", "aligarh", "jalandhar",
+    "bhubaneswar", "salem", "warangal", "guntur", "bhiwandi", "saharanpur",
+    "gorakhpur", "bikaner", "amravati", "noida", "jamshedpur", "bhilai",
+    "cuttack", "firozabad", "kochi", "nellore", "bhavnagar", "dehradun",
+    "durgapur", "asansol", "rourkela", "nanded", "kolhapur", "ajmer",
+    "akola", "gulbarga", "kalaburagi", "jamnagar", "ujjain", "loni",
+    "siliguri", "jhansi", "ulhasnagar", "jammu", "sangli", "mangaluru",
+    "erode", "belagavi", "ambattur", "tirunelveli", "malegaon", "gaya",
+    "thiruvananthapuram", "udaipur", "kakinada", "davanagere", "kozhikode",
+    "kurnool", "rajahmundry", "bokaro", "south dumdum", "bellary",
+    "patiala", "gopalpur", "agartala", "bhagalpur", "muzaffarnagar",
+    "bhatinda", "puducherry", "shimla", "imphal", "shillong", "aizawl",
+    "kohima", "gangtok", "itanagar", "panaji", "dispur", "port blair",
+    "silchar", "haridwar", "nainital", "darjeeling", "ooty", "vijayapura",
+    "hospet", "shivamogga", "tumakuru", "chikkamagaluru", "udupi",
+)
+
+#: How many cities go into one request. Open-Meteo accepts several coordinates
+#: in one call, and 130 separate calls every fifteen minutes would spend the
+#: free budget on the same weather.
+CITIES_PER_CALL = 40
 
 #: WMO weather codes, condensed to the words a reader wants.
 WMO_CODES: dict[int, str] = {
@@ -63,9 +85,15 @@ class WeatherSource:
     url = URL
     ttl_seconds = TTL_SECONDS
 
-    def __init__(self, http: httpx.AsyncClient | None = None, cities: dict | None = None) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient | None = None,
+        cities: dict[str, tuple[float, float]] | None = None,
+    ) -> None:
         self._http = http
-        self._cities = cities or CITIES
+        #: `{city: (lat, lon)}`, resolved by the agent from the cache. Without it
+        #: the source has nothing to ask about and fetches nothing.
+        self._cities = cities or {}
 
     async def fetch(self) -> list[tuple[str, str, str]]:
         facts: list[tuple[str, str, str]] = []
