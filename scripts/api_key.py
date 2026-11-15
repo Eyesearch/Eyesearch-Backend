@@ -17,8 +17,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.database import build_client  # noqa: E402
 from app.engine.config import get_settings  # noqa: E402
+from app.libsql_http import build_client  # noqa: E402
 from app.security import create_key, list_keys, revoke_key  # noqa: E402
 
 
