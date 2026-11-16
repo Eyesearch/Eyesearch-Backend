@@ -747,15 +747,24 @@ class SearchService:
         self,
         query: str,
         limit: int | None = None,
+        page: int = 1,
         category: str | None = None,
         language: str | None = None,
         highlight: bool = False,
     ) -> dict[str, Any]:
-        """The meta-search contract (`format=json`), shaped like the README."""
+        """The meta-search contract (`format=json`), shaped like the README.
+
+        `page` is honoured here as well as on the card contract. It was accepted
+        by the endpoint and dropped by this path, so `?format=json&page=3`
+        returned page one — the same URL answering differently depending on a
+        parameter that the other format respects.
+        """
         started = time.perf_counter()
         size = self._clamp_limit(limit)
+        page_number = max(1, min(page, self._settings.search_max_page))
+        offset = (page_number - 1) * size
 
-        key = ("json", query, size, category, language, highlight)
+        key = ("json", query, size, page_number, category, language, highlight)
         cached = self.cache.get(key)
         if cached is not None:
             cached["cache_hit"] = True
@@ -763,12 +772,14 @@ class SearchService:
             return cached
 
         hits = await self._store.search(
-            query, limit=size, category=category, language=language
+            query, limit=size, offset=offset, category=category, language=language
         )
         tokens = fts_tokens(query) if highlight else []
 
         payload = {
             "query": query,
+            "page": page_number,
+            "limit": size,
             "total_hits": len(hits),
             "took_ms": int((time.perf_counter() - started) * 1000),
             "source": SOURCE_LABEL,
