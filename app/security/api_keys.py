@@ -95,13 +95,19 @@ async def verify_key(client, key: str) -> ApiKey | None:
         return None
     result = await client.execute(
         "SELECT key_id, name, prefix, rate_limit_per_minute, daily_quota, calls_total, "
-        "calls_today, revoked_at FROM api_keys WHERE key_hash = ?",
+        "calls_today, revoked_at, (calls_day = CURRENT_DATE) AS today "
+        "FROM api_keys WHERE key_hash = ?",
         (hash_key(key),),
     )
     rows = [tuple(row) for row in result.rows]
     if not rows:
         return None
     row = rows[0]
+    # Yesterday's count is not today's. Without this, a key that spent its whole
+    # allowance yesterday was refused on the first request of the new day, and
+    # because a refused request is never recorded, `calls_today` stayed at the
+    # old figure and the key never worked again.
+    counted_today = int(row[6] or 0) if row[8] else 0
     return ApiKey(
         key_id=str(row[0]),
         name=str(row[1]),
@@ -109,7 +115,7 @@ async def verify_key(client, key: str) -> ApiKey | None:
         rate_limit_per_minute=int(row[3] or DEFAULT_RATE_PER_MINUTE),
         daily_quota=int(row[4] or DEFAULT_DAILY_QUOTA),
         calls_total=int(row[5] or 0),
-        calls_today=int(row[6] or 0),
+        calls_today=counted_today,
         revoked=row[7] is not None,
     )
 
