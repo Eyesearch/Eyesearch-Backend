@@ -101,3 +101,18 @@ async def test_retrieve_answers_a_live_question_from_the_live_layer(client):
     assert "12440.1" in markdown
     assert "As of" in markdown
     assert "bullion" in markdown
+
+
+def test_the_chat_stream_is_a_stream_and_carries_its_sources():
+    """The chat is the surface a reader talks to; it was the last one on the index."""
+    from app.main import _chat_stream
+
+    response = _chat_stream("**12.4 °C**", [{"title": "12.4 °C", "url": "weather"}])
+
+    assert response.media_type == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache"
+
+
+def test_the_chat_route_is_registered():
+    paths = {route.path for route in app.routes}
+    assert "/v1/chat" in paths
