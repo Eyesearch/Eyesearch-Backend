@@ -732,11 +732,34 @@ def sse(event: dict[str, Any]) -> str:
 @app.post("/v1/chat")
 async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     query = require_query(body.query)
+
+    # The chat is the one surface a reader actually talks to, and it was the
+    # last one still answering every question from the page index — "gold
+    # price" came back as a link to a page about gold while `/v1/answer` had
+    # the live value. A live question is answered from the live layer here too.
+    routed = live_route(query)
+    if routed.kind != "index":
+        live_payload = await live_compose.from_live(request.app.state.client, routed)
+        if live_payload is not None:
+            live_payload["route"] = routed.as_dict()
+            answer = live_compose.as_markdown(live_payload)
+            sources = (
+                [{"title": live_payload.get("answer") or live_payload.get("key", ""),
+                  "url": live_payload.get("source", "")}]
+                if live_payload.get("answer")
+                else []
+            )
+            return _chat_stream(answer, sources)
+
     service = get_service(request)
     payload = await service.search(query, limit=5)
     results = payload.get("results", [])
     answer = compose_answer(query, results)
     sources = [{"title": item["title"], "url": item["url"]} for item in results[:5]]
+    return _chat_stream(answer, sources)
+
+
+def _chat_stream(answer: str, sources: list[dict[str, str]]) -> StreamingResponse:
 
     async def stream() -> AsyncIterator[str]:
         buffer: list[str] = []
