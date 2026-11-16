@@ -615,6 +615,7 @@ async def search(
             payload = await service.search_flat(
                 query,
                 limit=limit,
+                page=page,
                 category=category_filter,
                 language=language_filter,
                 highlight=highlight,
