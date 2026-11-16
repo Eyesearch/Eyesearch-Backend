@@ -126,3 +126,15 @@ async def test_the_envelope_does_not_contradict_itself(store):
     assert payload["has_next_page"] == payload["has_more"]
     if payload["has_more"]:
         assert payload["total_pages"] > payload["page"]
+
+
+@pytest.mark.asyncio
+async def test_the_flat_contract_honours_the_page_it_is_given(store):
+    """`?format=json&page=3` returned page one.
+
+    The endpoint accepted `page` and this path dropped it, so the same URL
+    answered differently depending on a parameter the other format respected.
+    """
+    payload = await service(store, StubFederation([])).search_flat("karnataka", limit=5, page=2)
+
+    assert payload["page"] == 2
