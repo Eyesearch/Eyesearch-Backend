@@ -82,3 +82,24 @@ def test_one_key_spending_does_not_affect_another():
 
     allowed, _remaining = limiter.allow("quiet", 3)
     assert allowed is True
+
+
+@pytest.mark.asyncio
+async def test_yesterdays_quota_is_not_todays(client):
+    """A key that spent its allowance yesterday must work today.
+
+    `verify_key` read `calls_today` without checking which day it belonged to,
+    so the first request of a new day was refused against yesterday's figure —
+    and a refused request is never recorded, so the key never recovered.
+    """
+    key, record = await create_key(client, "partner five", daily_quota=10)
+    await client.execute(
+        "UPDATE api_keys SET calls_today = 10, calls_day = CURRENT_DATE - 1 WHERE key_id = ?",
+        (record.key_id,),
+    )
+
+    found = await verify_key(client, key)
+
+    assert found is not None
+    assert found.calls_today == 0
+    assert found.calls_today < found.daily_quota
