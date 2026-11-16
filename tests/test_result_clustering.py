@@ -237,3 +237,43 @@ def test_a_page_named_like_a_language_is_left_alone():
     clustered = cluster_by_domain(hits, per_domain=6, limit=10)
 
     assert [h.url for h in clustered] == ["https://a.in/en", "https://a.in/engineering"]
+
+
+@pytest.mark.asyncio
+async def test_the_suggest_vocabulary_is_read_once_not_per_keystroke(client):
+    """`ts_stat` walks every search vector; it was being called per character.
+
+    The vocabulary changes slowly, so it is read once and kept. This asserts the
+    second call does not go back to the database.
+    """
+    from app.engine.config import Settings
+    from app.engine.store import IndexStore, PageDocument
+
+    store = IndexStore(client, Settings(environment="test"))
+    await store.persist_batch(
+        [
+            PageDocument(
+                url="https://a.in/1", domain="a.in", title="Karnataka health",
+                description="d", body_text="Karnataka health services for citizens. " * 3,
+                digest="voc-1",
+            )
+        ]
+    )
+
+    first = await store.suggest("karn")
+    calls = {"n": 0}
+    real_execute = client.execute
+
+    async def counting_execute(sql, args=()):
+        if "ts_stat" in sql:
+            calls["n"] += 1
+        return await real_execute(sql, args)
+
+    client.execute = counting_execute  # type: ignore[method-assign]
+    try:
+        second = await store.suggest("karn")
+    finally:
+        client.execute = real_execute  # type: ignore[method-assign]
+
+    assert first == second
+    assert calls["n"] == 0, "the vocabulary should have been cached"
