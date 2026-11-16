@@ -20,6 +20,7 @@ import json
 import logging
 import unicodedata
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
@@ -151,6 +152,10 @@ OTHER_PLACE_PENALTY = 4.0
 #: title match, because the page that answers "pm kisan status" does not contain
 #: the phrase "pm kisan status" at all.
 ENTITY_BOOST = 7.0
+
+#: How long the suggest vocabulary is kept. It changes only as pages are
+#: indexed, and a completion list that is ten minutes old is a completion list.
+SUGGEST_VOCABULARY_TTL_SECONDS = 600.0
 
 #: Shortest token that may count as a title hit. "pm" is in half the headlines
 #: on the web, so a title containing it said nothing about whether the page was
@@ -1869,6 +1874,38 @@ class IndexStore:
         for hit in hits:
             hit.score = 1.0 if span <= 0 else round((worst - hit.raw_score) / span, 4)
 
+    async def _suggest_vocabulary(self) -> list[tuple[str, int]]:
+        """The indexed vocabulary, read at most once every ten minutes.
+
+        `ts_stat` walks every search vector it is given. It was being called on
+        every keystroke — the most frequent query the system serves, answered by
+        its most expensive read. The vocabulary changes slowly and is small, so
+        it is read once, sampled rather than complete, and kept.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_vocabulary", None)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+        vocabulary: list[tuple[str, int]] = []
+        # A sample is enough for a vocabulary and cheap on a large index; on a
+        # small one it can return nothing at all, so an empty sample falls back
+        # to the whole table. The result is cached either way.
+        for statement in (
+            "SELECT word, nentry FROM ts_stat("
+            "  'SELECT search_vector FROM pages TABLESAMPLE SYSTEM (10)'"
+            ") WHERE length(word) >= 2 ORDER BY nentry DESC, word ASC LIMIT 20000",
+            "SELECT word, nentry FROM ts_stat("
+            "  'SELECT search_vector FROM pages'"
+            ") WHERE length(word) >= 2 ORDER BY nentry DESC, word ASC LIMIT 20000",
+        ):
+            result = await self._client.execute(statement)
+            vocabulary = [(str(row[0]), int(row[1] or 0)) for row in result.rows if row[0]]
+            if vocabulary:
+                break
+        self._vocabulary = (now + SUGGEST_VOCABULARY_TTL_SECONDS, vocabulary)
+        return vocabulary
+
     async def suggest(self, query: str, limit: int = 6) -> list[str]:
         """Prefix completions: the words the index actually contains.
 
@@ -1883,13 +1920,11 @@ class IndexStore:
             return []
 
         try:
-            result = await self._client.execute(
-                autosuggest.suggestion_query(query),
-                autosuggest.suggestion_params(query, limit),
-            )
-            words = [str(row[0]) for row in result.rows if row[0]]
+            vocabulary = await self._suggest_vocabulary()
+            prefix = (query or "").strip().lower()
+            words = [word for word, _count in vocabulary if word.startswith(prefix)]
             if words:
-                return words
+                return words[:limit]
         except Exception as error:  # noqa: BLE001 - fall through to titles
             logger.debug("ts_stat suggest failed for %r: %s", query, error)
 
