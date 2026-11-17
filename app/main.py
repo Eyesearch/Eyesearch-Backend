@@ -332,9 +332,20 @@ async def rate_limit(request: Request, call_next):
 #: free one for whoever finds it.
 OPEN_PATHS: tuple[str, ...] = ("/", "/health", "/healthz", "/ready", "/opensearch.xml")
 
-#: Paths that need a key. Listed rather than implied, so a new endpoint is a
-#: decision someone made instead of something that happened to be open.
-KEYED_PREFIXES: tuple[str, ...] = ("/v1/",)
+#: Paths that need a key, listed one by one rather than by prefix.
+#:
+#: `/v1/search` and `/v1/suggest` are deliberately absent: they are what the
+#: browser calls, and a static page cannot keep a secret — putting a key in it
+#: publishes the key. They are held to 60 requests a minute per address instead.
+#: Everything below is the machine contract, and that is what a key is for.
+KEYED_PREFIXES: tuple[str, ...] = (
+    "/v1/answer",
+    "/v1/live",
+    "/v1/retrieve",
+    "/v1/chat",
+    "/v1/ai/",
+    "/v1/stats",
+)
 
 _API_KEY_LIMITER = KeyLimiter()
 
@@ -357,7 +368,14 @@ async def require_api_key(request: Request, call_next):
         return await call_next(request)
 
     key = request.headers.get("X-API-Key") or ""
-    record = await verify_key(client, key)
+    try:
+        record = await verify_key(client, key)
+    except Exception as error:  # noqa: BLE001 - middleware is outside the handlers
+        # A handler's exception is turned into the error envelope by the
+        # registered handlers; this code runs before them, so a database fault
+        # here would leave as a bare 500 with no `code` for the client to read.
+        logger.warning("api key check failed: %s", error)
+        return error_response("database_error", "The search index is unavailable.", 503, True)
     if record is None or record.revoked:
         return JSONResponse(
             status_code=401,
@@ -405,7 +423,11 @@ async def require_api_key(request: Request, call_next):
             headers={"X-RateLimit-Remaining": "0"},
         )
 
-    await record_call(client, record.key_id)
+    try:
+        await record_call(client, record.key_id)
+    except Exception as error:  # noqa: BLE001 - counting a call must not fail one
+        logger.warning("could not record an api call: %s", error)
+
     response = await call_next(request)
     response.headers["X-RateLimit-Limit"] = str(record.rate_limit_per_minute)
     response.headers["X-RateLimit-Remaining"] = str(remaining)
