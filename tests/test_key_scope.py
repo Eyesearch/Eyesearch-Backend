@@ -56,3 +56,15 @@ async def test_a_database_fault_in_the_middleware_still_returns_the_envelope():
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "database_error"
+
+
+def test_the_statement_timeout_is_long_enough_for_the_crawl_to_run():
+    """Four seconds killed every crawl batch on its first query.
+
+    The queue's dequeue is a window function over tens of thousands of rows; on
+    this box it takes longer than four seconds, so the loop logged "crawl loop
+    error, continuing" and continued to do nothing.
+    """
+    from app.engine.config import Settings
+
+    assert Settings(_env_file=None).db_statement_timeout_ms >= 20000
