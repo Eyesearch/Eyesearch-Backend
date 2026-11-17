@@ -1162,7 +1162,7 @@ class IndexStore:
         ordering by that number gives round-robin — one URL from each domain,
         then a second from each — so a batch always spreads across the frontier.
 
-        Domains that have already reached `MAX_PAGES_PER_DOMAIN` are excluded.
+        Domains that have reached their host ceiling are excluded.
         Round-robin alone was not enough: once most domains are capped, every
         slot in the batch goes to a row the orchestrator will immediately skip,
         and a genuinely fresh domain queued behind them is never reached. The

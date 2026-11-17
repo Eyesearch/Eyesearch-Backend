@@ -144,3 +144,20 @@ def test_a_private_page_is_left_alone():
 
     karnataka = detect("karnataka scheme")
     assert is_other_states_portal("karnatakanews.in", karnataka) is False
+
+
+def test_the_page_cap_applies_to_the_count_it_is_given():
+    """The count is what makes the rule real.
+
+    The frontier has no count at discovery time and passes `0`, so this ceiling
+    does not fire there — the host cap in the queue's SQL bounds a domain. A
+    caller that knows the count gets the check.
+    """
+    from app.agents import load_agent
+
+    worthy = load_agent("03_parser_agent").is_worthy_page
+
+    assert worthy("https://example.in/schemes/health", 500, cap=200) is False
+    assert worthy("https://example.in/schemes/health", 10, cap=200) is True
+    # The default ceiling still refuses a domain that has plainly run past it.
+    assert worthy("https://example.in/blog/post", 25) is False

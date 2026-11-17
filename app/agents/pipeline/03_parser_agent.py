@@ -708,8 +708,19 @@ def _safe_cut(text: str, budget: int) -> str:
     return cut
 
 
-def is_worthy_page(url: str, current_domain_page_count: int, cap: int = MAX_PAGES_PER_DOMAIN) -> bool:
-    """Whether a page earns one of a domain's slots."""
+def is_worthy_page(
+    url: str,
+    current_domain_page_count: int,
+    cap: int = MAX_PAGES_PER_DOMAIN,
+) -> bool:
+    """Whether a page earns one of a domain's slots.
+
+    The count is what makes this rule real, and the frontier has no count at
+    discovery time — it passes `0`, so this ceiling does not fire there and the
+    host cap in the queue's SQL is what actually bounds a domain. The default is
+    kept because callers that *do* know the count should get the check; a caller
+    that passes 0 is saying "unknown", not "empty".
+    """
     if current_domain_page_count >= cap:
         return False
 
