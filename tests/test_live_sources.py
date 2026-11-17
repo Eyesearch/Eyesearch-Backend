@@ -311,15 +311,27 @@ async def test_a_currency_with_no_rate_is_skipped_rather_than_guessed(client):
     assert "gold.spot.aed.gram" not in facts
 
 
-@pytest.mark.asyncio
-async def test_each_country_edition_is_its_own_feed():
-    """An edition that loses its parameters is the American one, not the Indian."""
+def test_each_country_edition_is_its_own_feed():
+    """An edition that loses its parameters is the American one, not the Indian.
+
+    The URLs were written as literals once and arrived without their query
+    strings, so all nine editions pointed at the same bare feed and every
+    country got American headlines.
+    """
     from app.live.sources.news import FEEDS
 
     assert "gl=US" in FEEDS["us"]
     assert "gl=IN" in FEEDS["in"]
     assert "hl=kn" in FEEDS["in_kn"]
-    assert FEEDS["us"] != FEEDS["in"]
+    assert len({FEEDS[name] for name in ("in", "us", "gb", "ae", "au", "ca", "sg")}) == 7
+
+
+def test_the_government_feed_keeps_the_parameters_it_needs():
+    """PIB answers an empty page without `ModId`, `Lang` and `Regid`."""
+    from app.live.sources.news import FEEDS
+
+    assert "ModId=6" in FEEDS["pib"]
+    assert "Regid=3" in FEEDS["pib"]
 
 
 @pytest.mark.asyncio
