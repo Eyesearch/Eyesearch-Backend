@@ -73,7 +73,14 @@ class RevalidationAgent:
         self._store = store
         self._fetcher = fetcher
         self._settings = settings or get_settings()
-        self._parser = parser or ParserAgent()
+        # The parser is given the same ceilings the crawl gives it. Built with
+        # its defaults, a re-validated page kept a different amount of prose
+        # from a freshly crawled one — so "the body rule applies on refresh"
+        # was true of the code and not of the configuration.
+        self._parser = parser or ParserAgent(
+            body_char_cap=self._settings.page_body_char_ceiling,
+            sentence_budget=self._settings.body_sentence_budget_chars,
+        )
         self._quality = quality or QualityAgent()
         self.refreshed = 0
         self.failed = 0
