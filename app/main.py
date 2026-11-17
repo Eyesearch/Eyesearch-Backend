@@ -466,6 +466,8 @@ async def root() -> dict[str, Any]:
         "version": app.version,
         "endpoints": [
             "/v1/search?q=&category=&lang=",
+            "/v1/answer?q=",
+            "/v1/live?key=",
             "/v1/suggest",
             "/v1/retrieve",
             "/v1/chat",
@@ -929,8 +931,17 @@ async def ai_search(
 
 @app.get("/opensearch.xml")
 async def opensearch(request: Request) -> Response:
+    # A browser installs this descriptor and then sends the query itself, with
+    # no headers it did not get from the document — so a template pointing at
+    # `/v1/search` produced a search engine that answered 401 every time, since
+    # that path has required an API key since keys landed. The human-facing page
+    # is what a browser plugin should open anyway.
+    settings: Settings = getattr(request.app.state, "settings", None) or get_settings()
     base = base_url_for(request)
-    template = base + "/v1/search?q={searchTerms}"
+    if settings.web_base_url:
+        template = settings.web_base_url.rstrip("/") + "/?q={searchTerms}"
+    else:
+        template = base + "/v1/search?q={searchTerms}"
     suggestions = base + "/v1/suggest?q={searchTerms}"
     document = f"""<?xml version="1.0" encoding="UTF-8"?>
 <OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">

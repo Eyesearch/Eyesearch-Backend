@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     #: Facts held before the oldest are dropped. 20,000 is a few megabytes.
     live_max_facts: int = 20000
     public_base_url: str = ""
+    #: The human-facing site, for the OpenSearch descriptor. A browser sends its
+    #: own query with no headers, so the descriptor must point at a page that
+    #: needs no API key.
+    web_base_url: str = ""
 
     # --- Storage safety -----------------------------------------------------
     #: Upper bound on schema/bootstrap work before the app starts serving.

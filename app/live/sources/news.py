@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import xml.etree.ElementTree as ET
+from urllib.parse import urlencode
 
 import httpx
 
@@ -29,22 +30,43 @@ USER_AGENT = "EyesearchBot/1.0 (+https://eyesearch.in; contact@eyesearch.in)"
 #: offers one. Government first: PIB is the feed whose headlines are the source
 #: of record rather than a report of it.
 #:
-#: The Google News URLs carry `hl`, `gl` and `ceid`, and all three matter: a
-#: request that loses them is served the American edition, which is how an
-#: Indian product ended up quoting a story about a Trump golf course.
+#: The Google News URLs are built here rather than written out, because every
+#: one of them needs `hl`, `gl` and `ceid` and a request that loses them is
+#: served the American edition — which is how an Indian product ended up quoting
+#: a story about a Trump golf course. They were written as literals once and
+#: arrived without their query strings, so all nine editions were the same feed.
+GOOGLE_NEWS_EDITIONS: dict[str, tuple[str, str, str]] = {
+    "in": ("en-IN", "IN", "IN:en"),
+    "in_kn": ("kn", "IN", "IN:kn"),
+    "in_hi": ("hi", "IN", "IN:hi"),
+    "us": ("en-US", "US", "US:en"),
+    "gb": ("en-GB", "GB", "GB:en"),
+    "ae": ("en-AE", "AE", "AE:en"),
+    "au": ("en-AU", "AU", "AU:en"),
+    "ca": ("en-CA", "CA", "CA:en"),
+    "sg": ("en-SG", "SG", "SG:en"),
+}
+
+
+def _google_news_url(language: str, country: str, edition: str) -> str:
+    query = urlencode({"hl": language, "gl": country, "ceid": edition})
+    return f"https://news.google.com/rss"
+
+
+#: PIB's feed is not an RSS document at a fixed path; it is that script with
+#: three parameters, and without them it answers an empty page.
+PIB_URL = "https://www.pib.gov.in/RssMain.aspx?" + urlencode(
+    {"ModId": "6", "Lang": "1", "Regid": "3"}
+)
+
 FEEDS: dict[str, str] = {
-    "pib": "https://www.pib.gov.in/RssMain.aspx",
+    "pib": PIB_URL,
     "thehindu": "https://www.thehindu.com/news/national/feeder/default.rss",
     "toi": "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
-    "in": "https://news.google.com/rss",
-    "in_kn": "https://news.google.com/rss",
-    "in_hi": "https://news.google.com/rss",
-    "us": "https://news.google.com/rss",
-    "gb": "https://news.google.com/rss",
-    "ae": "https://news.google.com/rss",
-    "au": "https://news.google.com/rss",
-    "ca": "https://news.google.com/rss",
-    "sg": "https://news.google.com/rss",
+    **{
+        name: _google_news_url(language, country, edition)
+        for name, (language, country, edition) in GOOGLE_NEWS_EDITIONS.items()
+    },
 }
 
 _TAG = re.compile(r"<[^>]+>")
