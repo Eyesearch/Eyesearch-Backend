@@ -128,11 +128,10 @@ def test_the_production_defaults_leave_room_for_the_ceiling():
 
     default = RealSettings(_env_file=None)
     assert default.page_body_char_ceiling == 2048
-    # The domain total must clear ceiling x page cap, or it clamps every page
-    # back down and the ceiling above is a lie.
-    assert default.domain_body_budget_chars >= (
-        default.page_body_char_ceiling * 25  # the old uniform cap, for scale
-    )
+    # The domain total is off. When it was on at 51,200 — written as 25 pages at
+    # the full 2,048 — the 200-page host cap divided it to 256 characters a
+    # page, so the ceiling above never applied on the largest sites.
+    assert default.domain_body_budget_chars == 0
 
 
 @pytest.mark.asyncio
@@ -162,18 +161,23 @@ async def test_a_stored_body_never_ends_mid_word(client):
     assert text.split()[-1] in body.split(), f"ended mid-word: {text!r}"
 
 
-def test_the_ceiling_binds_before_the_budget():
-    """Raising the ceiling without the budget would be a no-op.
+def test_the_ceiling_is_the_only_limit_by_default():
+    """The budget divided across a domain's pages, so it always won.
 
-    The budget divides its total across a domain's pages, so a 5000 budget over
-    25 pages allows 200 characters each — the budget wins and the ceiling above
-    it never applies.
+    51,200 was written as "25 pages at the full 2048", and the host cap is 200:
+    at that size the budget allowed 256 characters a page, and the ceiling above
+    it never applied. It is off by default now, and a positive value must clear
+    the ceiling across a whole domain or it binds instead.
     """
     live = Settings(_env_file=None)
 
-    for pages in (1, 5, 25):
-        effective = min(
-            live.page_body_char_ceiling, live.domain_body_budget_chars // pages
+    assert live.domain_body_budget_chars == 0
+
+    for pages in (1, 5, 25, 200):
+        effective = (
+            live.page_body_char_ceiling
+            if live.domain_body_budget_chars == 0
+            else min(live.page_body_char_ceiling, live.domain_body_budget_chars // pages)
         )
         assert effective == live.page_body_char_ceiling, (
             f"at {pages} pages the budget clamps the page to {effective}"
