@@ -161,3 +161,41 @@ def test_the_page_cap_applies_to_the_count_it_is_given():
     assert worthy("https://example.in/schemes/health", 10, cap=200) is True
     # The default ceiling still refuses a domain that has plainly run past it.
     assert worthy("https://example.in/blog/post", 25) is False
+
+
+@pytest.mark.asyncio
+async def test_a_large_site_keeps_the_full_page_body(client):
+    """200 pages must not mean 256 characters each.
+
+    The per-domain budget was 51,200 — 25 pages at the full 2,048 — while the
+    host cap is 200, so the budget divided to an eighth of the ceiling on
+    exactly the sites that matter most.
+    """
+    from app.engine.config import Settings
+    from app.engine.store import IndexStore, PageDocument
+
+    store = IndexStore(client, Settings(environment="test"))
+    body = "Karnataka state portal services and schemes for citizens. " * 40
+    await store.persist_batch(
+        [
+            PageDocument(
+                url=f"https://karnataka.gov.in/p{i}",
+                domain="karnataka.gov.in",
+                title=f"Scheme {i}",
+                description="d",
+                body_text=body,
+                digest=f"body-{i}",
+            )
+            for i in range(30)
+        ]
+    )
+
+    result = await client.execute(
+        "SELECT length(body_text) FROM pages ORDER BY length(body_text) DESC LIMIT 1"
+    )
+    longest = int(tuple(tuple(r) for r in result.rows)[0][0])
+
+    # The ceiling trims to the last whole word, so 2,048 is the most a body can
+    # hold, not the exact length every body ends at.
+    assert longest >= 2000
+    assert longest <= 2048

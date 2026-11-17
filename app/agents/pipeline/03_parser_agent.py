@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 #: before they said anything.
 BODY_CHAR_CAP = 2000
 
+#: How much of a page's prose is kept, by default, chosen by sentence. The
+#: orchestrator passes `settings.body_sentence_budget_chars`. Defined here
+#: rather than beside the title rules because a default argument is evaluated
+#: when the class is built, and a constant below the class is not there yet.
+BODY_SENTENCE_BUDGET = 1200
+
 #: Ceilings for the card metadata fields. The brand sits on its own line now,
 #: so the title carries the whole subject rather than four words of it.
 CLEAN_URL_CHAR_CAP = 160
@@ -305,6 +311,13 @@ def build_description(title: str, meta_description: str, body_text: str) -> str:
 SENTENCE_CUT_RATIO = 0.7
 
 
+def extract_sentences(text: str, budget: int) -> str:
+    """The best sentences of a body, in page order, within `budget` characters."""
+    from app.engine.body_sentences import extract
+
+    return extract(text, budget)
+
+
 def truncate_body(text: str, cap: int = BODY_CHAR_CAP) -> str:
     """Cut `text` to at most `cap` characters, preferring a sentence end.
 
@@ -367,8 +380,17 @@ class ParserAgent:
         self,
         body_char_cap: int = BODY_CHAR_CAP,
         max_links: int = MAX_LINKS_PER_PAGE,
+        sentence_budget: int = BODY_SENTENCE_BUDGET,
     ) -> None:
-        self.body_char_cap = body_char_cap
+        # A ceiling of 0 means "no ceiling", not "no body". Passing it straight
+        # through emptied every page — `truncate_body(text, 0)` keeps one
+        # character — and the quality gate then rejected the lot as
+        # low_text_density.
+        cap = int(body_char_cap)
+        self.body_char_cap = cap if cap > 0 else BODY_CHAR_CAP
+        #: How much prose is kept, chosen by sentence. The cap above is the hard
+        #: ceiling; this is how much of the page's meaning is retained.
+        self.sentence_budget = min(int(sentence_budget), self.body_char_cap)
         #: How many of a page's links leave it. The orchestrator passes
         #: `settings.max_outbound_links_per_page`, which used to be dead: the
         #: parser cut at its own constant first, so a homepage with 200 links
@@ -406,10 +428,16 @@ class ParserAgent:
         # <head>, so the keyword-stuffed <title> and every <meta> description
         # ended up at the front of body_text and showed up in snippets.
         body_source = content_container(soup)
+        cleaned_body = clean_trailing_boilerplate(
+            clean_leading_boilerplate(body_source.get_text(" "))
+        )
+        # Sentences, not the opening characters. A body cut to its first N
+        # characters holds the menu and loses the paragraph that answers a
+        # question — "karnataka scheme status" is as often third as first — and
+        # a card whose snippet comes from the menu says nothing. The budget is
+        # the amount of prose kept; the ceiling is the hard cap it must fit in.
         body_text = truncate_body(
-            clean_trailing_boilerplate(
-                clean_leading_boilerplate(body_source.get_text(" "))
-            ),
+            extract_sentences(cleaned_body, self.sentence_budget),
             self.body_char_cap,
         )
         description = build_description(title, self._description(soup), body_text)

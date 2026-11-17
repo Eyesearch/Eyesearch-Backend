@@ -335,21 +335,30 @@ class Settings(BaseSettings):
     #: rank on and not enough to read: a search snippet drawn from a 200
     #: character body is the opening clause of a sentence.
     #:
-    #: This ceiling is only half the limit. `domain_body_budget_chars` below
-    #: divides its total across the domain's pages, so with a 5000 budget and 25
-    #: pages the effective per-page limit is 200 — the budget wins and raising
-    #: this alone changes nothing. The two move together.
+    #: This is the limit. `domain_body_budget_chars` below can impose a second,
+    #: smaller one — it is off by default, because when it was on it divided
+    #: across 200 pages and cut every page to 256 characters.
     page_body_char_ceiling: int = 2048
-    #: Total body text one domain may hold across all its pages: the page
-    #: ceiling times the page cap, 200 x 25. It has to clear that, or it silently
-    #: undoes the ceiling — a 1,000-character budget clamped every page back to 40
-    #: and made the per-page setting a lie.
-    #: The domain's total body budget, divided across its pages. Raised from
-    #: 5000 in step with the per-page ceiling: at 25 pages a 5000 budget allows
-    #: 200 characters each, which would have quietly undone the ceiling above.
-    #: 51200 is 25 pages at the full 2048, so the ceiling binds first and the
-    #: budget remains the backstop it was meant to be.
-    domain_body_budget_chars: int = 51200
+    #: How much of a page's prose is kept, chosen by sentence rather than by
+    #: position. Keeping the opening characters keeps the navigation and drops
+    #: the paragraph that answers a question; keeping the best sentences keeps
+    #: something a card can quote. The ceiling above is the hard cap this must
+    #: fit inside.
+    body_sentence_budget_chars: int = 1200
+    #: Total body text one domain may hold across all its pages. Zero means no
+    #: domain backstop: the per-page ceiling is the only limit.
+    #:
+    #: It was 51,200, described as "25 pages at the full 2048" — but the host cap
+    #: is 200 pages, so on a large site the budget divided to 256 characters a
+    #: page and the ceiling above never applied. A limit that quietly overrides
+    #: the one printed next to it is worse than no limit: it looks like 2 KB per
+    #: page and delivers an eighth of it, on exactly the sites that matter most.
+    #:
+    #: The storage arithmetic holds without it. 373,000 pages at 2 KB of body is
+    #: 746 MB, and the page ceiling was derived from an average of 12 KB per page
+    #: including indexes — so 2 KB of body sits inside the estimate the ceiling
+    #: was built on.
+    domain_body_budget_chars: int = 0
 
     search_default_limit: int = 10
     #: How many results one domain may contribute to a single page. A search

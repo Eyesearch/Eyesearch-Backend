@@ -170,6 +170,10 @@ def test_the_ceilings_are_unchanged():
     # Two kilobytes: a snippet drawn from a 200 character body is the opening
     # clause of a sentence, not a summary of the page.
     assert settings.page_body_char_ceiling == 2048
-    # The budget must still clear the ceiling, or it clamps every page back
-    # down and the ceiling above is a lie.
-    assert settings.domain_body_budget_chars >= settings.page_body_char_ceiling * 25
+    # The domain budget is off by default: on, it divided across the 200-page
+    # host cap and clamped every page to 256 characters, which made the ceiling
+    # above a lie. Zero means the per-page ceiling is the only limit; a positive
+    # value must clear the ceiling across a whole domain or it binds instead.
+    assert settings.domain_body_budget_chars == 0 or (
+        settings.domain_body_budget_chars >= settings.page_body_char_ceiling * 200
+    )
