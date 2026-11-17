@@ -47,7 +47,17 @@ class Settings(BaseSettings):
     turso_database_url: str = ""
     turso_auth_token: str = ""
     #: A search must answer or fail, never hang behind the crawler's writes.
-    db_statement_timeout_ms: int = 4000
+    #:
+    #: Four seconds is not that. On this box the queue's own dequeue — a window
+    #: function over 38,000 pending rows — takes longer than four seconds, so
+    #: every crawl batch died on its first query with "canceling statement due
+    #: to statement timeout" and the crawler did nothing at all for a day while
+    #: `pending` sat at 38,000. The loop logs and continues, so it looked alive.
+    #:
+    #: Twenty seconds is the figure the crawl path was written against. A search
+    #: that needs more than that is a search to make cheaper, and it has its own
+    #: fallbacks for exactly that.
+    db_statement_timeout_ms: int = 20000
     db_acquire_timeout_seconds: float = 2.0
 
     # --- search isolation ---------------------------------------------------
