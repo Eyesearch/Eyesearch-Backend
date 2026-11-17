@@ -232,7 +232,9 @@ class Orchestrator:
         )
         self._fetcher = FetcherAgent(self._settings, transport=transport)
         self._parser = ParserAgent(
-            max_links=self._settings.max_outbound_links_per_page
+            body_char_cap=self._settings.page_body_char_ceiling,
+            max_links=self._settings.max_outbound_links_per_page,
+            sentence_budget=self._settings.body_sentence_budget_chars,
         )
         self._quality = QualityAgent()
         self._classifier = ClassifierAgent()
