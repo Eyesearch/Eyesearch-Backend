@@ -709,8 +709,10 @@ class IndexStore:
                     )
                 )
 
-        # The domain total is the backstop: with 40 x 25 it cannot bite, but it
-        # still holds if either the ceiling or the page cap is raised.
+        # The domain total is off by default: the per-page ceiling is the limit,
+        # and a per-domain budget divided across 200 pages was quietly cutting
+        # each one to 256 characters. Set it to a positive number to bring the
+        # backstop back.
         budget = int(self._settings.domain_body_budget_chars or 0)
         if budget > 0 and written_urls:
             for document in documents:
@@ -1173,43 +1175,50 @@ class IndexStore:
         would shrink a batch below the configured size whenever few domains have
         work.
         """
-        # The per-host ceiling comes from the frontier, generated from the same
-        # constants the admission gate uses.
+        # Two cheap steps instead of one expensive one.
+        #
+        # The query used to number *every* pending row per domain with
+        # ROW_NUMBER and probe `pages` with NOT EXISTS for each of them. At
+        # 38,000 pending rows and 170,000 pages that ran past a twenty-second
+        # statement timeout, and since the crawl loop catches the error and
+        # continues, the crawler sat doing nothing for a day while `/health`
+        # reported `db: up`.
+        #
+        # Now the domains are found first — a plain DISTINCT over the pending
+        # set, which the status index serves — and each domain offers its next
+        # few rows through a LATERAL join, so the `pages` probe runs a handful
+        # of times per domain rather than once per queued row.
         result = await self._client.execute(
+            "WITH ready AS ("
+            "  SELECT DISTINCT domain FROM crawl_queue "
+            "  WHERE status = 'pending' AND domain <> '' "
+            "  ORDER BY domain LIMIT ?"
+            "), picked AS ("
+            "  SELECT cq.id, cq.url, cq.domain, cq.retry_count, cq.priority FROM ready "
+            "  JOIN LATERAL ("
+            "    SELECT id, url, domain, retry_count, priority FROM crawl_queue "
+            "    WHERE status = 'pending' AND domain = ready.domain "
+            # Priority 0 marks a deliberate re-fetch — a repair or a re-arm —
+            # and those must run even when the URL is already indexed.
+            "      AND (priority = 0 OR NOT EXISTS ("
+            "        SELECT 1 FROM pages p WHERE p.url = crawl_queue.url)) "
+            "    ORDER BY priority ASC, id ASC LIMIT ?"
+            "  ) cq ON TRUE"
+            ") "
             "SELECT id, url, domain, retry_count FROM ("
-            "  SELECT cq.id AS id, cq.url, cq.domain, cq.retry_count,"
-            # Priority first, then age, inside each domain's turn: a re-queued
-            # page is fetched before new discovery from the same site, without
-            # letting one site take the whole batch.
-            "         ROW_NUMBER() OVER (PARTITION BY cq.domain "
-            "ORDER BY cq.priority ASC, cq.id ASC) AS rn, "
+            "  SELECT id, url, domain, retry_count,"
+            "         ROW_NUMBER() OVER (PARTITION BY domain "
+            "ORDER BY priority ASC, id ASC) AS rn, "
             # How many slots a domain gets per round. Round-robin at one slot
             # each starves everybody when the frontier is two thousand domains
-            # wide: a fresh portal reached its 200-page ceiling in 55 days at
-            # 292 pages an hour. Government domains take three slots a round,
-            # which triples their growth and, in the same move, slows the
-            # category that had grown to 42% of the index.
-            f"         {_domain_slots_sql('cq.domain')} AS w "
-            "  FROM crawl_queue cq WHERE cq.status = 'pending'"
-            # Gate two. A row that is already indexed costs a fetch and writes
-            # nothing. Priority 0 marks a deliberate re-fetch — a repair, or a
-            # re-arm for freshness — and those must still run.
-            "    AND (cq.priority = 0 OR NOT EXISTS ("
-            "      SELECT 1 FROM pages p WHERE p.url = cq.url"
-            "    ))"
-            # The capped-domain exclusion used to sit here as an aggregate over
-            # `pages` on every call: at 74k pages and 30k queued rows it ran past
-            # the 20 s statement timeout and took the whole crawl loop with it.
-            # It is redundant now - the half-hourly sweep parks a capped host's
-            # pending rows as `skipped`, and the batch itself re-checks each
-            # host's ceiling before fetching anything - so the crawl takes the
-            # round-robin batch and drops the capped rows a step later, for
-            # free.
-            ") ORDER BY ((rn + w - 1) / w) ASC, rn ASC, id ASC LIMIT ?",
-            # Over-fetch, because the capped hosts are dropped below: without the
-            # spare rows a batch could shrink to nothing on a queue that is
-            # mostly parked.
-            (max(limit, limit * 4),),
+            # wide; government domains take three, which triples their growth.
+            f"         {_domain_slots_sql('domain')} AS w "
+            "  FROM picked"
+            ") t ORDER BY ((rn + w - 1) / w) ASC, rn ASC, id ASC LIMIT ?",
+            # The domains to consider, how many rows each offers, and the batch.
+            # The window function then runs over a few hundred rows instead of
+            # every pending row in the queue.
+            (max(limit, limit * 4), limit, max(limit, limit * 4)),
         )
         candidates = [
             QueuedUrl(
