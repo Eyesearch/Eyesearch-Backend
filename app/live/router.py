@@ -64,6 +64,9 @@ BULLION_WORDS = ("gold", "silver", "bullion", "ಚಿನ್ನ", "ಬೆಂಗ�
 WEATHER_WORDS = ("weather", "temperature", "forecast", "rain", "ಹವಾಮಾನ", "ಮಳೆ", "mausam")
 NEWS_WORDS = ("news", "headline", "ಸುದ್ದಿ", "breaking", "headlines")
 
+#: Words that make a question about a day rather than this moment.
+FORECAST_WORDS = ("tomorrow", "forecast", "naale", "rain", "ಮಳೆ", "how hot", "how cold")
+
 #: Words that make a question about the air rather than the weather.
 AIR_WORDS = ("aqi", "air quality", "pollution", "pm2.5", "pm 2.5", "smog", "ಮಾಲಿನ್ಯ")
 
@@ -189,6 +192,25 @@ def route(query: str) -> Route:
         if re.search(r"\b10\s*(g|gm|gram)\b", lowered):
             return Route("bullion", f"gold.{karat}.inr.10g", reason=f"{karat} gold per ten grams")
         return Route("bullion", f"gold.{karat}.inr.gram", reason=f"{karat} gold per gram")
+
+    # A forecast question is a weather question about a named day. It is asked
+    # far more often than "what is it now", and it used to fall through to the
+    # index because the router only knew the present tense.
+    if any(word in lowered for word in FORECAST_WORDS):
+        city = _city(text)
+        if city:
+            day = "tomorrow" if ("tomorrow" in lowered or "naale" in lowered) else "today"
+            if "rain" in lowered or "ಮಳೆ" in lowered:
+                return Route(
+                    "weather",
+                    f"weather.{city}.{day}.rain_chance",
+                    city=city,
+                    reason=f"rain {day} in {city}",
+                )
+            return Route(
+                "weather", f"weather.{city}.{day}.high", city=city, reason=f"{day} in {city}"
+            )
+        return Route("index", reason="a forecast, but no city we fill")
 
     if any(word in lowered for word in WEATHER_WORDS):
         city = _city(text)
