@@ -401,3 +401,25 @@ async def test_holidays_are_the_ones_still_ahead():
 
     assert facts["holiday.in.next"] == "2026-12-25"
     assert "Republic Day" not in " ".join(facts.values())
+
+
+@pytest.mark.asyncio
+async def test_the_forecast_rides_on_the_weather_call():
+    """"Will it rain tomorrow" needed a second call until it was asked for here."""
+    payload = {
+        "current": {"temperature_2m": 24.0, "weather_code": 1},
+        "daily": {
+            "temperature_2m_max": [30.0, 31.5, 29.0],
+            "temperature_2m_min": [18.0, 19.0, 17.5],
+            "precipitation_sum": [0.0, 4.2, 0.0],
+            "precipitation_probability_max": [10, 80, 5],
+        },
+    }
+    source = WeatherSource(cities={"delhi": (28.6, 77.2)}, http=FakeHTTP(payload))
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["weather.delhi.tomorrow.high"] == "31.5"
+    assert facts["weather.delhi.tomorrow.rain_chance"] == "80"
+    assert facts["weather.delhi.today.high"] == "30"
+    assert facts["weather.delhi.temperature"] == "24"

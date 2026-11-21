@@ -88,6 +88,33 @@ def describe(code: int | None) -> str:
     return WMO_CODES.get(int(code or 0), "unknown")
 
 
+#: Which day each label means, in the order Open-Meteo returns them.
+FORECAST_LABELS = ("today", "tomorrow", "day_after")
+
+
+def _forecast_facts(city: str, daily: dict) -> list[tuple[str, str, str]]:
+    """The next three days, labelled by what a reader would call them.
+
+    A date is precise and unreadable; "tomorrow" is what the question asked.
+    """
+    facts: list[tuple[str, str, str]] = []
+    highs = daily.get("temperature_2m_max") or []
+    lows = daily.get("temperature_2m_min") or []
+    rain = daily.get("precipitation_sum") or []
+    chance = daily.get("precipitation_probability_max") or []
+
+    for index, label in enumerate(FORECAST_LABELS):
+        if index < len(highs) and highs[index] is not None:
+            facts.append((f"weather.{city}.{label}.high", f"{highs[index]:g}", "°C"))
+        if index < len(lows) and lows[index] is not None:
+            facts.append((f"weather.{city}.{label}.low", f"{lows[index]:g}", "°C"))
+        if index < len(rain) and rain[index] is not None:
+            facts.append((f"weather.{city}.{label}.rain", f"{rain[index]:g}", "mm"))
+        if index < len(chance) and chance[index] is not None:
+            facts.append((f"weather.{city}.{label}.rain_chance", f"{chance[index]:g}", "%"))
+    return facts
+
+
 class WeatherSource:
     name = NAME
     url = URL
@@ -112,11 +139,22 @@ class WeatherSource:
                     "latitude": lat,
                     "longitude": lon,
                     "current": "temperature_2m,relative_humidity_2m,precipitation,weather_code",
+                    # The forecast costs nothing extra: it rides on the same
+                    # request. "Will it rain tomorrow" is a more common question
+                    # than "what is it now", and answering it needed a second
+                    # call until it was asked for here.
+                    "daily": (
+                        "temperature_2m_max,temperature_2m_min,"
+                        "precipitation_sum,precipitation_probability_max"
+                    ),
+                    "forecast_days": 3,
+                    "timezone": "auto",
                 }
                 try:
                     response = await client.get(URL, params=params)
                     response.raise_for_status()
-                    current = response.json().get("current", {})
+                    body = response.json()
+                    current = body.get("current", {})
                 except Exception:
                     # One city failing must not lose the others.
                     continue
@@ -141,6 +179,7 @@ class WeatherSource:
                             "",
                         )
                     )
+                facts.extend(_forecast_facts(city, body.get("daily") or {}))
         finally:
             if self._http is None:
                 await client.aclose()

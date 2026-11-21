@@ -210,3 +210,22 @@ def test_air_and_holidays_are_routed(question, key):
 def test_a_holiday_question_names_a_country_or_defaults_to_india():
     assert route("public holiday").key == "holiday.in.next"
     assert route("holiday in australia").key == "holiday.au.next"
+
+
+@pytest.mark.parametrize(
+    "question,key",
+    [
+        ("will it rain tomorrow in mumbai", "weather.mumbai.tomorrow.rain_chance"),
+        ("weather tomorrow bangalore", "weather.bengaluru.tomorrow.high"),
+        ("how hot is delhi today", "weather.delhi.today.high"),
+    ],
+)
+def test_a_forecast_question_is_about_a_day(question, key):
+    """The router only knew the present tense, so a forecast went to the index."""
+    routed = route(question)
+    assert routed.kind == "weather"
+    assert routed.key == key
+
+
+def test_a_present_tense_weather_question_is_still_the_current_temperature():
+    assert route("weather in delhi").key == "weather.delhi.temperature"
