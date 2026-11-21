@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from app.database import initialize_database, verify_writable
 from app.engine.config import Settings, describe_database_target, get_settings
+from app.engine.entities import detect as detect_entity
 from app.engine.store import IndexStore
 from app.live import answer as live_answer
 from app.live import compose as live_compose
@@ -862,7 +863,14 @@ async def answer_get(
     service = get_service(request)
     payload = await service.search(query, limit=limit)
     results = payload.get("results", [])
-    composed = live_compose.from_index(results, query)
+    # A scheme or service the question named has an owning domain, and saying
+    # which one is worth more than an empty answer: "we cannot read
+    # pmkisan.gov.in" is a different statement from "we have never heard of it".
+    entity = detect_entity(query)
+    official = (
+        {"name": entity.name, "domain": entity.domains[0]} if entity is not None else None
+    )
+    composed = live_compose.from_index(results, query, official=official)
     composed["route"] = routed.as_dict()
     return JSONResponse(content=composed)
 
