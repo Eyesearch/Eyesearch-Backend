@@ -190,3 +190,23 @@ def test_an_index_answer_is_rendered_as_a_source_not_a_fact():
     assert "Karnataka Scheme Status" in markdown
     assert "https://karnataka.gov.in/schemes" in markdown
     assert "not a value we hold" in markdown
+
+
+@pytest.mark.parametrize(
+    "question,key",
+    [
+        ("aqi in delhi", "air.delhi.aqi"),
+        ("air quality mumbai", "air.mumbai.aqi"),
+        ("next holiday", "holiday.in.next"),
+        ("holiday in us", "holiday.us.next"),
+    ],
+)
+def test_air_and_holidays_are_routed(question, key):
+    routed = route(question)
+    assert routed.key == key
+    assert routed.kind in {"air", "holiday"}
+
+
+def test_a_holiday_question_names_a_country_or_defaults_to_india():
+    assert route("public holiday").key == "holiday.in.next"
+    assert route("holiday in australia").key == "holiday.au.next"

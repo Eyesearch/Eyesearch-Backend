@@ -44,6 +44,11 @@ class LiveFeedAgent:
         for cls in SOURCES:
             if cls.__name__ == "WeatherSource":
                 continue
+            if cls.__name__ == "AirSource":
+                # Air quality is read for the same cities as the weather, from
+                # the same coordinates: one geocode, two answers.
+                built.append(cls(cities=self._city_cache))
+                continue
             if cls.__name__ == "MetalsSource":
                 # Gold in dirhams needs the day's rate, which the currency
                 # source stores a moment earlier in the same pass.
