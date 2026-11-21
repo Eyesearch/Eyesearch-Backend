@@ -59,16 +59,35 @@ async def from_live(client, routed: Route) -> dict[str, Any] | None:
     return answer
 
 
-def from_index(results: list[dict[str, Any]], query: str) -> dict[str, Any]:
-    """The page-index answer: what we hold, and that it is a page, not a value."""
+def from_index(
+    results: list[dict[str, Any]],
+    query: str,
+    *,
+    official: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """The page-index answer: what we hold, and that it is a page, not a value.
+
+    `official` is the domain that owns a scheme or service the question named.
+    When the index holds nothing, that is still worth saying: "we cannot read
+    pmkisan.gov.in" is a different answer from "we have never heard of it", and
+    a caller can act on the first.
+    """
     if not results:
-        return {
+        payload: dict[str, Any] = {
             "query": query,
             "kind": "index",
             "answer": None,
             "freshness": "missing",
             "note": "No live source covers this question and the index holds nothing for it.",
         }
+        if official:
+            payload["official"] = official
+            payload["note"] = (
+                f"{official.get('name', 'This')} is published at "
+                f"{official.get('domain', 'its official site')}, which we cannot read "
+                "at the moment. The answer is not that it does not exist."
+            )
+        return payload
     top = results[0]
     return {
         "query": query,

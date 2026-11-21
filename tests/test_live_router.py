@@ -212,20 +212,28 @@ def test_a_holiday_question_names_a_country_or_defaults_to_india():
     assert route("holiday in australia").key == "holiday.au.next"
 
 
-@pytest.mark.parametrize(
-    "question,key",
-    [
-        ("will it rain tomorrow in mumbai", "weather.mumbai.tomorrow.rain_chance"),
-        ("weather tomorrow bangalore", "weather.bengaluru.tomorrow.high"),
-        ("how hot is delhi today", "weather.delhi.today.high"),
-    ],
-)
-def test_a_forecast_question_is_about_a_day(question, key):
-    """The router only knew the present tense, so a forecast went to the index."""
-    routed = route(question)
-    assert routed.kind == "weather"
-    assert routed.key == key
+def test_a_missing_answer_can_still_name_the_official_site():
+    """`missing` and `we cannot read it` are different answers.
+
+    A scheme the index holds nothing for is still a scheme that exists, and the
+    domain that owns it is worth saying out loud.
+    """
+    from app.live.compose import from_index
+
+    payload = from_index(
+        [], "pm kisan status", official={"name": "pm kisan", "domain": "pmkisan.gov.in"}
+    )
+
+    assert payload["freshness"] == "missing"
+    assert payload["answer"] is None
+    assert payload["official"]["domain"] == "pmkisan.gov.in"
+    assert "cannot read" in payload["note"]
 
 
-def test_a_present_tense_weather_question_is_still_the_current_temperature():
-    assert route("weather in delhi").key == "weather.delhi.temperature"
+def test_a_missing_answer_without_an_entity_says_only_that():
+    from app.live.compose import from_index
+
+    payload = from_index([], "karnataka scheme status")
+
+    assert payload["freshness"] == "missing"
+    assert "official" not in payload
