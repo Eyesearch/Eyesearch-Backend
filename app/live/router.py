@@ -64,6 +64,12 @@ BULLION_WORDS = ("gold", "silver", "bullion", "ಚಿನ್ನ", "ಬೆಂಗ�
 WEATHER_WORDS = ("weather", "temperature", "forecast", "rain", "ಹವಾಮಾನ", "ಮಳೆ", "mausam")
 NEWS_WORDS = ("news", "headline", "ಸುದ್ದಿ", "breaking", "headlines")
 
+#: Words that make a question about the air rather than the weather.
+AIR_WORDS = ("aqi", "air quality", "pollution", "pm2.5", "pm 2.5", "smog", "ಮಾಲಿನ್ಯ")
+
+#: Words that make a question about a public holiday.
+HOLIDAY_WORDS = ("holiday", "holidays", "ರಜೆ", "raja dina", "public holiday", "bandh")
+
 #: Words that make a question about an exchange rate rather than a page. The
 #: first version only knew about gold and news, so "dollar rate" went to the
 #: index and came back as an Indian electricity regulator.
@@ -134,6 +140,18 @@ def _karat(query: str) -> str:
     return "22k"
 
 
+#: Countries a holiday question can name, mapped to the feed's own key.
+HOLIDAY_COUNTRIES: dict[str, str] = {
+    "india": "in", "indian": "in",
+    "us": "us", "usa": "us", "america": "us", "united states": "us",
+    "uk": "gb", "britain": "gb", "england": "gb", "london": "gb",
+    "uae": "ae", "dubai": "ae", "emirates": "ae",
+    "singapore": "sg",
+    "australia": "au", "sydney": "au",
+    "canada": "ca", "toronto": "ca",
+}
+
+
 def _city(query: str) -> str | None:
     """The city a question names, resolved to the name the feed stores it under.
 
@@ -186,6 +204,19 @@ def route(query: str) -> Route:
             if re.search(rf"\b{code}\b", lowered):
                 return Route("currency", f"fx.usd.{code}", reason=f"USD to {code.upper()}")
         return Route("currency", DEFAULT_CURRENCY_PAIR, reason="USD to INR")
+
+    if any(word in lowered for word in AIR_WORDS):
+        city = _city(lowered)
+        if city is not None:
+            return Route("air", f"air.{city}.aqi", reason=f"air quality in {city}")
+        return Route("index", "", reason="air quality, but no city named")
+
+    if any(word in lowered for word in HOLIDAY_WORDS):
+        for name in HOLIDAY_COUNTRIES:
+            if re.search(rf"\b{re.escape(name)}\b", lowered):
+                code = HOLIDAY_COUNTRIES[name]
+                return Route("holiday", f"holiday.{code}.next", reason=f"next holiday in {code}")
+        return Route("holiday", "holiday.in.next", reason="next holiday in India")
 
     if any(word in lowered for word in NEWS_WORDS):
         for word, edition in NEWS_EDITIONS.items():

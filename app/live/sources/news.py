@@ -50,7 +50,11 @@ GOOGLE_NEWS_EDITIONS: dict[str, tuple[str, str, str]] = {
 
 def _google_news_url(language: str, country: str, edition: str) -> str:
     query = urlencode({"hl": language, "gl": country, "ceid": edition})
-    return f"https://news.google.com/rss"
+    # Built by concatenation, not an f-string. The query string has gone
+    # missing from this line twice — once as a literal dict of URLs and once
+    # inside an f-string — and every time it vanished the nine editions became
+    # one feed again. Concatenation has survived where the other two did not.
+    return "https://news.google.com/rss" + "?" + query
 
 
 #: PIB's feed is not an RSS document at a fixed path; it is that script with

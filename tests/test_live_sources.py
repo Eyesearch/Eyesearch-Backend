@@ -363,3 +363,41 @@ async def test_the_ecb_feed_covers_the_primary_when_it_fails():
     facts = {key: value for key, value, _ in await source.fetch()}
 
     assert facts["fx.usd.inr"] == "90"
+
+
+@pytest.mark.asyncio
+async def test_air_quality_reports_a_band_a_reader_can_use():
+    """An index number alone is not an answer; the word beside it is."""
+    from app.live.sources.air import AirSource
+
+    payload = {"current": {"european_aqi": 35, "pm2_5": 12.5, "pm10": 20.0}}
+    source = AirSource(cities={"delhi": (28.6, 77.2)}, http=FakeHTTP(payload))
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["air.delhi.aqi"] == "35"
+    assert facts["air.delhi.band"] == "fair"
+    assert facts["air.delhi.pm2_5"] == "12.5"
+
+
+@pytest.mark.asyncio
+async def test_holidays_are_the_ones_still_ahead():
+    """A list of holidays that have already passed is not a live fact."""
+    import datetime as dt
+
+    from app.live.sources.holidays import HolidaySource
+
+    payload = [
+        {"date": "2026-01-26", "localName": "Republic Day"},
+        {"date": "2026-12-25", "localName": "Christmas"},
+    ]
+    source = HolidaySource(
+        countries={"in": "IN"},
+        http=FakeHTTP(payload),
+        today=dt.date(2026, 11, 21),
+    )
+
+    facts = {key: value for key, value, _ in await source.fetch()}
+
+    assert facts["holiday.in.next"] == "2026-12-25"
+    assert "Republic Day" not in " ".join(facts.values())
