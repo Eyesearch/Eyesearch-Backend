@@ -74,7 +74,13 @@ class Settings(BaseSettings):
     #: "no response" the user saw rather than a slow answer. Raised again to 6s:
     #: at 3s a three-word query on the 25k-page index was cancelled and the
     #: reader got a database error instead of the results that were seconds away.
-    search_statement_timeout_ms: int = 6000
+    #: Raised from 6s. The figure was set when the index held 25,000 pages and
+    #: the crawler was idle; it is now 183,000 and the crawler writes through
+    #: every batch, so a common word ranks a far larger candidate set on a far
+    #: busier disk. When this expires the index-only fallback runs, and if that
+    #: also expires the reader is told "no results" while the index is fine —
+    #: which is the worst answer of the three.
+    search_statement_timeout_ms: int = 15000
     search_acquire_timeout_seconds: float = 1.0
     local_db_path: str = "./local.db"
     allow_local_db: bool = True
