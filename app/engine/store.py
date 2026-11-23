@@ -1037,6 +1037,14 @@ class IndexStore:
         new seed can be enqueued and the worker idles forever. Re-arming keeps
         the crawl alive and the index fresh, bounded by a cooldown so a URL is
         not re-fetched on every pass.
+
+        Neither this nor `rearm_retryable_failed` excludes capped domains any
+        more. That exclusion was an aggregate over every page in the index, run
+        on every loop, and at 182,000 pages it ran past the statement timeout
+        and took the crawl loop with it — the loop logs and continues, so the
+        crawler sat idle while `/health` reported healthy. The ceiling is
+        enforced where it is cheap: `pending_batch` drops capped hosts from the
+        batch it just built, from one count query for the domains in hand.
         """
         domain_clause = ""
         domain_args: list[Any] = []
@@ -1055,11 +1063,6 @@ class IndexStore:
             "  SELECT id FROM crawl_queue"
             "  WHERE status = 'processed'"
             "    AND (processed_at IS NULL OR processed_at <= now() + ?::interval)"
-            "    AND domain NOT IN ("
-            "      SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id"
-            "      GROUP BY s.domain HAVING COUNT(*) >= "
-            f"      ({_host_limit_sql('s.domain')})"
-            "    )"
             f"{domain_clause}"
             "  ORDER BY COALESCE(processed_at, '1970-01-01 00:00:00') ASC"
             "  LIMIT ?"
@@ -1091,11 +1094,6 @@ class IndexStore:
             " AND processed_at IS NOT NULL AND processed_at <= now() + ?::interval "
             " AND (last_error = 'timeout' OR last_error LIKE 'http_error:%' "
             " OR last_error LIKE 'http_status:5%') "
-            " AND domain NOT IN ("
-            "   SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id"
-            "   GROUP BY s.domain HAVING COUNT(*) >= "
-            f"   ({_host_limit_sql('s.domain')})"
-            " )"
             " ORDER BY processed_at ASC LIMIT ?)",
             (
                 int(max_retries),
