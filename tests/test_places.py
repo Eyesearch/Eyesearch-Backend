@@ -199,3 +199,33 @@ async def test_a_large_site_keeps_the_full_page_body(client):
     # hold, not the exact length every body ends at.
     assert longest >= 2000
     assert longest <= 2048
+
+
+@pytest.mark.parametrize(
+    "question,name",
+    [
+        ("eshram card download", "eshram"),
+        ("crop insurance", "pmfby"),
+        ("bhoomi rtc", "bhoomi"),
+        ("train running status", "ntes"),
+        ("mudra loan", "mudra"),
+        ("health id", "abha"),
+        ("pm kisan status", "pm kisan"),
+    ],
+)
+def test_the_entity_table_covers_what_people_ask_for(question, name):
+    """Each entry bridges a question and a page that share no useful word."""
+    from app.engine.entities import detect
+
+    entity = detect(question)
+    assert entity is not None, f"{question} names nothing"
+    assert entity.name == name
+
+
+def test_every_entity_names_at_least_one_domain():
+    """An entry with no domain boosts nothing and would answer nothing."""
+    from app.engine.entities import ENTITIES
+
+    for entity in ENTITIES:
+        assert entity.domains, f"{entity.name} has no domain"
+        assert all("." in domain for domain in entity.domains), entity.name

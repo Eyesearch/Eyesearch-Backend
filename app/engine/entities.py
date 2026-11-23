@@ -57,6 +57,39 @@ ENTITIES: tuple[Entity, ...] = (
     Entity("supreme court", ("sci.gov.in",), ("judgment", "case status")),
     Entity("ecourts", ("ecourts.gov.in",), ("case status", "court case")),
     Entity("gazette", ("egazette.gov.in", "egazette.nic.in"), ("gazette notification",)),
+    # --- the rest of what people actually ask for -------------------------
+    # Added because each of these is a question someone types and a page that
+    # says something else: "eshram card" and "e-Shram: One Nation One
+    # Ration Card" share no word worth matching on.
+    Entity("eshram", ("eshram.gov.in",), ("e shram", "e-shram", "unorganised worker")),
+    Entity("umang", ("umang.gov.in",), ("umang app",)),
+    Entity("esic", ("esic.gov.in",), ("esic", "employees state insurance")),
+    Entity("jansuraksha", ("jansuraksha.gov.in",), ("pmjjby", "pmsby", "suraksha bima")),
+    Entity("nps", ("npscra.nsdl.co.in", "pfrda.org.in"), ("national pension", "pension scheme", "atal pension")),
+    Entity("irdai", ("irdai.gov.in",), ("insurance regulator",)),
+    Entity("gem", ("gem.gov.in",), ("government e marketplace", "gem portal")),
+    Entity("enam", ("enam.gov.in",), ("e nam", "national agriculture market", "mandi online")),
+    Entity("pmfby", ("pmfby.gov.in",), ("crop insurance", "fasal bima")),
+    Entity("jan dhan", ("pmjdy.gov.in",), ("pmjdy", "jan dhan yojana", "bank account scheme")),
+    Entity("pm awas", ("pmaymis.gov.in",), ("pmay", "awas yojana", "housing scheme")),
+    Entity("ujjwala", ("pmuy.gov.in",), ("pmuy", "lpg connection", "gas connection")),
+    Entity("jal jeevan", ("jaljeevanmission.gov.in",), ("jal jeevan", "water connection", "nal se jal")),
+    Entity("swachh bharat", ("swachhbharatmission.gov.in",), ("swachh bharat", "toilet scheme")),
+    Entity("mudra", ("mudra.org.in",), ("mudra loan", "shishu loan")),
+    Entity("standup india", ("standupmitra.in",), ("stand up india", "standupmitra")),
+    Entity("abha", ("abha.abdm.gov.in",), ("abha card", "health id", "abdm")),
+    Entity("vahan", ("vahan.parivahan.gov.in",), ("vahan", "vehicle registration status")),
+    Entity("sarathi", ("sarathi.parivahan.gov.in",), ("sarathi", "licence status", "learning licence")),
+    Entity("ntes", ("ntes.indianrailways.gov.in",), ("ntes", "train running status", "train enquiry")),
+    Entity("fastag", ("nhai.gov.in",), ("fastag", "toll")),
+    Entity("bsnl", ("bsnl.co.in",), ("bsnl", "landline bill")),
+    Entity("aiims", ("aiims.edu",), ("aiims", "hospital appointment")),
+    Entity("soil health", ("soilhealth.dac.gov.in",), ("soil health card", "soil card")),
+    Entity("ration card", ("nfsa.gov.in",), ("ration card", "food security", "pds")),
+    # Karnataka's own portals, because that is where this index started and the
+    # state's services are named differently from the centre's.
+    Entity("karnataka one", ("karnatakaone.gov.in",), ("karnataka one", "seva sindhu", "karnataka services")),
+    Entity("bhoomi", ("bhoomi.karnataka.gov.in",), ("bhoomi", "land records", "rtc", "pahani")),
 )
 
 
