@@ -339,11 +339,15 @@ OPEN_PATHS: tuple[str, ...] = ("/", "/health", "/healthz", "/ready", "/opensearc
 #: browser calls, and a static page cannot keep a secret — putting a key in it
 #: publishes the key. They are held to 60 requests a minute per address instead.
 #: Everything below is the machine contract, and that is what a key is for.
+#: `/v1/chat` is deliberately absent. The AI Mode panel in `web/` posts to it
+#: from the browser with no headers, exactly as it calls `/v1/search`, so a key
+#: there means the panel answers 401 to every reader. A static page cannot keep
+#: a secret: a key compiled into the JavaScript is a published key. It is held to
+#: the same per-address limit as search instead.
 KEYED_PREFIXES: tuple[str, ...] = (
     "/v1/answer",
     "/v1/live",
     "/v1/retrieve",
-    "/v1/chat",
     "/v1/ai/",
     "/v1/stats",
 )

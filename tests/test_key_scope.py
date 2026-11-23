@@ -19,14 +19,20 @@ def _needs_key(path: str) -> bool:
     return any(path.startswith(prefix) for prefix in KEYED_PREFIXES)
 
 
-@pytest.mark.parametrize("path", ["/v1/search", "/v1/suggest"])
+@pytest.mark.parametrize("path", ["/v1/search", "/v1/suggest", "/v1/chat"])
 def test_the_browser_paths_do_not_need_a_key(path):
+    """The web client sends no headers, so a key here is a published key.
+
+    `/v1/chat` was left keyed when `/v1/search` was opened, and the AI Mode
+    panel posts to it from the browser — so the panel answered 401 to every
+    reader while the rest of the site worked.
+    """
     assert _needs_key(path) is False
 
 
 @pytest.mark.parametrize(
     "path",
-    ["/v1/answer", "/v1/live", "/v1/retrieve", "/v1/chat", "/v1/ai/search", "/v1/stats"],
+    ["/v1/answer", "/v1/live", "/v1/retrieve", "/v1/ai/search", "/v1/stats"],
 )
 def test_the_machine_paths_need_a_key(path):
     assert _needs_key(path) is True
