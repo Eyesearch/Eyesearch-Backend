@@ -36,12 +36,7 @@ from app.database import initialize_database, verify_writable
 from app.engine.config import Settings, describe_database_target, get_settings
 from app.engine.entities import detect as detect_entity
 from app.engine.store import IndexStore
-from app.live import answer as live_answer
-from app.live import compose as live_compose
-from app.live.router import route as live_route
 from app.security import KeyLimiter, record_call, verify_key
-from app.live import store as live_store
-from app.live.registry import source_health as live_health
 from app.indexer.scheduler import WorkerHandles, start_workers, stop_workers
 from app.libsql_http import (
     LibsqlClient,
@@ -51,6 +46,7 @@ from app.libsql_http import (
 )
 from app.indexer.rate_limit import TokenBucketLimiter
 from app.orchestrator import Orchestrator
+from app.services import answers
 from app.services.search_service import SearchService, sanitise_query
 
 logger = logging.getLogger(__name__)
@@ -346,7 +342,6 @@ OPEN_PATHS: tuple[str, ...] = ("/", "/health", "/healthz", "/ready", "/opensearc
 #: the same per-address limit as search instead.
 KEYED_PREFIXES: tuple[str, ...] = (
     "/v1/answer",
-    "/v1/live",
     "/v1/retrieve",
     "/v1/ai/",
     "/v1/stats",
@@ -494,7 +489,6 @@ async def root() -> dict[str, Any]:
         "endpoints": [
             "/v1/search?q=&category=&lang=",
             "/v1/answer?q=",
-            "/v1/live?key=",
             "/v1/suggest",
             "/v1/retrieve",
             "/v1/chat",
@@ -610,19 +604,6 @@ async def ready(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
-def live_is_on(request: Request) -> bool:
-    """Whether the live layer answers at all.
-
-    `LIVE_ENABLED` used to gate only the feed agent, so setting it false stopped
-    the refresh and left the API routing every gold and weather question to a
-    table that no longer changed — stale values presented as live. The switch
-    now turns the layer off end to end: no feed, and every question answered
-    from the page index.
-    """
-    settings = getattr(request.app.state, "settings", None)
-    return bool(getattr(settings, "live_enabled", True))
-
-
 @app.get("/v1/search")
 async def search(
     request: Request,
@@ -700,22 +681,6 @@ async def _retrieve_payload(
 ):
     query = require_query(raw_query)
 
-    # A question a live source can answer is answered from it, not from a page
-    # that happens to mention the subject. `/v1/answer` has done this since the
-    # router landed; `/v1/retrieve` is the endpoint the AI tab calls, so without
-    # this the chat answered "gold price" with a link to a page about gold.
-    routed = live_route(query) if live_is_on(request) else live_route("")
-    if routed.kind != "index":
-        live_payload = await live_compose.from_live(request.app.state.client, routed)
-        if live_payload is not None:
-            live_payload["route"] = routed.as_dict()
-            if output_format == "markdown":
-                return PlainTextResponse(
-                    content=live_compose.as_markdown(live_payload),
-                    media_type="text/markdown; charset=utf-8",
-                )
-            return JSONResponse(content=live_payload)
-
     service = get_service(request)
     payload = await service.retrieve(query, limit=limit, format=output_format)
     if isinstance(payload, str):
@@ -776,24 +741,6 @@ def sse(event: dict[str, Any]) -> str:
 async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     query = require_query(body.query)
 
-    # The chat is the one surface a reader actually talks to, and it was the
-    # last one still answering every question from the page index — "gold
-    # price" came back as a link to a page about gold while `/v1/answer` had
-    # the live value. A live question is answered from the live layer here too.
-    routed = live_route(query) if live_is_on(request) else live_route("")
-    if routed.kind != "index":
-        live_payload = await live_compose.from_live(request.app.state.client, routed)
-        if live_payload is not None:
-            live_payload["route"] = routed.as_dict()
-            answer = live_compose.as_markdown(live_payload)
-            sources = (
-                [{"title": live_payload.get("answer") or live_payload.get("key", ""),
-                  "url": live_payload.get("source", "")}]
-                if live_payload.get("answer")
-                else []
-            )
-            return _chat_stream(answer, sources)
-
     service = get_service(request)
     payload = await service.search(query, limit=5)
     results = payload.get("results", [])
@@ -828,33 +775,6 @@ def _chat_stream(answer: str, sources: list[dict[str, str]]) -> StreamingRespons
 # ---------------------------------------------------------------------------
 
 
-@app.get("/v1/live")
-async def live_get(
-    request: Request,
-    key: str = Query(default="", description="Exact fact key, e.g. weather.bengaluru.temperature"),
-    prefix: str = Query(default="", description="List every fact whose key starts with this"),
-    limit: int = Query(default=100, ge=1, le=500),
-):
-    """A value that is true now, with the time it was true.
-
-    Deliberately not `/v1/search`: a price is looked up by key, not ranked, and
-    a caller that gets a ranked list of pages for "today's gold price" will
-    read yesterday's number out of one of them. Every answer carries `as_of`
-    and `freshness` so a caller can say when it was true instead of guessing.
-    """
-    client = request.app.state.client
-    if key:
-        item = await live_store.fact(client, key)
-        if item is None:
-            return JSONResponse(content=live_answer.missing_answer(key), status_code=404)
-        return JSONResponse(content=live_answer.fact_answer(item))
-
-    items = await live_store.all_facts(client, prefix=prefix, limit=limit)
-    payload = live_answer.facts_answer(items)
-    payload["sources"] = [entry.as_dict() for entry in await live_health(client)]
-    return JSONResponse(content=payload)
-
-
 @app.get("/v1/answer")
 async def answer_get(
     request: Request,
@@ -869,14 +789,6 @@ async def answer_get(
     table and pages in another, and it can always say how old the answer is.
     """
     query = require_query(q)
-    client = request.app.state.client
-    routed = live_route(query) if live_is_on(request) else live_route("")
-
-    live_answer_payload = await live_compose.from_live(client, routed)
-    if live_answer_payload is not None:
-        live_answer_payload["route"] = routed.as_dict()
-        return JSONResponse(content=live_answer_payload)
-
     service = get_service(request)
     payload = await service.search(query, limit=limit)
     results = payload.get("results", [])
@@ -887,7 +799,7 @@ async def answer_get(
     official = (
         {"name": entity.name, "domain": entity.domains[0]} if entity is not None else None
     )
-    composed = live_compose.from_index(results, query, official=official)
+    composed = answers.from_index(results, query, official=official)
     composed["route"] = routed.as_dict()
     return JSONResponse(content=composed)
 

@@ -52,4 +52,6 @@ async def test_the_service_index_lists_the_endpoints_it_serves():
     payload = await root()
 
     assert "/v1/answer?q=" in payload["endpoints"]
-    assert "/v1/live?key=" in payload["endpoints"]
+    assert "/v1/suggest" in payload["endpoints"]
+    # `/v1/live` is gone with the live layer; the index lists what it serves.
+    assert "/v1/live?key=" not in payload["endpoints"]

@@ -88,16 +88,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     cors_origins: str = "*"
 
-    # --- Live facts ---------------------------------------------------------
-    #: Whether the live feed runs at all. Separate from the crawler switches:
-    #: live facts and crawled pages are independent systems, and turning one
-    #: off must not turn the other off.
-    live_enabled: bool = True
-    #: Seconds between live passes. Fifteen minutes is faster than IBJA
-    #: publishes (twice a working day) and slower than a price moves.
-    live_fetch_interval_seconds: float = 900.0
-    #: Facts held before the oldest are dropped. 20,000 is a few megabytes.
-    live_max_facts: int = 20000
+    # --- Live facts: removed ------------------------------------------------
+    #: The live layer was taken out on request: gold, weather, currency, news,
+    #: air quality and holidays were a second system with its own tables,
+    #: sources and failure modes, and the product is the page index. Every
+    #: question is answered from `pages` now.
+    #:
+    #: The `live_facts` and `live_sources` tables are left in the schema. They
+    #: hold a few hundred kilobytes of cache and dropping them buys nothing;
+    #: `DROP TABLE live_facts, live_sources;` is the whole removal if wanted.
     public_base_url: str = ""
     #: The human-facing site, for the OpenSearch descriptor. A browser sends its
     #: own query with no headers, so the descriptor must point at a page that
