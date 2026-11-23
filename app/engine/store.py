@@ -865,6 +865,14 @@ class IndexStore:
             " processed_at = CURRENT_TIMESTAMP"
             " WHERE status = 'pending' AND domain IN ("
             "  SELECT s.domain FROM sites s JOIN pages p ON p.site_id = s.site_id "
+            # Only the domains that actually have rows waiting. Without this the
+            # aggregate ran over every page of every site in the index, and at
+            # 182,000 pages it ran past the statement timeout — so the sweep that
+            # exists to unstick a stalled crawl was itself the thing that stalled
+            # it, and the loop logged and continued with nothing done.
+            "  WHERE s.domain IN ("
+            "    SELECT domain FROM crawl_queue WHERE status = 'pending'"
+            "  )"
             f"  GROUP BY s.domain HAVING {having}"
             ")",
             (int(cap),) if cap is not None else (),
