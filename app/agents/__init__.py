@@ -35,7 +35,6 @@ AGENT_MODULES: tuple[str, ...] = (
 LIVE_AGENTS: tuple[str, ...] = (
     # Prices, weather and headlines: a separate system from the crawl, sharing
     # only the database.
-    "31_live_feed_agent",
 )
 
 

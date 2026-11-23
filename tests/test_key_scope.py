@@ -32,7 +32,7 @@ def test_the_browser_paths_do_not_need_a_key(path):
 
 @pytest.mark.parametrize(
     "path",
-    ["/v1/answer", "/v1/live", "/v1/retrieve", "/v1/ai/search", "/v1/stats"],
+    ["/v1/answer", "/v1/retrieve", "/v1/ai/search", "/v1/stats"],
 )
 def test_the_machine_paths_need_a_key(path):
     assert _needs_key(path) is True

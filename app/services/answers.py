@@ -1,62 +1,14 @@
-"""One answer from whichever layer can honestly give it.
+"""How an index answer is shaped and rendered.
 
-The reader asked a question, not a question about our architecture. This turns a
-routed question into a single response: a live value when a live source can
-answer it, the index when it cannot, and always with the age and the origin on
-the front so a caller can say "as of" instead of guessing.
+This was `app/live/compose.py`, which also chose between a live value and a
+page. The live layer is gone; what remains is the part that describes a page
+answer honestly — `answer: null`, the title and url as a source to cite, and
+the markdown a model can read without parsing fields it was never told about.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-from app.live.answer import fact_answer
-from app.live.router import Route
-from app.live.store import all_facts, fact
-
-#: Headlines returned for a news question.
-NEWS_LIMIT = 5
-
-
-async def from_live(client, routed: Route) -> dict[str, Any] | None:
-    """The live answer for a routed question, or None when there is not one."""
-    if routed.kind == "news":
-        # The edition the question named, or every edition when it named none.
-        prefix = f"news.{routed.key}." if routed.key else "news."
-        items = await all_facts(client, prefix=prefix, limit=NEWS_LIMIT)
-        if not items and routed.key:
-            items = await all_facts(client, prefix="news.", limit=NEWS_LIMIT)
-        if not items:
-            return None
-        return {
-            "kind": "news",
-            "count": len(items),
-            # A caller that reads `answer` should not have to know that news
-            # arrives as a list; the newest headline answers the question.
-            "answer": items[0].value,
-            "answers": [fact_answer(item) for item in items],
-            "freshness": "live" if any(item.fresh for item in items) else "stale",
-            "as_of": items[0].fetched_at,
-            "source": "news",
-        }
-
-    if not routed.key:
-        return None
-
-    item = await fact(client, routed.key)
-    if item is None:
-        return None
-
-    answer = fact_answer(item)
-    answer["kind"] = routed.kind
-    if routed.kind == "currency" and answer["unit"] == "rate":
-        # "94.25 rate" is not an answer to "dollar rate". An exchange rate has
-        # a base, a quote and a direction, and the reader needs all three.
-        quoted = routed.key.rsplit(".", 1)[-1].upper() if routed.key else ""
-        answer["answer"] = f"1 USD = {item.value} {quoted}".strip()
-        answer["base"] = "USD"
-        answer["quote"] = quoted
-    return answer
 
 
 def from_index(

@@ -40,11 +40,11 @@ def module_name(path: str) -> str:
     return relative[:-3].replace(os.sep, ".")
 
 
-def test_there_are_fifty_four_agents():
-    # 45 numbered local agents + 9 federated: the six originals, the blender,
-    # and the Wikidata and SearXNG couriers. The forty-fifth is the live feed,
-    # which runs beside the crawl rather than inside it.
-    assert len(agent_files()) == 54
+def test_there_are_fifty_three_agents():
+    # 44 numbered local agents + 9 federated: the six originals, the blender,
+    # and the Wikidata and SearXNG couriers. The count dropped by one when the
+    # live feed was removed — it ran beside the crawl and no longer exists.
+    assert len(agent_files()) == 53
 
 
 @pytest.mark.parametrize("path", agent_files(), ids=os.path.basename)
