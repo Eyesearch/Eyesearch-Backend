@@ -1194,11 +1194,41 @@ class IndexStore:
         # set, which the status index serves — and each domain offers its next
         # few rows through a LATERAL join, so the `pages` probe runs a handful
         # of times per domain rather than once per queued row.
+        # The domain window is walked, not taken once. `DISTINCT domain ...
+        # ORDER BY domain LIMIT 40` returns the alphabetically first forty, and
+        # if those forty have nothing eligible — their pending URLs are all
+        # already indexed, or all re-armed — the batch comes back empty while
+        # thirty-two thousand eligible rows sit further down the alphabet. The
+        # crawl then looks alive, logs no error, and indexes nothing, which is
+        # exactly what it did for two days.
+        window = max(limit, limit * 4)
+        collected: list[tuple] = []
+        for offset in range(0, window * 5, window):
+            rows = await self._pending_window(window, limit, offset)
+            collected.extend(rows)
+            if len(collected) >= window:
+                break
+
+        candidates = [
+            QueuedUrl(
+                rowid=int(row[0]),
+                url=str(row[1]),
+                domain=str(row[2]),
+                retry_count=int(row[3] or 0),
+            )
+            for row in collected
+        ]
+        return await self._drop_capped(candidates, limit)
+
+    async def _pending_window(
+        self, window: int, per_domain: int, offset: int
+    ) -> list[tuple]:
+        """One page of the round-robin: `window` domains, `per_domain` rows each."""
         result = await self._client.execute(
             "WITH ready AS ("
             "  SELECT DISTINCT domain FROM crawl_queue "
             "  WHERE status = 'pending' AND domain <> '' "
-            "  ORDER BY domain LIMIT ?"
+            "  ORDER BY domain LIMIT ? OFFSET ?"
             "), picked AS ("
             "  SELECT cq.id, cq.url, cq.domain, cq.retry_count, cq.priority FROM ready "
             "  JOIN LATERAL ("
@@ -1224,22 +1254,19 @@ class IndexStore:
             # The domains to consider, how many rows each offers, and the batch.
             # The window function then runs over a few hundred rows instead of
             # every pending row in the queue.
-            (max(limit, limit * 4), limit, max(limit, limit * 4)),
+            (window, offset, per_domain, window),
         )
-        candidates = [
-            QueuedUrl(
-                rowid=int(row[0]),
-                url=str(row[1]),
-                domain=str(row[2]),
-                retry_count=int(row[3] or 0),
-            )
-            for row in result.rows
-        ]
+        return [tuple(row) for row in result.rows]
 
-        # Drop the hosts that are already at their ceiling. The check is one
-        # count query for the domains actually in this batch, not an aggregate
-        # over every page in the index — that aggregate ran past the statement
-        # timeout at 74k pages and stalled the crawl loop.
+    async def _drop_capped(
+        self, candidates: list[QueuedUrl], limit: int
+    ) -> list[QueuedUrl]:
+        """Drop the hosts that are already at their ceiling.
+
+        The check is one count query for the domains actually in this batch,
+        not an aggregate over every page in the index — that aggregate ran past
+        the statement timeout at 74k pages and stalled the crawl loop.
+        """
         domains = list(dict.fromkeys(item.domain for item in candidates if item.domain))
         counts = await self.domain_page_counts(domains)
         kept: list[QueuedUrl] = []

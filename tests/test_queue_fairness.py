@@ -11,6 +11,8 @@ drifted elsewhere.
 
 from __future__ import annotations
 
+import pytest
+
 from app.agents import load_agent
 from app.database import initialize_database, verify_writable
 from app.engine.config import Settings
@@ -444,3 +446,49 @@ def test_the_slots_a_domain_gets_come_from_its_suffix():
     assert _domain_slots("mgnrega.nic.in") == 3
     assert _domain_slots("iitk.ac.in") == 1
     assert _domain_slots("flipkart.com") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_batch_is_not_empty_when_the_first_domains_have_nothing_eligible(
+    client, store
+):
+    """The window must be walked, not taken once.
+
+    `DISTINCT domain ORDER BY domain LIMIT 40` returns the alphabetically first
+    forty. When those forty have no eligible rows — their pending URLs are all
+    already indexed — the batch came back empty while thousands of eligible rows
+    sat further down the alphabet. The crawl looked alive, logged no error, and
+    indexed nothing for two days.
+    """
+    from app.engine.store import PageDocument
+
+    # Sixty domains whose only pending row is already indexed, all sorting
+    # before the domain that has real work.
+    blocked = [f"aaa{i:02d}.example.in" for i in range(60)]
+    await store.persist_batch(
+        [
+            PageDocument(
+                url=f"https://{domain}/page",
+                domain=domain,
+                title="T",
+                description="d",
+                body_text="body text for the page " * 10,
+                digest=f"digest-{domain}",
+            )
+            for domain in blocked
+        ]
+    )
+    for domain in blocked:
+        await client.execute(
+            "INSERT INTO crawl_queue (url, domain, status, priority) "
+            "VALUES (?, ?, 'pending', 5)",
+            (f"https://{domain}/page", domain),
+        )
+    await client.execute(
+        "INSERT INTO crawl_queue (url, domain, status, priority) "
+        "VALUES ('https://zzz.example.in/fresh', 'zzz.example.in', 'pending', 5)"
+    )
+
+    batch = await store.pending_batch(limit=5)
+
+    assert [item.url for item in batch] == ["https://zzz.example.in/fresh"]
