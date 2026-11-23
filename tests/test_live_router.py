@@ -237,3 +237,28 @@ def test_a_missing_answer_without_an_entity_says_only_that():
 
     assert payload["freshness"] == "missing"
     assert "official" not in payload
+
+
+def test_the_live_switch_turns_the_whole_layer_off():
+    """`LIVE_ENABLED` used to gate only the feed agent.
+
+    The refresh stopped and every gold and weather question was still routed to
+    a table that no longer changed, so a stale number was served as if it were
+    live. The switch now decides whether the API consults the live layer at all.
+    """
+    from types import SimpleNamespace
+
+    from app.engine.config import Settings
+    from app.main import live_is_on
+
+    def request(live_enabled: bool):
+        settings = Settings(_env_file=None, live_enabled=live_enabled)
+        return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
+
+    assert live_is_on(request(True)) is True
+    assert live_is_on(request(False)) is False
+
+
+def test_an_empty_route_is_the_index():
+    """What the API falls back to when the live layer is off."""
+    assert route("").kind == "index"

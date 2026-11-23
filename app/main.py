@@ -610,6 +610,19 @@ async def ready(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 
+def live_is_on(request: Request) -> bool:
+    """Whether the live layer answers at all.
+
+    `LIVE_ENABLED` used to gate only the feed agent, so setting it false stopped
+    the refresh and left the API routing every gold and weather question to a
+    table that no longer changed — stale values presented as live. The switch
+    now turns the layer off end to end: no feed, and every question answered
+    from the page index.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    return bool(getattr(settings, "live_enabled", True))
+
+
 @app.get("/v1/search")
 async def search(
     request: Request,
@@ -691,7 +704,7 @@ async def _retrieve_payload(
     # that happens to mention the subject. `/v1/answer` has done this since the
     # router landed; `/v1/retrieve` is the endpoint the AI tab calls, so without
     # this the chat answered "gold price" with a link to a page about gold.
-    routed = live_route(query)
+    routed = live_route(query) if live_is_on(request) else live_route("")
     if routed.kind != "index":
         live_payload = await live_compose.from_live(request.app.state.client, routed)
         if live_payload is not None:
@@ -767,7 +780,7 @@ async def chat(request: Request, body: ChatRequest) -> StreamingResponse:
     # last one still answering every question from the page index — "gold
     # price" came back as a link to a page about gold while `/v1/answer` had
     # the live value. A live question is answered from the live layer here too.
-    routed = live_route(query)
+    routed = live_route(query) if live_is_on(request) else live_route("")
     if routed.kind != "index":
         live_payload = await live_compose.from_live(request.app.state.client, routed)
         if live_payload is not None:
@@ -857,7 +870,7 @@ async def answer_get(
     """
     query = require_query(q)
     client = request.app.state.client
-    routed = live_route(query)
+    routed = live_route(query) if live_is_on(request) else live_route("")
 
     live_answer_payload = await live_compose.from_live(client, routed)
     if live_answer_payload is not None:
